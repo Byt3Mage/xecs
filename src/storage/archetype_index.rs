@@ -18,6 +18,11 @@ impl ArchetypeId {
             ver: 1
         }
     }
+
+    #[inline]
+    pub const fn is_null(&self) -> bool {
+        self.idx == core::u32::MAX
+    }
 }
 
 /// Either contains [Archetype] data or the next free index.

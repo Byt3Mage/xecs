@@ -173,7 +173,7 @@ impl ArchetypeData {
         // SAFETY: 
         // * Pointer offset properly calculated.
         // * NonNull ptr safe to write.
-        unsafe { std::ptr::write(self.entities.as_ptr().add(self.len), entity); }
+        unsafe { self.entities.as_ptr().add(self.len).write(entity); }
 
         let row = self.len; self.len += 1;
         row
@@ -196,11 +196,11 @@ impl ArchetypeData {
         // - The caller ensures that `row` is valid.
         // - The caller ensures that `value` matches the type of the column.
         unsafe {
-            let column = self.columns.get_unchecked_mut(column);
-            let size = column.type_info.size();
-            let drop_fn = column.type_info.hooks.drop_fn;
-            let move_fn = column.type_info.hooks.move_fn;
-            let dst = column.data.add(row * size);
+            let col = self.columns.get_unchecked_mut(column);
+            let ti = &col.type_info;
+            let size = ti.size();
+            let drop_fn = ti.hooks.drop_fn;
+            let dst = col.data.add(row * size);
 
             // This closure will run in case `drop(dst)` panics, ensuring `value` is not forgotten.
             let on_unwind = OnDrop::new(||drop_fn(value));
@@ -210,7 +210,7 @@ impl ArchetypeData {
             // safe to forget, drop didn't panic.
             core::mem::forget(on_unwind);
 
-            move_fn(value, dst);
+            (ti.hooks.move_fn)(value, dst);
         }
     }
 
@@ -260,8 +260,7 @@ impl ArchetypeData {
     /// Deletes the row by swapping with the last row 
     /// and returns the entity that was in the last row 
     /// or `None` if `row` was the last.
-    pub(super) fn delete_row(&mut self, entity_index: &mut EntityIndex, row: usize, should_drop: Vec<bool>)
-    {
+    pub(super) fn delete_row(&mut self, entity_index: &mut EntityIndex, row: usize, should_drop: Vec<bool>) {
         debug_assert!(row < self.len, "row out of bounds");
         debug_assert!(self.columns.len() == should_drop.len());
 
@@ -271,9 +270,6 @@ impl ArchetypeData {
             // Check is done outside loop to avoid doing the same check for all columns.
             if row != last {
                 swap_entities(&mut self.entities, row, last);
-
-                // TODO: check if this is necessary.
-                self.entities.add(last).write(0);
 
                 // Drop the values in row, then move values from last row into row.
                 for (i, col) in self.columns.iter().enumerate() {
@@ -293,11 +289,11 @@ impl ArchetypeData {
                 // Allowed to panic since last row must contain a valid entity.
                 let record = entity_index.get_record_mut(self.get_entity_unchecked(row)).unwrap();
                 record.location.row = row;
+
+                // TODO: check if this is necessary.
+                self.entities.add(last).write(0);
             }
             else {
-                // TODO: check if this is necessary.
-                self.entities.add(row).write(0);
-
                 // Simply drop the values in the last row
                 for (i, col) in self.columns.iter().enumerate() {
                     let ti = &col.type_info;
@@ -308,6 +304,9 @@ impl ArchetypeData {
                         (ti.hooks.drop_fn)(row_ptr); 
                     }
                 }
+
+                // TODO: check if this is necessary.
+                self.entities.add(row).write(0);
             }
         }
 

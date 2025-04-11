@@ -214,7 +214,7 @@ fn init_archetype_flags(world: &World, ty: &Type) -> ArchetypeFlags {
                     let tgt = world.entity_index.get_alive(pair_second(id));
                     assert!(tgt != 0);
                     
-                    if world.has_id( tgt, ECS_MODULE)
+                    if world.has(tgt, ECS_MODULE)
                     {
                         /* If table contains entities that are inside one of the 
                          * builtin modules, it contains builtin entities */
@@ -246,7 +246,7 @@ fn new_archetype(world: &mut World, ty: Type) -> ArchetypeId {
 
 pub fn ensure_archetype(world: &mut World, ty: Type) -> ArchetypeId {
     if ty.id_count() == 0 {
-        world.root_archetype
+        world.root_arch
     }
     else {
         world.archetype_map.get(&ty).copied().unwrap_or_else(||new_archetype(world, ty))

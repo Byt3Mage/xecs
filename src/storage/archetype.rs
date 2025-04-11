@@ -19,15 +19,17 @@ fn column_to_id(arch: &Archetype, column: usize) -> Id {
     arch.type_[arch.column_map[column]]
 }
 
-/// Moves matching columns from `src` to `dst`.
+/// Moves entity from src archetype to dst.
 /// 
 /// # Safety
 /// - `src_row` must be a valid row in `src`. 
 /// - `asrc_id` and `adst_id` must not be the same archetype.
-pub fn move_entity(world: &mut World, entity: Entity, asrc_id: ArchetypeId, src_row: usize, adst_id: ArchetypeId) {
+pub unsafe fn move_entity(world: &mut World, entity: Entity, asrc_id: ArchetypeId, src_row: usize, adst_id: ArchetypeId) {
     debug_assert!(asrc_id != adst_id, "Source and destination archetypes are the same");
 
     let [src, dst] = world.archetypes.get_multi_mut([asrc_id, adst_id]);
+    
+    debug_assert!(src_row < src.data.count(), "row out of bounds");
     
     let dst_row = unsafe { dst.data.new_row_uninit(entity) };
     let mut i_src = 0; let src_col_count = src.data.columns.len();
@@ -84,4 +86,29 @@ pub fn move_entity(world: &mut World, entity: Entity, asrc_id: ArchetypeId, src_
 
     // Update entity location after running remove actions.
     world.entity_index.set_location(entity, EntityLocation::new(adst_id, dst_row));
+}
+
+pub(crate) fn move_entity_to_root(world: &mut World, entity: Entity) {
+    debug_assert!(world.root_arch.is_null() == false, "World must initialize a root archetype");
+
+    let EntityLocation{arch, row} = world.entity_index.get_location(entity).unwrap();
+
+    if arch.is_null() {
+        let root_arch = world.archetypes.get_mut(world.root_arch).unwrap();
+
+        debug_assert!(root_arch.data.columns.is_empty(), "INTERNAL ERROR: root archetype should not contain columns");
+
+        // SAFETY: root archetype should never contain columns, so only the entity array is initialized. 
+        let new_row = unsafe { root_arch.data.new_row_uninit(entity) };
+
+        world.entity_index.set_location(entity, EntityLocation::new(root_arch.id, new_row));
+    }
+    else if arch != world.root_arch {
+        // SAFETY:
+        // - row is valid in enitity index.
+        // - we just checked that arch and root_arch are not the same.
+        unsafe {
+            move_entity(world, entity, arch, row, world.root_arch);
+        }
+    }
 }
