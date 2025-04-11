@@ -1,0 +1,8 @@
+[package]
+name = "xecs"
+version = "0.1.0"
+edition = "2024"
+description = "eXtended ecs"
+
+[dependencies]
+const-assert = {git = "https://github.com/aquarius2019/const-assert.git"}
