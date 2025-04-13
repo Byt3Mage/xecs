@@ -1,7 +1,7 @@
 use std::{mem::{ManuallyDrop, MaybeUninit}, rc::Rc};
 use crate::{component::ComponentLocation, graph::GraphNode, storage::archetype::Archetype, type_info::Type, world::World};
 
-use super::{archetype_data::Column, archetype_flags::ArchetypeFlags};
+use super::{archetype_data::{ArchetypeData, Column}, archetype_flags::ArchetypeFlags};
 
 /// Stable, non-recycled handle into [ArchetypeIndex].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -50,10 +50,6 @@ impl ArchetypeIndex {
             free_head: 0,
             len: 0
         }
-    }
-
-    pub fn new() -> Self {
-        Self::with_capacity(0)
     }
 
     fn insert_with_id<F>(&mut self, f: F) -> ArchetypeId 
@@ -180,7 +176,7 @@ impl ArchetypeIndex {
 pub(crate) struct ArchetypeBuilder<'a> {
     world: &'a mut World,
     flags: ArchetypeFlags,
-    ty: Type,
+    type_: Type,
     node: GraphNode,
 }
 
@@ -189,45 +185,51 @@ impl <'a> ArchetypeBuilder<'a> {
         Self {
             world,
             flags: ArchetypeFlags::empty(),
-            ty: type_ids,
+            type_: type_ids,
             node: GraphNode::new(),
         }
     }
 
-    pub(crate) fn flags(mut self, flags: ArchetypeFlags) -> Self {
-        self.flags = flags;
-        self
-    }
-
-    pub(crate) fn with_flag(mut self, flag: ArchetypeFlags) -> Self {
-        self.flags |= flag;
+    pub(crate) fn with_flags(mut self, flags: ArchetypeFlags) -> Self {
+        self.flags |= flags;
         self
     }
 
     pub(crate) fn build(self) -> ArchetypeId {
         self.world.archetypes.insert_with_id(|arch_id| {
-            let id_count = self.ty.id_count();
-            let mut columns = Vec::with_capacity(id_count);
-            let mut component_map = Vec::with_capacity(id_count);
+            let ty_count = self.type_.id_count();
+            let mut columns = Vec::with_capacity(ty_count);
+            let mut component_map = Vec::with_capacity(ty_count);
+            let mut column_map = Vec::with_capacity(ty_count);
 
-            for (idx, id) in self.ty.iter().enumerate() {
+            for (idx, id) in self.type_.iter().enumerate() {
                 let mut location = ComponentLocation{ id_index: idx, id_count: 1, column_index: None };
     
                 // Component contains type_info, initialize a column for it.
                 if let Some(type_info)  = self.world.type_infos.get(id) {
-                    columns.push(Column::new(Rc::clone(type_info), None));
-    
+                    columns.push(Column::new(Rc::clone(type_info)));
+                    column_map.push(idx);
+                    
                     let col_idx = Some(columns.len() - 1);
+                    location.column_index = col_idx;
                     component_map.push(col_idx);
-                    location.column_index = col_idx
                 }
     
-                let component_record = self.world.component_index.get_mut(id).unwrap();
+                // TODO: create component record.
+                let component_record = self.world.components.get_mut(id).unwrap();
     
                 component_record.archetypes.insert(arch_id, location);
             }
 
-            todo!()
+            Archetype {
+                id: arch_id,
+                flags: self.flags,
+                type_: self.type_,
+                component_map: component_map.into(),
+                column_map: column_map.into(),
+                node: self.node,
+                data: ArchetypeData::new(columns.into()),
+            }
         })
     }
 }

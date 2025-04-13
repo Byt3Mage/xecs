@@ -191,7 +191,7 @@ fn init_archetype_flags(world: &World, ty: &Type) -> ArchetypeFlags {
             flags |= ArchetypeFlags::HAS_BUILTINS; 
             flags |= ArchetypeFlags::HAS_MODULE;
         }
-        else if id == ECS_PREFAB{
+        else if id == ECS_PREFAB {
             flags |= ArchetypeFlags::IS_PREFAB;
         }
         else if id == ECS_DISABLED {
@@ -240,8 +240,7 @@ fn init_archetype_flags(world: &World, ty: &Type) -> ArchetypeFlags {
 
 fn new_archetype(world: &mut World, ty: Type) -> ArchetypeId {
     let flags = init_archetype_flags(world, &ty);
-    let archetype_builder = ArchetypeBuilder::new(world, ty.clone()).flags(flags);
-    archetype_builder.build()
+    ArchetypeBuilder::new(world, ty.clone()).with_flags(flags).build()
 }
 
 pub fn ensure_archetype(world: &mut World, ty: Type) -> ArchetypeId {

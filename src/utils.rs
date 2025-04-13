@@ -1,5 +1,4 @@
-use std::{mem::ManuallyDrop, ops::{BitAnd, Index}};
-
+use std::mem::ManuallyDrop;
 
 pub struct OnDrop<F: FnOnce()> {
     callback: ManuallyDrop<F>,

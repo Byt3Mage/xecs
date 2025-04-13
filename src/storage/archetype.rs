@@ -1,16 +1,16 @@
 use std::{ptr, rc::Rc, usize, vec};
 
-use crate::{entity::Entity, entity_index::EntityLocation, graph::GraphNode, id::Id, type_info::Type, world::World};
+use crate::{entity::Entity, entity_index::EntityLocation, graph::GraphNode, id::Id, pointer::PtrMut, type_info::Type, world::World};
 use super::{archetype_data::ArchetypeData, archetype_flags::ArchetypeFlags, archetype_index::ArchetypeId};
 
 pub struct Archetype {
-    pub id: ArchetypeId,
-    pub flags: ArchetypeFlags,
-    pub type_: Type, // vector of component ids.
-    pub component_map: Box<[usize]>, // maps component ids to columns.
-    column_map: Box<[usize]>, // maps columns to component ids.
-    pub node: GraphNode,
-    data: ArchetypeData,
+    pub(crate) id: ArchetypeId,
+    pub(crate) flags: ArchetypeFlags,
+    pub(crate) type_: Type, // vector of component ids.
+    pub(crate) component_map: Box<[Option<usize>]>, // maps component ids to columns.
+    pub(crate) column_map: Box<[usize]>, // maps columns to component ids.
+    pub(crate) node: GraphNode,
+    pub(crate) data: ArchetypeData,
 }
 
 /// Gets the component [Id] for the corresponding column index.
@@ -58,7 +58,7 @@ pub unsafe fn move_entity(world: &mut World, entity: Entity, asrc_id: ArchetypeI
             unsafe {
                 let src_elem = src_col.data.add(src_row * size);
                 let dst_elem = dst_col.data.add(dst_row * size);
-                move_fn(src_elem, dst_elem); 
+                move_fn(src_elem, dst_elem);
             }
 
             // Don't call drop on this column since we have moved the value.
@@ -83,13 +83,11 @@ pub unsafe fn move_entity(world: &mut World, entity: Entity, asrc_id: ArchetypeI
     }
 
     src.data.delete_row(&mut world.entity_index, src_row, should_drop);
-
-    // Update entity location after running remove actions.
     world.entity_index.set_location(entity, EntityLocation::new(adst_id, dst_row));
 }
 
 pub(crate) fn move_entity_to_root(world: &mut World, entity: Entity) {
-    debug_assert!(world.root_arch.is_null() == false, "World must initialize a root archetype");
+    debug_assert!(!world.root_arch.is_null(), "World must initialize a root archetype");
 
     let EntityLocation{arch, row} = world.entity_index.get_location(entity).unwrap();
 

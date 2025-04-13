@@ -1,7 +1,6 @@
 use std::{alloc::{self, Layout}, ptr::NonNull, rc::Rc};
-use crate::{entity::Entity, entity_index::{EntityIndex, EntityLocation}, pointer::{OwningPtr, Ptr, PtrMut}, type_info::TypeInfo, utils::OnDrop};
+use crate::{entity::Entity, entity_index::EntityIndex, pointer::{Ptr, PtrMut}, type_info::TypeInfo, utils::OnDrop};
 
-use super::archetype_index::ArchetypeId;
 
 /// Trait for allocating and reallocating memory for a type-erased array.
 /// 
@@ -24,16 +23,34 @@ trait TypeErased {
 pub(crate) struct Column {
     pub(super) data: NonNull<u8>,
     pub(super) type_info: Rc<TypeInfo>,
-    drop: Option<unsafe fn(OwningPtr<'_>)>,
 }
 
 impl Column {
-    pub fn new(type_info: Rc<TypeInfo>, drop: Option<unsafe fn(OwningPtr<'_>)>) -> Self {
+    pub fn new(type_info: Rc<TypeInfo>) -> Self {
         Self {
             data: NonNull::dangling(),
             type_info,
-            drop,
         }
+    }
+
+    /// #Safety
+    /// Caller must ensure that `row` and `size` are valid for this column.
+    #[inline]
+    unsafe fn get(&self, row: usize, size: usize) -> Ptr {
+        // SAFETY:
+        // data is non-null
+        // caller guarantees row and size are valid.
+        unsafe { Ptr::new(self.data.add(row * size)) }
+    }
+
+    /// #Safety
+    /// Caller must ensure that `row` and `size` are valid for this column.
+    #[inline]
+    unsafe fn get_mut(&self, row: usize, size: usize) -> PtrMut {
+        // SAFETY:
+        // data is non-null
+        // caller guarantees row and size are valid.
+        unsafe { PtrMut::new(self.data.add(row * size)) }
     }
 }
 
@@ -225,8 +242,8 @@ impl ArchetypeData {
 
         // SAFETY: The caller ensures that `row` and `column` are valid.
         unsafe {
-            let column = self.columns.get_unchecked(column);
-            Ptr::new(column.data.add(row * column.type_info.size()))
+            let col = self.columns.get_unchecked(column);
+            col.get(row, col.type_info.size())
         }
     }
 
@@ -241,8 +258,8 @@ impl ArchetypeData {
 
         // SAFETY: The caller ensures that `row` and `column` in bounds.
         unsafe {
-            let column = self.columns.get_unchecked_mut(column);
-            PtrMut::new(column.data.add(row * column.type_info.size()))
+            let col = self.columns.get_unchecked_mut(column);
+            col.get_mut(row, col.type_info.size())
         }
     }
 

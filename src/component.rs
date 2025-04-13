@@ -1,13 +1,13 @@
-use std::{alloc::Layout, any::{type_name, TypeId}, collections::HashMap, marker::PhantomData};
+use std::{alloc::Layout, any::{type_name, TypeId}, collections::HashMap, fmt::Debug, marker::PhantomData, rc::Rc};
 use const_assert::const_assert;
-use crate::{component_flags::ComponentFlags, entity::Entity, error::{EcsError, EcsResult}, id::Id, storage::archetype_index::ArchetypeId, type_info::{TypeHooks, TypeHooksBuilder, TypeInfo, TypeName}, world::{World, WorldRef}};
+use crate::{component_flags::ComponentFlags, entity::Entity, id::Id, storage::archetype_index::ArchetypeId, type_info::{TypeHooks, TypeHooksBuilder, TypeInfo, TypeName}, world::{World, WorldRef}};
 
 pub trait ComponentValue: 'static {}
 
 pub struct TypedComponentView<'a, C: ComponentValue> {
     id: Id,
     world: WorldRef<'a>,
-    _phantom: PhantomData<fn()-> C>
+    phantom: PhantomData<fn()-> C>
 }
 
 impl <'a, T: ComponentValue> TypedComponentView<'a, T> {
@@ -15,8 +15,13 @@ impl <'a, T: ComponentValue> TypedComponentView<'a, T> {
         Self {
             id,
             world: world.into(),
-            _phantom: Default::default()
+            phantom: PhantomData
         }
+    }
+
+    #[inline]
+    pub fn id(&self) -> Id {
+        self.id
     }
 }
 
@@ -31,6 +36,11 @@ impl <'a> ComponentView <'a> {
             id,
             world: world.into(),
         }
+    }
+
+    #[inline]
+    pub fn id(&self) -> Id {
+        self.id
     }
 }
 
@@ -51,47 +61,49 @@ pub struct ComponentRecord {
 }
 
 impl ComponentRecord {
-    pub fn new(id: Id) -> Self {
+    pub(crate) fn new(id: Id, flags: ComponentFlags) -> Self {
         Self {
             id,
-            flags: ComponentFlags::empty(),
+            flags,
             archetypes: HashMap::new(),
         }
     }
 }
 
 pub struct ComponentBuilder {
+    id: Option<Id>,
     name: Option<TypeName>,
-    tags: Vec<Id>,
-    typed_tags: Vec<TypeId>,
-    type_layout: Option<Layout>,
-    type_hooks: Option<TypeHooks>,
+    type_info: Option<TypeInfo>,
+    flags: ComponentFlags,
 }
 
 impl ComponentBuilder {
-    pub fn new() -> Self {
+    pub(crate) fn new(id: Option<Id>) -> Self {
         Self {
+            id,
             name: None,
-            tags: vec![],
-            typed_tags: vec![],
-            type_layout: None,
-            type_hooks: None, 
+            type_info: None,
+            flags: ComponentFlags::empty(),
         }
     }
 
-    pub fn new_named(name: impl Into<TypeName>) -> Self {
+    pub fn new_named(id: Option<Id>, name: impl Into<TypeName>) -> Self {
         Self {
+            id,
             name: Some(name.into()),
-            tags: vec![],
-            typed_tags: vec![],
-            type_layout: None,
-            type_hooks: None,
+            type_info: None,
+            flags: ComponentFlags::empty(),
         }
     }
 
-    pub fn with_type<C: ComponentValue>(mut self, hooks: TypeHooksBuilder<C>) -> Self {
-        self.type_layout = Some(Layout::new::<C>());
-        self.type_hooks = Some(hooks.build());
+    pub fn set_type<C: ComponentValue>(mut self, hooks: TypeHooksBuilder<C>) -> Self {
+        self.type_info = Some(TypeInfo {
+            id: 0,
+            layout: Layout::new::<C>(),
+            hooks: hooks.build(),
+            type_name: None,
+            type_id: TypeId::of::<C>(),
+        });
         self
     }
 
@@ -100,71 +112,77 @@ impl ComponentBuilder {
         self
     }
 
-    pub fn add(mut self, id: Id) -> Self {
-        self.tags.push(id);
+    pub fn with_flag(mut self, flag: ComponentFlags) -> Self {
+        self.flags.insert(flag);
         self
     }
 
-    pub fn add_t<T: ComponentValue>(mut self) -> Self {
-        self.typed_tags.push(TypeId::of::<T>());
+    pub fn set_flags(mut self, flags: ComponentFlags) -> Self {
+        self.flags = flags;
         self
     }
 
-    pub(crate) fn build(self, world: &mut World) -> EcsResult<ComponentView> {
-        let id = world.entity_index.new_id();
+    pub fn clear_flag(mut self, flag: ComponentFlags) -> Self {
+        self.flags.remove(flag);
+        self
+    }
+
+    pub fn build(self, world: &mut World) -> ComponentView {
+        let id = match self.id {
+            Some(id) => {
+                debug_assert!(world.components.contains_key(&id), "component already exists.");
+                id
+            },
+            None => world.new_entity().id(),
+        };
         
-        let tags = self.typed_tags.into_iter()
-        .map(|ty_id| world.type_ids.get_id(ty_id).unwrap())
-        .chain(self.tags.into_iter())
-        .collect::<Vec<_>>();
+        world.components.insert(id, ComponentRecord::new(id, self.flags));
 
-        match (self.type_layout, self.type_hooks) {
-            (Some(layout), Some(hooks)) => {
-                let type_info = TypeInfo {
-                    id,
-                    layout,
-                    hooks,
-                    type_name: self.name
-                };
-            }
-            _=> {}
+        if let Some(mut type_info) = self.type_info {
+            type_info.id = id;
+            type_info.type_name = self.name; // TODO: add scoped names.
+
+            world.type_infos.insert(id, Rc::new(type_info));
         }
 
-        for tag in tags {
-            world.add_id(id, tag)?;
-        }
+        ComponentView::new(world, id)
+    }
+}
 
-        Ok(ComponentView::new(world, id))
+impl Debug for ComponentBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ComponentBuilder").field("id", &self.id).finish()
     }
 }
 
 pub struct TypedComponentBuilder<C> {
-    hook_builder: TypeHooksBuilder<C>,
-    tags: Vec<Id>,
-    typed_tags: Vec<TypeId>,
-    name: Option<TypeName>
+    hooks: Option<TypeHooksBuilder<C>>,
+    name: Option<TypeName>,
+    flags: ComponentFlags,
 }
 
 impl <C: ComponentValue> TypedComponentBuilder<C> {
-    pub fn new() -> Self {
-        const_assert!(|C| std::mem::size_of::<C>() != 0, "use ComponentBuilder for ZST.");
+    pub(crate) fn new() -> Self {
+        let hook_builder = const {
+            if size_of::<C>() != 0 { Some(TypeHooksBuilder::new()) } else { None }
+        };
 
         Self{
-            hook_builder: TypeHooksBuilder::new(),
-            tags: vec![],
-            typed_tags: vec![],
+            hooks: hook_builder,
             name: None,
+            flags: ComponentFlags::empty(),
         }
     }
 
     pub fn new_named(name: impl Into<TypeName>) -> Self {
-        const_assert!(|C| std::mem::size_of::<C>() != 0, "use ComponentBuilder for ZST.");
+        let hook_builder = const {
+            if size_of::<C>() != 0 { Some(TypeHooksBuilder::new()) } else { None }
+        };
 
         Self{
-            hook_builder: TypeHooksBuilder::new(),
-            tags: vec![],
-            typed_tags: vec![],
+            hooks: hook_builder,
             name: Some(name.into()),
+            flags: ComponentFlags::empty(),
         }
     }
 
@@ -173,67 +191,78 @@ impl <C: ComponentValue> TypedComponentBuilder<C> {
         self
     }
 
-    pub fn add(mut self, id: Id) -> Self {
-        self.tags.push(id);
+    pub fn add_flags(mut self, flags: ComponentFlags) -> Self {
+        self.flags.insert(flags);
         self
     }
 
-    pub fn add_t<T: ComponentValue>(mut self) -> Self {
-        self.typed_tags.push(TypeId::of::<T>());
+    pub fn set_flags(mut self, flags: ComponentFlags) -> Self {
+        self.flags = flags;
+        self
+    }
+
+    pub fn clear_flag(mut self, flag: ComponentFlags) -> Self {
+        self.flags.remove(flag);
         self
     }
 
     pub fn default(mut self, f: fn() -> C) -> Self {
-        self.hook_builder = self.hook_builder.with_default(f);
+        const_assert!(|C| size_of::<C>() != 0, "can't set default hook for ZST");
+        self.hooks = self.hooks.map(|b| b.with_default(f));
         self
     }
 
     pub fn clone(mut self, f: fn(&C) -> C) -> Self {
-        self.hook_builder = self.hook_builder.with_clone(f);
+        const_assert!(|C| size_of::<C>() != 0, "can't set clone hook for ZST");
+        self.hooks = self.hooks.map(|b| b.with_clone(f));
         self
     }
 
-    fn on_add<F>(mut self, f: F) -> Self 
+    pub fn on_add<F>(mut self, f: F) -> Self 
     where F: FnMut(Entity) + 'static {
-        self.hook_builder = self.hook_builder.with_add(f);
+        const_assert!(|C| size_of::<C>() != 0, "can't set on_add hook for ZST");
+        self.hooks = self.hooks.map(|b: TypeHooksBuilder<C>| b.with_add(f));
         self
     }
 
     pub fn on_set<F>(mut self, f: F) -> Self 
     where F: FnMut(Entity, &mut C) + 'static {
-        self.hook_builder = self.hook_builder.with_set(f);
+        const_assert!(|C| size_of::<C>() != 0, "can't set on_set hook for ZST");
+        self.hooks = self.hooks.map(|b| b.with_set(f));
         self
     }
 
     pub fn on_remove<F>(mut self, f: F) -> Self 
     where F: FnMut(Entity, &mut C) + 'static {
-        self.hook_builder = self.hook_builder.with_remove(f);
+        const_assert!(|C| size_of::<C>() != 0, "can't set on_remove hook for ZST");
+        self.hooks = self.hooks.map(|b| b.with_remove(f));
         self
     }
 
-    pub(crate) fn build(self, world: &mut World) -> EcsResult<TypedComponentView<C>> {
-        if world.type_ids.get_id_t::<C>().is_some() {
-            return Err(EcsError::ComponentCreate("component already exists"))
-        }
+    pub fn build(self, world: &mut World) -> TypedComponentView<C> {
+        debug_assert!(!world.type_ids.has_t::<C>(), "component already exists.");
 
-        let id = world.entity_index.new_id();
+        let id = world.new_entity().id();
+
+        world.type_ids.set_t::<C>(id);
+        world.components.insert(id, ComponentRecord::new(id, self.flags));
+
+        if let Some(hooks) = self.hooks {
+            world.type_infos.insert(id, Rc::new(TypeInfo {
+                id,
+                layout: Layout::new::<C>(),
+                type_name: Some(self.name.unwrap_or(type_name::<C>().into())), // TODO: add scoped names
+                hooks: hooks.build(),
+                type_id: TypeId::of::<C>(),
+            }));
+        }
         
-        let tags = self.typed_tags.into_iter()
-        .map(|ty_id| world.type_ids.get_id(ty_id).unwrap())
-        .chain(self.tags.into_iter())
-        .collect::<Vec<_>>();
+        TypedComponentView::new(world, id)
+    }
+}
 
-        let type_info = TypeInfo {
-            id,
-            layout: Layout::new::<C>(),
-            type_name: Some(self.name.unwrap_or(type_name::<C>().into())),
-            hooks: self.hook_builder.build(),
-        };
-
-        for tag in tags {
-            world.add_id(id, tag)?;
-        }
-
-        Ok(TypedComponentView::new(world, id))
+impl <C> Debug for TypedComponentBuilder<C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TypedComponentBuilder").field("type", &std::any::type_name::<C>()).finish()
     }
 }

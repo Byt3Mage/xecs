@@ -1,6 +1,6 @@
-use std::rc::Rc;
+use std::{fmt::Debug, rc::Rc};
 
-use crate::{entity::Entity, id::Id};
+use crate::{component::ComponentView, entity::Entity, id::Id};
 
 /// Error returned if accessing an entity [EntityRecord](crate::entity_index::EntityRecord) fails
 #[derive(Debug)]
@@ -24,7 +24,7 @@ pub enum EntityCreateError {
 pub enum EcsError {
     EntityIndex(EntityIndexError),
     EntityCreate(EntityCreateError),
-    ComponentCreate(&'static str),
+    Component(&'static str),
 }
 
 impl From<EntityIndexError> for EcsError {
@@ -34,3 +34,8 @@ impl From<EntityIndexError> for EcsError {
 }
 
 pub type EcsResult<T> = Result<T, EcsError>;
+
+#[inline]
+pub(crate) const fn component_not_registered_err<T>() -> EcsResult<T> {
+    Err(EcsError::Component("component not registered."))
+}

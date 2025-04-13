@@ -8,7 +8,9 @@ impl ComponentFlags {
     pub const ON_DELETE_REMOVE: Self = Self(1 << 0);
     pub const ON_DELETE_DELETE: Self = Self(1 << 1);
     pub const ON_DELETE_PANIC: Self = Self(1 << 2);
-    pub const ON_DELETE_MASK: Self = Self(Self::ON_DELETE_REMOVE.0 | Self::ON_DELETE_DELETE.0 | Self::ON_DELETE_PANIC.0);
+    pub(crate) const ON_DELETE_MASK: Self = Self(
+        Self::ON_DELETE_REMOVE.0 | Self::ON_DELETE_DELETE.0 | Self::ON_DELETE_PANIC.0
+    );
 
     // OnDeleteObject behavior flags
     pub const ON_DELETE_OBJECT_REMOVE: Self = Self(1 << 3);
@@ -36,14 +38,14 @@ impl ComponentFlags {
     pub const IS_INHERITABLE: Self = Self(1 << 15);
 
     // Event flags
-    pub const HAS_ON_ADD: Self = Self(1 << 16); // Same values as table flags
-    pub const HAS_ON_REMOVE: Self = Self(1 << 17);
-    pub const HAS_ON_SET: Self = Self(1 << 18);
-    pub const HAS_ON_TABLE_CREATE: Self = Self(1 << 21);
-    pub const HAS_ON_TABLE_DELETE: Self = Self(1 << 22);
-    pub const IS_SPARSE: Self = Self(1 << 23);
-    pub const IS_UNION: Self = Self(1 << 24);
-    pub const EVENT_MASK: Self = Self(
+    pub(crate) const HAS_ON_ADD: Self = Self(1 << 16); // Same values as table flags
+    pub(crate) const HAS_ON_REMOVE: Self = Self(1 << 17);
+    pub(crate) const HAS_ON_SET: Self = Self(1 << 18);
+    pub(crate) const HAS_ON_TABLE_CREATE: Self = Self(1 << 21);
+    pub(crate) const HAS_ON_TABLE_DELETE: Self = Self(1 << 22);
+    pub(crate) const IS_SPARSE: Self = Self(1 << 23);
+    pub(crate) const IS_UNION: Self = Self(1 << 24);
+    pub(crate) const EVENT_MASK: Self = Self(
         Self::HAS_ON_ADD.0 | Self::HAS_ON_REMOVE.0 | Self::HAS_ON_SET.0 |
         Self::HAS_ON_TABLE_CREATE.0 | Self::HAS_ON_TABLE_DELETE.0 | 
         Self::IS_SPARSE.0 | Self::IS_UNION.0
@@ -52,21 +54,31 @@ impl ComponentFlags {
     // Special flag
     pub const MARKED_FOR_DELETE: Self = Self(1 << 30);
 
+    #[inline]
     /// Returns an empty set of flags.
     pub const fn empty() -> Self {
         Self(0)
     }
 
+    #[inline]
     pub const fn contains(self, other: Self) -> bool {
         (self.0 & other.0) == other.0
     }
 
-    pub fn insert(&mut self, other: Self) {
+    #[inline]
+    pub const fn insert(&mut self, other: Self) {
         self.0 |= other.0;
     }
 
-    pub fn remove(&mut self, other: Self) {
+    #[inline]
+    pub const fn remove(&mut self, other: Self) {
         self.0 &= !other.0;
+    }
+}
+
+impl Default for ComponentFlags {
+    fn default() -> Self {
+        Self::empty()
     }
 }
 

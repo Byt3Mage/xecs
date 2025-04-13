@@ -15,11 +15,31 @@ pub struct Ptr<'a> {
 }
 
 impl <'a> Ptr <'a> {
+    #[inline]
     pub unsafe fn new(ptr: NonNull<u8>) -> Self {
         Self {
             inner: ptr,
             phantom: PhantomData,
         }
+    }
+
+    /// Transforms this [`Ptr`] into a `&T` with the same lifetime
+    ///
+    /// # Safety
+    /// `T` must be the erased pointee type for this [`Ptr`].
+    #[inline]
+    pub unsafe fn deref<T>(self) -> &'a T {
+        // SAFETY: The caller ensures the pointee is of type `T` and the pointer can be dereferenced.
+        unsafe { & *(self.as_ptr().cast::<T>()) }
+    }
+
+    /// Gets the underlying pointer, erasing the associated lifetime.
+    ///
+    /// If possible, it is strongly encouraged to use [`deref`](Self::deref) over this function,
+    /// as it retains the lifetime.
+    #[inline]
+    pub fn as_ptr(self) -> *mut u8 {
+        self.inner.as_ptr()
     }
 }
 
@@ -46,6 +66,7 @@ impl <'a> PtrMut<'a> {
     ///
     /// # Safety
     /// The caller must ensure that the pointer is valid and properly aligned for the type it points to.
+    #[inline]
     pub unsafe fn new(ptr: NonNull<u8>) -> Self {
         Self {
             inner: ptr,
@@ -65,11 +86,10 @@ impl <'a> PtrMut<'a> {
     /// Transforms this [`PtrMut`] into a `&mut T` with the same lifetime
     ///
     /// # Safety
-    /// - `T` must be the erased pointee type for this [`PtrMut`].
+    /// `T` must be the erased pointee type for this [`PtrMut`].
     pub unsafe fn deref_mut<T>(self) -> &'a mut T {
-        let ptr = self.as_ptr().cast::<T>();
         // SAFETY: The caller ensures the pointee is of type `T` and the pointer can be dereferenced.
-        unsafe { &mut *ptr }
+        unsafe { &mut *(self.as_ptr().cast::<T>()) }
     }
 
      /// Gets an immutable reference from this mutable reference
@@ -148,6 +168,20 @@ impl <'a> OwningPtr<'a> {
         let temp = &mut ManuallyDrop::new(val);
         f(unsafe { Self::make_internal(temp) })
     }
+
+    /// Gets an immutable pointer from this owned pointer.
+    #[inline]
+    pub fn as_ref(&self) -> Ptr {
+        // SAFETY: The `Owning` type's guarantees about the validity of this pointer are a superset of `Ptr` s guarantees
+        unsafe { Ptr::new(self.inner) }
+    }
+
+    /// Gets a mutable pointer from this owned pointer.
+    #[inline]
+    pub fn as_mut(&mut self) -> PtrMut {
+        // SAFETY: The `Owning` type's guarantees about the validity of this pointer are a superset of `Ptr` s guarantees
+        unsafe { PtrMut::new(self.inner) }
+    }
 }
 
 /// A newtype around [`NonNull`] that only allows conversion to read-only borrows or pointers.
@@ -198,6 +232,11 @@ impl<T: ?Sized> ConstNonNull<T> {
 
     pub fn as_ptr(&self) -> *const T {
         self.0.as_ptr()
+    }
+
+    #[inline]
+    pub const fn cast<U>(&self) -> ConstNonNull<U> {
+        ConstNonNull(self.0.cast())
     }
 }
 

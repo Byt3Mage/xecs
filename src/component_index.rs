@@ -24,12 +24,12 @@ const fn component_hash(id: Id) -> Id {
 pub fn ensure_component(world: &mut World, id: Id) -> &ComponentRecord {
     let hash = component_hash(id);
 
-    if !world.component_index.contains_key(&hash) {
+    if !world.components.contains_key(&hash) {
         let new_comp = new_component(world, id);
-        world.component_index.insert(hash, new_comp);
+        world.components.insert(hash, new_comp);
     }
     
-    world.component_index.get_mut(&hash).unwrap()
+    world.components.get_mut(&hash).unwrap()
 }
 
 fn new_component(world: &mut World, id: Id) -> ComponentRecord {

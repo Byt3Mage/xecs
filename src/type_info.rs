@@ -1,5 +1,5 @@
 use const_assert::const_assert;
-use std::{alloc::Layout, collections::{hash_map::Entry, HashMap}, marker::PhantomData, ops::Deref, ptr::NonNull, rc::Rc};
+use std::{alloc::Layout, any::TypeId, collections::HashMap, marker::PhantomData, ops::Deref, ptr::NonNull, rc::Rc};
 use crate::{component::ComponentValue, entity::Entity, id::Id, pointer::ConstNonNull};
 
 pub type TypeName = Box<str>;
@@ -10,8 +10,8 @@ pub type TypeName = Box<str>;
 /// - The caller must ensure that the pointers are non-null and aligned for T.
 /// - The caller must ensure to never use src after the move.
 unsafe fn move_fn<T>(src: NonNull<u8>, dst: NonNull<u8>) {
-    let src = src.as_ptr().cast::<T>();
-    let dst = dst.as_ptr().cast::<T>();
+    let src = src.cast::<T>();
+    let dst = dst.cast::<T>();
     unsafe { dst.write(src.read()) };
 }
 
@@ -21,8 +21,7 @@ unsafe fn move_fn<T>(src: NonNull<u8>, dst: NonNull<u8>) {
 /// - The caller must ensure that the pointer is non-null and aligned for T.
 /// - The caller must ensure to never use the pointer after the drop.
 unsafe fn drop_fn<T>(ptr: NonNull<u8>) {
-    let ptr = ptr.as_ptr().cast::<T>();
-    unsafe { std::ptr::drop_in_place(ptr) };
+    unsafe { ptr.cast::<T>().drop_in_place(); };
 }
 
 type DefaultHook = Box<dyn Fn(NonNull<u8>)>;
@@ -43,7 +42,7 @@ pub struct TypeHooksBuilder<C>
 
 impl <C: ComponentValue> TypeHooksBuilder<C>
 {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         const_assert!(|C| size_of::<C>() != 0, "can't create type hooks for ZST");
 
         Self {
@@ -67,9 +66,9 @@ impl <C: ComponentValue> TypeHooksBuilder<C>
 
     pub fn with_clone(mut self, f: fn(&C) -> C) -> Self {
         self.clone = Some(Box::new(move |src, dst|{
-            let src = src.as_ptr().cast::<C>();
-            let dst = dst.as_ptr().cast::<C>();
-            unsafe { dst.write(f(& (*src)));}
+            let src = src.cast::<C>();
+            let dst = dst.cast::<C>();
+            unsafe { dst.write(f(src.as_ref()));}
         }));
 
         self
@@ -83,19 +82,13 @@ impl <C: ComponentValue> TypeHooksBuilder<C>
 
     pub fn with_set<F>(mut self, mut f: F) -> Self 
     where F: FnMut(Entity, &mut C) + 'static {
-        self.on_set = Some(Box::new(move |entity, ptr| {
-            let ptr = ptr.as_ptr().cast::<C>();
-            f(entity, unsafe { &mut (*ptr) });
-        }));
+        self.on_set = Some(Box::new(move |entity, ptr| f(entity, unsafe { ptr.cast().as_mut() })));
         self
     }
 
     pub fn with_remove<F>(mut self, mut f: F) -> Self 
     where F: FnMut(Entity, &mut C) + 'static {
-        self.on_remove = Some(Box::new(move |entity, ptr| {
-            let ptr = ptr.as_ptr().cast::<C>();
-            f(entity, unsafe { &mut (*ptr) });
-        }));
+        self.on_remove = Some(Box::new(move |entity, ptr| f(entity, unsafe { ptr.cast().as_mut() })));
         self
     }
 
@@ -156,6 +149,7 @@ pub struct TypeInfo {
     pub(crate) layout: Layout,
     pub(crate) hooks: TypeHooks,
     pub(crate) type_name: Option<TypeName>,
+    pub(crate) type_id: TypeId,
 }
 
 impl TypeInfo {
@@ -251,22 +245,33 @@ impl TypeMap {
         }
     }
 
-    pub(crate) fn entry<T: ComponentValue>(&mut self) -> Entry<core::any::TypeId, Id> {
-       self.ids.entry(core::any::TypeId::of::<T>())
-    }
-
     #[inline]
-    pub fn get_id_t<T: ComponentValue>(&self) -> Option<Id> {
-        self.get_id(core::any::TypeId::of::<T>())
-    }
-
-    #[inline]
-    pub fn get_id(&self, ty_id: core::any::TypeId) -> Option<Id> {
+    pub fn get(&self, ty_id: core::any::TypeId) -> Option<Id> {
         self.ids.get(&ty_id).copied()
     }
 
     #[inline]
-    pub(crate) fn set_id<T: ComponentValue>(&mut self, id: Id) {
-        self.ids.insert(core::any::TypeId::of::<T>(), id);
+    pub fn get_t<T: ComponentValue>(&self) -> Option<Id> {
+        self.get(core::any::TypeId::of::<T>())
+    }
+
+    #[inline]
+    pub(crate) fn set_t<T: ComponentValue>(&mut self, id: Id) {
+        self.set(TypeId::of::<T>(), id);
+    }
+
+    #[inline]
+    pub(crate) fn set(&mut self, ty_id: TypeId, id: Id) {
+        self.ids.insert(ty_id, id);
+    }
+
+    #[inline]
+    pub fn has(&self, ty_id: TypeId) -> bool {
+        self.ids.contains_key(&ty_id)
+    }
+
+    #[inline]
+    pub fn has_t<T: ComponentValue>(&self) -> bool {
+        self.has(TypeId::of::<T>())
     }
 }
