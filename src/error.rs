@@ -25,6 +25,7 @@ pub enum EcsError {
     EntityIndex(EntityIndexError),
     EntityCreate(EntityCreateError),
     Component(&'static str),
+    TypeMismatch,
 }
 
 impl From<EntityIndexError> for EcsError {
@@ -38,4 +39,9 @@ pub type EcsResult<T> = Result<T, EcsError>;
 #[inline]
 pub(crate) const fn component_not_registered_err<T>() -> EcsResult<T> {
     Err(EcsError::Component("component not registered."))
+}
+
+#[inline]
+pub(crate) const fn type_mismatch_err<T>() -> EcsResult<T> {
+    Err(EcsError::TypeMismatch)
 }

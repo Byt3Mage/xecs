@@ -1,6 +1,18 @@
-use std::{collections::HashMap, rc::Rc};
+use std::collections::HashMap;
 
-use crate::{component::ComponentLocation, entity::{Entity, ECS_CHILD_OF, ECS_DISABLED, ECS_IS_A, ECS_MODULE, ECS_NOT_QUERYABLE, ECS_PREFAB}, entity_index::EntityLocation, id::{self, has_id_flag, has_relation, is_pair, is_wildcard, pair_first, pair_second, Id, ECS_AUTO_OVERRIDE, ECS_TOGGLE}, storage::{archetype::Archetype, archetype_data::Column, archetype_flags::ArchetypeFlags, archetype_index::{ArchetypeBuilder, ArchetypeId}}, type_info::{self, Type}, world::World};
+use crate::{
+    entity::{ECS_CHILD_OF, ECS_DISABLED, ECS_IS_A, ECS_MODULE, ECS_NOT_QUERYABLE, ECS_PREFAB},
+    id::{
+        has_id_flag, has_relation, is_pair, is_wildcard, pair_first, pair_second, Id, ECS_AUTO_OVERRIDE, ECS_TOGGLE,
+    },
+    storage::{
+        archetype::Archetype,
+        archetype_flags::ArchetypeFlags,
+        archetype_index::{ArchetypeBuilder, ArchetypeId},
+    },
+    type_info::Type,
+    world::World,
+};
 
 pub struct ArchetypeDiff {
     added: Type,
@@ -257,7 +269,7 @@ pub fn ensure_archetype(world: &mut World, ty: Type) -> ArchetypeId {
 /// Returns the source archetype if the component is already present.
 /// 
 /// TODO: use archetype graph/diff to find the destination archetype.
-pub fn archetype_traverse_add(world: &mut World, from_id: ArchetypeId, with: Id) -> ArchetypeId {
-    let from_arch = world.archetypes.get(from_id).expect("INTERNAL ERROR: archetype not found");
+pub fn archetype_traverse_add(world: &mut World, from: ArchetypeId, with: Id) -> ArchetypeId {
+    let from_arch = world.archetypes.get(from).expect("INTERNAL ERROR: archetype not found");
     from_arch.type_.extend_with(with).map_or(from_arch.id, |ty| ensure_archetype(world, ty))
 }

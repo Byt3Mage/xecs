@@ -1,13 +1,13 @@
-use std::{any::TypeId, collections::HashMap, mem::ManuallyDrop, ops::{Deref, DerefMut}, ptr::NonNull, rc::Rc};
+use std::{any::TypeId, collections::HashMap, ops::{Deref, DerefMut}, rc::Rc};
 use const_assert::const_assert;
 use crate::{
     component::{
         ComponentBuilder, ComponentRecord, ComponentValue, 
         ComponentView, TypedComponentBuilder, TypedComponentView
-    }, component_index::ensure_component, entity::Entity, entity_index::EntityIndex, entity_view::EntityView, error::{component_not_registered_err, EcsError, EcsResult}, graph::archetype_traverse_add, id::Id, pointer::OwningPtr, storage::{
+    }, entity::Entity, entity_index::EntityIndex, entity_view::EntityView, error::{component_not_registered_err, type_mismatch_err, EcsError, EcsResult}, graph::archetype_traverse_add, id::Id, storage::{
         archetype::{move_entity, move_entity_to_root},
         archetype_index::{ArchetypeBuilder, ArchetypeId, ArchetypeIndex},
-    }, type_info::{Type, TypeInfo, TypeMap}, world_utils::ensure_component_ptr
+    }, type_info::{Type, TypeInfo, TypeMap}, world_utils::set_component_value
 };
 
 pub struct World {
@@ -74,16 +74,15 @@ impl World {
             return Err(EcsError::Component("can't use `add` for non-ZST, use `set` instead."))
         }
 
-        let location = self.entity_index.get_location(entity)?;
-        let src_arch = location.arch;
-        let dst_arch = archetype_traverse_add(self,src_arch, id);
+        let (arch, row) = self.entity_index.get_location(entity)?;
+        let dst_arch = archetype_traverse_add(self,arch, id);
 
-        if src_arch != dst_arch {
+        if arch != dst_arch {
             // SAFETY:
             // - src_row is valid in enitity index.
             // - we just checked that src_arch and dst_arch are not the same.
             unsafe {
-                move_entity(self, entity, src_arch, location.row, dst_arch)
+                move_entity(self, entity, arch, row, dst_arch);
             }
         }
 
@@ -97,19 +96,19 @@ impl World {
     /// 
     /// Compilation fails if component is not ZST.
     pub fn add_t<C: ComponentValue>(&mut self, entity: Entity) -> EcsResult<()> {
-        const_assert!(|C| std::mem::size_of::<C>() == 0, "can't use add_t for non-ZST, use set_t instead.");
+        const_assert!(|C| std::mem::size_of::<C>() == 0, "can't use add_t for component, use set_t instead.");
 
         match self.type_ids.get_t::<C>() {
             Some(id) => self.add(entity, id),
-            None => Err(EcsError::Component("component type not registered.")),
+            None => component_not_registered_err(),
         }
     }
 
     /// Checks if the entity has the component.
     pub fn has(&self, entity: Entity, id: Id) -> bool {
-        let Ok(location) = self.entity_index.get_location(entity) else { return false };
-        let Some(component) = self.components.get(&id) else { return false;};
-        component.archetypes.contains_key(&location.arch)
+        let Ok((arch, _)) = self.entity_index.get_location(entity) else { return false };
+        let Some(component) = self.components.get(&id) else { return false; };
+        component.archetypes.contains_key(&arch)
     }
 
     /// Checks if entity has the component.
@@ -123,18 +122,20 @@ impl World {
         }
     }
 
-    pub fn set(&mut self, entity: Entity, id: Id, value: NonNull<u8>) -> EcsResult<()> {
-        Ok(())
+    pub fn set<C: ComponentValue>(&mut self, entity: Entity, id: Id, value: C) -> EcsResult<()> {
+        const_assert!(|C| size_of::<C>() != 0, "can't use set_t for ZST, use add_t instead");
+
+        match self.type_infos.get(&id) {
+            Some(ti) => if ti.type_id != TypeId::of::<C>() { return type_mismatch_err(); },
+            None => return Err(EcsError::Component("can't use set for tag, use add instead")),
+        }
+
+        set_component_value(self, entity, id, value)
     }
 
     pub fn set_t<C: ComponentValue>(&mut self, entity: Entity, value: C) -> EcsResult<()> {
-        const_assert!(|C| size_of::<C>() != 0, "can't use set_t for ZST, use add_t instead");
-        
         match self.type_ids.get_t::<C>() {
-            Some(id) => {
-                let mut md = ManuallyDrop::new(value);
-                self.set(entity, id, NonNull::from(&mut(*md)).cast())
-            },
+            Some(id) => self.set(entity, id, value),
             None => component_not_registered_err(),
         }
     }

@@ -1,5 +1,5 @@
 use std::{alloc::{self, Layout}, ptr::NonNull, rc::Rc};
-use crate::{entity::Entity, entity_index::EntityIndex, pointer::{Ptr, PtrMut}, type_info::TypeInfo, utils::OnDrop};
+use crate::{component::ComponentValue, entity::Entity, entity_index::EntityIndex, pointer::{Ptr, PtrMut}, type_info::TypeInfo, utils::OnDrop};
 
 
 /// Trait for allocating and reallocating memory for a type-erased array.
@@ -201,10 +201,8 @@ impl ArchetypeData {
     /// # Safety
     /// - column must be in-bounds (`row` < `self.columns.len()`).
     /// - `row` must be in-bounds (`row` < `self.len`).
-    /// - `value`'s [`Layout`] must match this [`Column`]'s `type_info` layout,
-    ///    and it must be safe to use the `drop` function of this [`Column`] to drop `value`.
-    /// - `value` must not point to the same value that is being replaced.
-    pub unsafe fn set_unchecked(&mut self, column: usize, row: usize, value: NonNull<u8>) {
+    /// - `value` must match the type of this column
+    pub unsafe fn set_unchecked<C: ComponentValue>(&mut self, column: usize, row: usize, value: C) {
         debug_assert!(column < self.columns.len(), "column out of bounds");
         debug_assert!(row < self.len, "row out of bounds");
         
@@ -214,20 +212,9 @@ impl ArchetypeData {
         // - The caller ensures that `value` matches the type of the column.
         unsafe {
             let col = self.columns.get_unchecked_mut(column);
-            let ti = &col.type_info;
-            let size = ti.size();
-            let drop_fn = ti.hooks.drop_fn;
-            let dst = col.data.add(row * size);
-
-            // This closure will run in case `drop(dst)` panics, ensuring `value` is not forgotten.
-            let on_unwind = OnDrop::new(||drop_fn(value));
-
-            drop_fn(dst);
-
-            // safe to forget, drop didn't panic.
-            core::mem::forget(on_unwind);
-
-            (ti.hooks.move_fn)(value, dst);
+            let dst = col.data.as_ptr().add(row * col.type_info.size()) as *mut C;
+            let _ = dst.read();
+            dst.replace(value);
         }
     }
 
@@ -305,7 +292,7 @@ impl ArchetypeData {
                 // Update entity record. 
                 // Allowed to panic since last row must contain a valid entity.
                 let record = entity_index.get_record_mut(self.get_entity_unchecked(row)).unwrap();
-                record.location.row = row;
+                record.row = row;
 
                 // TODO: check if this is necessary.
                 self.entities.add(last).write(0);

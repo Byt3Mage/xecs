@@ -1,6 +1,15 @@
-use std::{alloc::Layout, any::{type_name, TypeId}, collections::HashMap, fmt::Debug, marker::PhantomData, rc::Rc};
+use std::{
+    alloc::Layout, any::{type_name, TypeId}, collections::HashMap, fmt::Debug, marker::PhantomData, rc::Rc
+};
 use const_assert::const_assert;
-use crate::{component_flags::ComponentFlags, entity::Entity, id::Id, storage::archetype_index::ArchetypeId, type_info::{TypeHooks, TypeHooksBuilder, TypeInfo, TypeName}, world::{World, WorldRef}};
+use crate::{
+    component_flags::ComponentFlags,
+    entity::Entity,
+    id::Id,
+    storage::archetype_index::ArchetypeId,
+    type_info::{TypeHooksBuilder, TypeInfo, TypeName},
+    world::{World, WorldRef},
+};
 
 pub trait ComponentValue: 'static {}
 

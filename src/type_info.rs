@@ -9,7 +9,7 @@ pub type TypeName = Box<str>;
 /// # Safety
 /// - The caller must ensure that the pointers are non-null and aligned for T.
 /// - The caller must ensure to never use src after the move.
-unsafe fn move_fn<T>(src: NonNull<u8>, dst: NonNull<u8>) {
+unsafe fn move_fn<T: ComponentValue>(src: NonNull<u8>, dst: NonNull<u8>) {
     let src = src.cast::<T>();
     let dst = dst.cast::<T>();
     unsafe { dst.write(src.read()) };
@@ -129,7 +129,7 @@ pub struct TypeHooks {
 }
 
 impl TypeHooks {
-    pub fn new<C>() -> Self {
+    pub fn new<C: ComponentValue>() -> Self {
         const_assert!(|C| size_of::<C>() != 0, "can't create type hooks for ZST");
 
         Self {

@@ -1,6 +1,6 @@
-use std::{ptr, rc::Rc, usize, vec};
+use std::rc::Rc;
 
-use crate::{entity::Entity, entity_index::EntityLocation, graph::GraphNode, id::Id, pointer::PtrMut, type_info::Type, world::World};
+use crate::{entity::Entity, graph::GraphNode, id::Id, type_info::Type, world::World};
 use super::{archetype_data::ArchetypeData, archetype_flags::ArchetypeFlags, archetype_index::ArchetypeId};
 
 pub struct Archetype {
@@ -24,10 +24,10 @@ fn column_to_id(arch: &Archetype, column: usize) -> Id {
 /// # Safety
 /// - `src_row` must be a valid row in `src`. 
 /// - `asrc_id` and `adst_id` must not be the same archetype.
-pub unsafe fn move_entity(world: &mut World, entity: Entity, asrc_id: ArchetypeId, src_row: usize, adst_id: ArchetypeId) {
+pub unsafe fn move_entity(world: &mut World, entity: Entity, asrc_id: ArchetypeId, src_row: usize, adst_id: ArchetypeId) -> usize {
     debug_assert!(asrc_id != adst_id, "Source and destination archetypes are the same");
 
-    let [src, dst] = world.archetypes.get_multi_mut([asrc_id, adst_id]);
+    let (src, dst) = world.archetypes.get_two_mut(asrc_id, adst_id);
     
     debug_assert!(src_row < src.data.count(), "row out of bounds");
     
@@ -83,13 +83,15 @@ pub unsafe fn move_entity(world: &mut World, entity: Entity, asrc_id: ArchetypeI
     }
 
     src.data.delete_row(&mut world.entity_index, src_row, should_drop);
-    world.entity_index.set_location(entity, EntityLocation::new(adst_id, dst_row));
+    world.entity_index.set_location(entity, adst_id, dst_row);
+
+    dst_row
 }
 
 pub(crate) fn move_entity_to_root(world: &mut World, entity: Entity) {
     debug_assert!(!world.root_arch.is_null(), "World must initialize a root archetype");
 
-    let EntityLocation{arch, row} = world.entity_index.get_location(entity).unwrap();
+    let (arch, row) = world.entity_index.get_location(entity).unwrap();
 
     if arch.is_null() {
         let root_arch = world.archetypes.get_mut(world.root_arch).unwrap();
@@ -99,7 +101,7 @@ pub(crate) fn move_entity_to_root(world: &mut World, entity: Entity) {
         // SAFETY: root archetype should never contain columns, so only the entity array is initialized. 
         let new_row = unsafe { root_arch.data.new_row_uninit(entity) };
 
-        world.entity_index.set_location(entity, EntityLocation::new(root_arch.id, new_row));
+        world.entity_index.set_location(entity, root_arch.id, new_row);
     }
     else if arch != world.root_arch {
         // SAFETY:
