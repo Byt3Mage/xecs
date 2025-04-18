@@ -1,5 +1,5 @@
-use std::{alloc::{self, Layout}, ptr::NonNull, rc::Rc};
-use crate::{component::ComponentValue, entity::Entity, entity_index::EntityIndex, pointer::{Ptr, PtrMut}, type_info::TypeInfo, utils::OnDrop};
+use std::{alloc::Layout, ptr::NonNull, rc::Rc};
+use crate::{entity::{Entity, EntityFlags}, entity_index::EntityIndex, id::Id, pointer::{Ptr, PtrMut}, type_info::TypeInfo};
 
 
 /// Trait for allocating and reallocating memory for a type-erased array.
@@ -21,16 +21,26 @@ trait TypeErased {
 }
 
 pub(crate) struct Column {
+    /// Component Id in archetype that owns this column.
+    /// 
+    /// This id may be different from the id on type_info.
+    component: Id,
     pub(super) data: NonNull<u8>,
     pub(super) type_info: Rc<TypeInfo>,
 }
 
 impl Column {
-    pub fn new(type_info: Rc<TypeInfo>) -> Self {
+    pub fn new(component: Id, type_info: Rc<TypeInfo>) -> Self {
         Self {
+            component,
             data: NonNull::dangling(),
             type_info,
         }
+    }
+
+    #[inline]
+    pub(crate) fn id(&self) -> Id {
+        self.component
     }
 
     /// #Safety
@@ -72,7 +82,7 @@ impl TypeErased for Column {
         let (size, align) = self.type_info.size_align();
         let new_layout = Layout::from_size_align(new_cap * size, align).expect("Invalid layout");
         let old_layout = Layout::from_size_align(old_cap * size, align).expect("Invalid layout");
-        let new_ptr = unsafe { alloc::realloc(self.data.as_ptr(), old_layout, new_layout.size()) };
+        let new_ptr = unsafe { std::alloc::realloc(self.data.as_ptr(), old_layout, new_layout.size()) };
 
         self.data = match NonNull::new(new_ptr) {
             Some(p) => p,
@@ -107,6 +117,32 @@ impl TypeErased for NonNull<Entity> {
     }
 }
 
+impl TypeErased for NonNull<EntityFlags> {
+    unsafe fn alloc(&mut self, new_cap: usize) {
+        let new_layout = Layout::array::<EntityFlags>(new_cap).expect("Invalid laout");
+        let new_ptr = unsafe { std::alloc::alloc(new_layout) };
+
+        *self = match NonNull::new(new_ptr as *mut EntityFlags) {
+            Some(p) => p,
+            None => std::alloc::handle_alloc_error(new_layout)
+        };
+    }
+
+    unsafe fn realloc(&mut self, old_cap: usize, new_cap: usize) {
+        debug_assert!(new_cap > old_cap, "realloc with smaller capacity");
+        
+        let new_layout = Layout::array::<EntityFlags>(new_cap).expect("Invalid layout");
+        let old_layout = Layout::array::<EntityFlags>(old_cap).expect("Invalid layout");
+        let old_ptr = self.as_ptr() as *mut u8;
+        let new_ptr = unsafe { std::alloc::realloc(old_ptr, old_layout, new_layout.size()) };
+        
+        *self = match NonNull::new(new_ptr as *mut EntityFlags) {
+            Some(p) => p,
+            None => std::alloc::handle_alloc_error(old_layout)
+        };
+    }
+}
+
 /// Swaps rows `a` and `b`
 /// 
 /// This function does not perform any bounds checking.
@@ -130,6 +166,7 @@ unsafe fn swap_entities(entities: &mut NonNull<Entity>, a: usize, b: usize) {
 
 pub(crate) struct ArchetypeData {
     pub(super) entities: NonNull<Entity>,
+    pub(super) flags: NonNull<EntityFlags>,
     pub(super) columns: Box<[Column]>,
     len: usize,
     cap: usize,
@@ -139,6 +176,7 @@ impl ArchetypeData {
     pub fn new(columns: Box<[Column]>) -> Self {
         Self {
             entities: NonNull::dangling(),
+            flags: NonNull::dangling(),
             columns,
             len: 0,
             cap: 0,
@@ -151,11 +189,6 @@ impl ArchetypeData {
         self.len
     }
 
-    #[inline]
-    pub fn capacity(&self) -> usize {
-        self.cap
-    }
-
     fn reserve(&mut self, additional: usize) {
         let required_cap = self.len.checked_add(additional).expect("capacity overflow");
 
@@ -165,11 +198,13 @@ impl ArchetypeData {
 
         unsafe {
             if self.cap == 0 {
-                self.entities.alloc(required_cap); 
+                self.entities.alloc(required_cap);
+                self.flags.alloc(required_cap);
                 self.columns.iter_mut().for_each(|col| col.alloc(required_cap));
             }
             else {
-                self.entities.realloc(self.cap, required_cap); 
+                self.entities.realloc(self.cap, required_cap);
+                self.flags.realloc(self.cap, required_cap); 
                 self.columns.iter_mut().for_each(|col| col.realloc(self.cap, required_cap));
             };
         }
@@ -190,32 +225,13 @@ impl ArchetypeData {
         // SAFETY: 
         // * Pointer offset properly calculated.
         // * NonNull ptr safe to write.
-        unsafe { self.entities.as_ptr().add(self.len).write(entity); }
+        unsafe { 
+            self.entities.as_ptr().add(self.len).write(entity);
+            self.flags.as_ptr().add(self.len).write(EntityFlags::empty());
+        }
 
         let row = self.len; self.len += 1;
         row
-    }
-
-    /// Replaces the value at `row` in `column` with `value`. This function does not do any bounds checking.
-    ///
-    /// # Safety
-    /// - column must be in-bounds (`row` < `self.columns.len()`).
-    /// - `row` must be in-bounds (`row` < `self.len`).
-    /// - `value` must match the type of this column
-    pub unsafe fn set_unchecked<C: ComponentValue>(&mut self, column: usize, row: usize, value: C) {
-        debug_assert!(column < self.columns.len(), "column out of bounds");
-        debug_assert!(row < self.len, "row out of bounds");
-        
-        // SAFETY: 
-        // - The caller ensures that `column` is valid.
-        // - The caller ensures that `row` is valid.
-        // - The caller ensures that `value` matches the type of the column.
-        unsafe {
-            let col = self.columns.get_unchecked_mut(column);
-            let dst = col.data.as_ptr().add(row * col.type_info.size()) as *mut C;
-            let _ = dst.read();
-            dst.replace(value);
-        }
     }
 
     /// Returns a [Ptr] to the element at `row`, in `column`, without doing bounds checking.
@@ -282,8 +298,9 @@ impl ArchetypeData {
                     let row_ptr = col.data.add(row * size);
                     let last_ptr = col.data.add(last * size);
 
-                    if should_drop[i] { 
-                        (ti.hooks.drop_fn)(row_ptr);
+                    match ti.hooks.drop_fn {
+                        Some(drop) if should_drop[i] => drop(row_ptr),
+                        _ => {},
                     }
 
                     (ti.hooks.move_fn)(last_ptr, row_ptr)
@@ -304,8 +321,9 @@ impl ArchetypeData {
                     let size = ti.size();
                     let row_ptr = col.data.add(row * size);
 
-                    if should_drop[i] { 
-                        (ti.hooks.drop_fn)(row_ptr); 
+                    match ti.hooks.drop_fn {
+                        Some(drop) if should_drop[i] => drop(row_ptr),
+                        _ => {},
                     }
                 }
 
@@ -315,5 +333,40 @@ impl ArchetypeData {
         }
 
         self.len -= 1;
+    }
+}
+
+impl Drop for ArchetypeData {
+    fn drop(&mut self) {
+        if self.cap == 0 {
+            return;
+        }
+
+        unsafe {
+            let entt_layout = Layout::array::<Entity>(self.cap).expect("Invalid layout");
+            let entt_ptr = self.entities.as_ptr() as *mut u8;
+            std::alloc::dealloc(entt_ptr, entt_layout);
+
+            let flags_layout = Layout::array::<EntityFlags>(self.cap).expect("Invalid layout");
+            let flags_ptr = self.flags.as_ptr() as *mut u8;
+            std::alloc::dealloc(flags_ptr, flags_layout);
+
+            for col in self.columns.iter() {
+                let size = col.type_info.size();
+
+                if let Some(drop) = col.type_info.hooks.drop_fn {
+                    let mut ptr = col.data;
+
+                    for _ in 0..self.len {
+                        drop(ptr);
+                        ptr = ptr.add(size)
+                    }
+                }
+                
+                let align = col.type_info.align();
+                let layout = Layout::from_size_align(self.cap * size, align).expect("Invalid layout");
+                std::alloc::dealloc(col.data.as_ptr(), layout);
+            };
+        }
     }
 }

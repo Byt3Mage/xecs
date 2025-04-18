@@ -1,22 +1,20 @@
-use std::rc::Rc;
+use std::{collections::HashMap, rc::Rc};
 
 use crate::{entity::Entity, graph::GraphNode, id::Id, type_info::Type, world::World};
 use super::{archetype_data::ArchetypeData, archetype_flags::ArchetypeFlags, archetype_index::ArchetypeId};
 
 pub struct Archetype {
+    /// Handle to self in [ArchetypeIndex](super::archetype_index::ArchetypeIndex).
     pub(crate) id: ArchetypeId,
+    /// Flags describing capabilites of this archetype
     pub(crate) flags: ArchetypeFlags,
-    pub(crate) type_: Type, // vector of component ids.
-    pub(crate) component_map: Box<[Option<usize>]>, // maps component ids to columns.
-    pub(crate) column_map: Box<[usize]>, // maps columns to component ids.
+    /// Vector of component [Id]s
+    pub(crate) type_: Type,
+    /// Maps component ids to columns.
+    pub(crate) component_map: HashMap<Id, usize>,
     pub(crate) node: GraphNode,
+    /// Storage for entities and components.
     pub(crate) data: ArchetypeData,
-}
-
-/// Gets the component [Id] for the corresponding column index.
-#[inline]
-fn column_to_id(arch: &Archetype, column: usize) -> Id {
-    arch.type_[arch.column_map[column]]
 }
 
 /// Moves entity from src archetype to dst.
@@ -24,27 +22,26 @@ fn column_to_id(arch: &Archetype, column: usize) -> Id {
 /// # Safety
 /// - `src_row` must be a valid row in `src`. 
 /// - `asrc_id` and `adst_id` must not be the same archetype.
-pub unsafe fn move_entity(world: &mut World, entity: Entity, asrc_id: ArchetypeId, src_row: usize, adst_id: ArchetypeId) -> usize {
-    debug_assert!(asrc_id != adst_id, "Source and destination archetypes are the same");
+pub(crate) unsafe fn move_entity(world: &mut World, entity: Entity, src: ArchetypeId, src_row: usize, dst: ArchetypeId) -> usize {
+    let (src, dst) = world.archetypes.get_two_mut(src, dst);
 
-    let (src, dst) = world.archetypes.get_two_mut(asrc_id, adst_id);
-    
     debug_assert!(src_row < src.data.count(), "row out of bounds");
     
     let dst_row = unsafe { dst.data.new_row_uninit(entity) };
+
     let mut i_src = 0; let src_col_count = src.data.columns.len();
     let mut i_dst = 0; let dst_col_count = dst.data.columns.len();
     let mut should_drop = vec![true; src_col_count];
 
     // Transfer matching columns.
     while (i_src < src_col_count) && (i_dst < dst_col_count) {
-        let src_id = column_to_id(&src, i_src);
-        let dst_id = column_to_id(&dst, i_dst);
+        let src_col = &mut src.data.columns[i_src];
+        let dst_col = &mut dst.data.columns[i_dst];
+
+        let src_id = src_col.id();
+        let dst_id = dst_col.id();    
 
         if dst_id == src_id {
-            let src_col = &mut src.data.columns[i_dst];
-            let dst_col = &mut dst.data.columns[i_src];
-
             debug_assert!(Rc::ptr_eq(&dst_col.type_info, &src_col.type_info), "INTERNAL ERROR: Type mismatch");
 
             let ti = &dst_col.type_info;
@@ -83,22 +80,18 @@ pub unsafe fn move_entity(world: &mut World, entity: Entity, asrc_id: ArchetypeI
     }
 
     src.data.delete_row(&mut world.entity_index, src_row, should_drop);
-    world.entity_index.set_location(entity, adst_id, dst_row);
+    world.entity_index.set_location(entity, dst.id, dst_row);
 
     dst_row
 }
 
 pub(crate) fn move_entity_to_root(world: &mut World, entity: Entity) {
-    debug_assert!(!world.root_arch.is_null(), "World must initialize a root archetype");
-
     let (arch, row) = world.entity_index.get_location(entity).unwrap();
 
     if arch.is_null() {
-        let root_arch = world.archetypes.get_mut(world.root_arch).unwrap();
-
-        debug_assert!(root_arch.data.columns.is_empty(), "INTERNAL ERROR: root archetype should not contain columns");
-
-        // SAFETY: root archetype should never contain columns, so only the entity array is initialized. 
+        let root_arch = world.archetypes.get_mut(world.root_arch).expect("INTERNAL ERROR: world must initialize root archetype");
+        // SAFETY: we guarantee root archetype should never contain columns, 
+        // so only the entities array is initialized. 
         let new_row = unsafe { root_arch.data.new_row_uninit(entity) };
 
         world.entity_index.set_location(entity, root_arch.id, new_row);

@@ -1,5 +1,5 @@
 use const_assert::const_assert;
-use std::{alloc::Layout, any::TypeId, collections::HashMap, marker::PhantomData, ops::Deref, ptr::NonNull, rc::Rc};
+use std::{alloc::Layout, any::TypeId, collections::HashMap, hash::Hash, marker::PhantomData, mem::needs_drop, ops::Deref, ptr::NonNull, rc::Rc};
 use crate::{component::ComponentValue, entity::Entity, id::Id, pointer::ConstNonNull};
 
 pub type TypeName = Box<str>;
@@ -8,7 +8,7 @@ pub type TypeName = Box<str>;
 /// 
 /// # Safety
 /// - The caller must ensure that the pointers are non-null and aligned for T.
-/// - The caller must ensure to never use src after the move.
+/// - The caller must ensure to never read from src until it is written to.
 unsafe fn move_fn<T: ComponentValue>(src: NonNull<u8>, dst: NonNull<u8>) {
     let src = src.cast::<T>();
     let dst = dst.cast::<T>();
@@ -21,7 +21,7 @@ unsafe fn move_fn<T: ComponentValue>(src: NonNull<u8>, dst: NonNull<u8>) {
 /// - The caller must ensure that the pointer is non-null and aligned for T.
 /// - The caller must ensure to never use the pointer after the drop.
 unsafe fn drop_fn<T>(ptr: NonNull<u8>) {
-    unsafe { ptr.cast::<T>().drop_in_place(); };
+   unsafe { ptr.cast::<T>().drop_in_place(); }
 }
 
 type DefaultHook = Box<dyn Fn(NonNull<u8>)>;
@@ -95,7 +95,7 @@ impl <C: ComponentValue> TypeHooksBuilder<C>
     pub fn build(self) -> TypeHooks {
         TypeHooks {
             move_fn: move_fn::<C>,
-            drop_fn: drop_fn::<C>,
+            drop_fn: const { if std::mem::needs_drop::<C>() { Some(drop_fn::<C>)} else {None} },
             default: self.default,
             clone:self.clone,
             on_add: self.on_add,
@@ -113,35 +113,17 @@ pub struct TypeHooks {
     /// - The caller must ensure that the pointers are non-null and aligned for data type.
     /// - The caller must ensure to never use `src` after the move.
     pub(crate) move_fn: unsafe fn (src: NonNull<u8>, dst: NonNull<u8>),
-
     /// Built-in drop function for components.
     /// 
     /// # Safety
     /// - The caller must ensure that the pointer is non-null and aligned for the data type.
     /// - The caller must ensure to never use the pointer after the drop.
-    pub(crate) drop_fn: unsafe fn (ptr: NonNull<u8>),
-
+    pub(crate) drop_fn: Option<unsafe fn (ptr: NonNull<u8>)>,
     pub(crate) default: Option<DefaultHook>,
     pub(crate) clone: Option<CloneHook>,
     pub(crate) on_add: Option<AddHook>,
     pub(crate) on_set: Option<SetHook>,
     pub(crate) on_remove: Option<RemoveHook>,
-}
-
-impl TypeHooks {
-    pub fn new<C: ComponentValue>() -> Self {
-        const_assert!(|C| size_of::<C>() != 0, "can't create type hooks for ZST");
-
-        Self {
-            move_fn: move_fn::<C>,
-            drop_fn: drop_fn::<C>,
-            default: None,
-            clone:None,
-            on_add: None,
-            on_set: None,
-            on_remove: None,
-        }
-    }
 }
 
 pub struct TypeInfo {
@@ -196,6 +178,15 @@ impl From<Vec<Id>> for Type {
     }
 }
 
+
+impl Deref for Type {
+    type Target = [Id];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 impl Type {
     /// Creates a new sorted type from [Type] and new id.
     ///
@@ -227,13 +218,6 @@ impl Type {
     }
 }
 
-impl Deref for Type {
-    type Target = [Id];
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
 pub struct TypeMap {
     pub ids: HashMap<core::any::TypeId, Id>
 }

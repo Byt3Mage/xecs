@@ -17,3 +17,6 @@ mod pointer;
 mod utils;
 mod world_utils;
 mod dynamic_struct;
+
+#[cfg(test)]
+mod tests;

@@ -1,17 +1,19 @@
 use std::{
-    alloc::Layout, any::{type_name, TypeId}, collections::HashMap, fmt::Debug, marker::PhantomData, rc::Rc
+    alloc::Layout, any::{type_name, TypeId}, collections::{hash_map::Entry, HashMap}, fmt::Debug, marker::PhantomData, rc::Rc
 };
 use const_assert::const_assert;
 use crate::{
     component_flags::ComponentFlags,
-    entity::Entity,
-    id::Id,
+    entity::{Entity, ECS_ANY, ECS_FLAG, ECS_WILDCARD},
+    id::{is_pair, is_wildcard, pair, pair_first, pair_second, strip_generation, Id, COMPONENT_MASK, ID_FLAGS_MASK},
     storage::archetype_index::ArchetypeId,
     type_info::{TypeHooksBuilder, TypeInfo, TypeName},
     world::{World, WorldRef},
 };
 
 pub trait ComponentValue: 'static {}
+
+impl <T: 'static> ComponentValue for T {}
 
 pub struct TypedComponentView<'a, C: ComponentValue> {
     id: Id,
@@ -136,11 +138,11 @@ impl ComponentBuilder {
         self
     }
 
-    pub fn build(self, world: &mut World) -> ComponentView {
+    pub fn build(self, world: &mut World) -> Id {
         let id = match self.id {
             Some(id) => {
                 debug_assert!(world.components.contains_key(&id), "component already exists.");
-                id
+                return id
             },
             None => world.new_entity().id(),
         };
@@ -154,7 +156,7 @@ impl ComponentBuilder {
             world.type_infos.insert(id, Rc::new(type_info));
         }
 
-        ComponentView::new(world, id)
+        id
     }
 }
 
@@ -252,6 +254,7 @@ impl <C: ComponentValue> TypedComponentBuilder<C> {
         debug_assert!(!world.type_ids.has_t::<C>(), "component already exists.");
 
         let id = world.new_entity().id();
+        let hash = component_hash(id);
 
         world.type_ids.set_t::<C>(id);
         world.components.insert(id, ComponentRecord::new(id, self.flags));
@@ -266,6 +269,24 @@ impl <C: ComponentValue> TypedComponentBuilder<C> {
             }));
         }
         
+        let is_wildcard = is_wildcard(id);
+        let is_pair = is_pair(id);
+        let mut rel = 0; 
+        let mut tgt = 0; 
+        let role = id & ID_FLAGS_MASK;
+
+        if is_pair {
+            rel = pair_first(id);
+            
+            debug_assert!(world.entity_index.is_alive(rel));
+
+            tgt = pair_second(id);
+        }
+        else {
+            rel = id & COMPONENT_MASK;
+        }
+
+
         TypedComponentView::new(world, id)
     }
 }
@@ -274,4 +295,65 @@ impl <C> Debug for TypedComponentBuilder<C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TypedComponentBuilder").field("type", &std::any::type_name::<C>()).finish()
     }
+}
+
+const fn component_hash(id: Id) -> Id {
+    let mut id = strip_generation(id);
+
+    if is_pair(id) {
+        let mut rel = pair_first((id) & COMPONENT_MASK) as u64;
+        let mut obj = pair_second(id) as u64;
+
+        if rel == ECS_ANY {
+            rel = ECS_WILDCARD;
+        }
+
+        if obj == ECS_ANY {
+            obj = ECS_WILDCARD;
+        }
+
+        id = pair(rel, obj);
+    }
+
+    id
+}
+
+pub(crate) fn ensure_component(world: &mut World, id: Id) -> &ComponentRecord {
+    if let Some(cr) = get_component_mut(world, id) {
+        return cr
+    }
+
+    todo!()
+}
+
+pub(crate) fn get_component(world: &World, id: Id) -> Option<&ComponentRecord> {
+    // TODO: revisit this.
+    /*
+    if (id == ecs_pair(EcsIsA, EcsWildcard)) {
+        return world->cr_isa_wildcard;
+    } else if (id == ecs_pair(EcsChildOf, EcsWildcard)) {
+        return world->cr_childof_wildcard;
+    } else if (id == ecs_pair_t(EcsIdentifier, EcsName)) {
+        return world->cr_identifier_name;
+    }
+    */
+    
+    let hash = component_hash(id);
+    world.components.get(&hash)
+}
+
+pub(crate) fn get_component_mut(world: &mut World, id: Id) -> Option<&mut ComponentRecord> {
+    // TODO: revisit this.
+    /*
+    if (id == ecs_pair(EcsIsA, EcsWildcard)) {
+        return world->cr_isa_wildcard;
+    } else if (id == ecs_pair(EcsChildOf, EcsWildcard)) {
+        return world->cr_childof_wildcard;
+    } else if (id == ecs_pair_t(EcsIdentifier, EcsName)) {
+        return world->cr_identifier_name;
+    }
+    */
+    
+    let hash = component_hash(id);
+    world.components.get_mut(&hash)
 }

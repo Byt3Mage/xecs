@@ -7,7 +7,7 @@ pub(crate) const ID_FLAGS_MASK: u64 = 0xFF << 60;
 pub(crate) const ENTITY_MASK: u64 = 0xFFFFFFFF;
 pub(crate) const GENERATION_MASK: u64 = 0xFFFF << 32;
 pub(crate) const COMPONENT_MASK: u64 = !ID_FLAGS_MASK;
-pub(crate) const PAIR: Id   = 1 << 63;
+pub(crate) const PAIR: Id = 1 << 63;
 
 /// Entity flags (set in upper bits of [Record::row](crate::internals::Record::row))
 pub(crate) const ENTITY_IS_ID: u64          = 1u64 << 31;
@@ -35,7 +35,7 @@ pub const fn entity_lo(id: Id) -> u64 {
 
 #[inline]
 pub const fn entity_comb(lo: Id, hi: Id) -> Id {
-    (hi << 32) + ((lo as u32) as u64)
+    ((hi as u64) << 32) + ((lo as u32) as u64)
 }
 
 #[inline]

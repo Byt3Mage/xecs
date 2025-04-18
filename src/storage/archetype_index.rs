@@ -1,4 +1,4 @@
-use std::{mem::ManuallyDrop, fmt::Display, rc::Rc};
+use std::{collections::HashMap, fmt::Display, mem::ManuallyDrop, rc::Rc};
 use crate::{component::ComponentLocation, graph::GraphNode, storage::archetype::Archetype, type_info::Type, world::World};
 
 use super::{archetype_data::{ArchetypeData, Column}, archetype_flags::ArchetypeFlags};
@@ -39,8 +39,27 @@ union SlotData {
 
 struct Slot {
     data: SlotData,
-    // Even value means vacant, odd value means occupied.
+    /// Even value means vacant, odd value means occupied.
     ver: u32,
+}
+
+impl Slot {
+    /// Is this slot occupied?
+    #[inline(always)]
+    pub fn is_occupied(&self) -> bool {
+        (self.ver % 2) != 0
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        if self.is_occupied() {
+            // SAFETY: We just checked that we're occupied.
+            unsafe {
+                ManuallyDrop::drop(&mut self.data.arch);
+            }
+        }
+    }
 }
 
 pub(crate) struct ArchetypeIndex {
@@ -183,17 +202,15 @@ impl ArchetypeIndex {
     }
 }
 
-pub(crate) struct ArchetypeBuilder<'a> {
-    world: &'a mut World,
+pub(crate) struct ArchetypeBuilder {
     flags: ArchetypeFlags,
     type_: Type,
     node: GraphNode,
 }
 
-impl <'a> ArchetypeBuilder<'a> {
-    pub(crate) fn new(world: &'a mut World, type_ids: Type) -> Self {
+impl ArchetypeBuilder {
+    pub(crate) fn new(type_ids: Type) -> Self {
         Self {
-            world,
             flags: ArchetypeFlags::empty(),
             type_: type_ids,
             node: GraphNode::new(),
@@ -205,38 +222,37 @@ impl <'a> ArchetypeBuilder<'a> {
         self
     }
 
-    pub(crate) fn build(self) -> ArchetypeId {
-        self.world.archetypes.insert_with_id(|arch_id| {
-            let ty_count = self.type_.id_count();
-            let mut columns = Vec::with_capacity(ty_count);
-            let mut component_map = Vec::with_capacity(ty_count);
-            let mut column_map = Vec::with_capacity(ty_count);
+    pub(crate) fn build(self, world: &mut World) -> ArchetypeId {
+        world.archetypes.insert_with_id(|arch_id| {
+            let count = self.type_.id_count();
+            let mut columns = Vec::with_capacity(count);
+            let mut component_map = HashMap::new();
 
-            for (idx, id) in self.type_.iter().enumerate() {
-                let mut location = ComponentLocation{ id_index: idx, id_count: 1, column_index: None };
+            for (idx, &id) in self.type_.iter().enumerate() {
+                let mut cl = ComponentLocation{ id_index: idx, id_count: 1, column_index: None };
     
                 // Component contains type_info, initialize a column for it.
-                if let Some(type_info)  = self.world.type_infos.get(id) {
-                    columns.push(Column::new(Rc::clone(type_info)));
-                    column_map.push(idx);
-                    
-                    let col_idx = Some(columns.len() - 1);
-                    location.column_index = col_idx;
-                    component_map.push(col_idx);
+                if let Some(type_info)  = world.type_infos.get(&id) {
+                    let col_idx = columns.len();
+
+                    columns.push(Column::new(id, Rc::clone(type_info)));
+                    component_map.insert(id, col_idx);
+
+                    cl.column_index = Some(col_idx);
                 }
     
-                // TODO: create component record.
-                let component_record = self.world.components.get_mut(id).unwrap();
-    
-                component_record.archetypes.insert(arch_id, location);
+                // TODO: get or create component record.
+                let cr = world.components.get_mut(&id).expect("INTERNAL ERROR: component record not found.");
+                cr.archetypes.insert(arch_id, cl);
             }
+
+            world.archetype_map.insert(self.type_.clone(), arch_id);
 
             Archetype {
                 id: arch_id,
                 flags: self.flags,
                 type_: self.type_,
-                component_map: component_map.into(),
-                column_map: column_map.into(),
+                component_map,
                 node: self.node,
                 data: ArchetypeData::new(columns.into()),
             }

@@ -44,11 +44,9 @@ impl ComponentFlags {
     pub(crate) const HAS_ON_TABLE_CREATE: Self = Self(1 << 21);
     pub(crate) const HAS_ON_TABLE_DELETE: Self = Self(1 << 22);
     pub(crate) const IS_SPARSE: Self = Self(1 << 23);
-    pub(crate) const IS_UNION: Self = Self(1 << 24);
     pub(crate) const EVENT_MASK: Self = Self(
         Self::HAS_ON_ADD.0 | Self::HAS_ON_REMOVE.0 | Self::HAS_ON_SET.0 |
-        Self::HAS_ON_TABLE_CREATE.0 | Self::HAS_ON_TABLE_DELETE.0 | 
-        Self::IS_SPARSE.0 | Self::IS_UNION.0
+        Self::HAS_ON_TABLE_CREATE.0 | Self::HAS_ON_TABLE_DELETE.0 | Self::IS_SPARSE.0
     );
 
     // Special flag

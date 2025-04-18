@@ -1,13 +1,13 @@
-use std::{any::TypeId, collections::HashMap, ops::{Deref, DerefMut}, rc::Rc};
+use std::{collections::HashMap, ops::{Deref, DerefMut}, rc::Rc};
 use const_assert::const_assert;
 use crate::{
     component::{
         ComponentBuilder, ComponentRecord, ComponentValue, 
         ComponentView, TypedComponentBuilder, TypedComponentView
-    }, entity::Entity, entity_index::EntityIndex, entity_view::EntityView, error::{component_not_registered_err, type_mismatch_err, EcsError, EcsResult}, graph::archetype_traverse_add, id::Id, storage::{
+    }, entity::Entity, entity_index::EntityIndex, entity_view::EntityView, error::{component_not_registered_err, EcsError, EcsResult}, graph::archetype_traverse_add, id::{pair, Id}, storage::{
         archetype::{move_entity, move_entity_to_root},
         archetype_index::{ArchetypeBuilder, ArchetypeId, ArchetypeIndex},
-    }, type_info::{Type, TypeInfo, TypeMap}, world_utils::set_component_value
+    }, type_info::{Type, TypeInfo, TypeMap}, world_utils::{get_component_value, get_component_value_mut, set_component_value}
 };
 
 pub struct World {
@@ -32,8 +32,8 @@ impl World {
             type_ids: TypeMap::new(),
         };
 
-        let builder = ArchetypeBuilder::new(&mut world, vec![].into());
-        world.root_arch = builder.build();
+        let builder = ArchetypeBuilder::new(vec![].into());
+        world.root_arch = builder.build(&mut world);
 
         world
     }
@@ -104,6 +104,11 @@ impl World {
         }
     }
 
+    #[inline]
+    pub fn add_p(&mut self, entity: Entity, rel: Id, obj: Id) -> EcsResult<()> {
+        self.add(entity, pair(rel, obj))
+    }
+
     /// Checks if the entity has the component.
     pub fn has(&self, entity: Entity, id: Id) -> bool {
         let Ok((arch, _)) = self.entity_index.get_location(entity) else { return false };
@@ -122,20 +127,46 @@ impl World {
         }
     }
 
+    #[inline]
+    pub fn has_p(&self, entity: Entity, rel: Id, obj: Id) -> bool {
+        self.has(entity, pair(rel, obj))
+    }
+
+    #[inline]
     pub fn set<C: ComponentValue>(&mut self, entity: Entity, id: Id, value: C) -> EcsResult<()> {
-        const_assert!(|C| size_of::<C>() != 0, "can't use set_t for ZST, use add_t instead");
-
-        match self.type_infos.get(&id) {
-            Some(ti) => if ti.type_id != TypeId::of::<C>() { return type_mismatch_err(); },
-            None => return Err(EcsError::Component("can't use set for tag, use add instead")),
-        }
-
+        const_assert!(|C| size_of::<C>() != 0, "can't use set for tag, did you want to add?");
         set_component_value(self, entity, id, value)
     }
 
     pub fn set_t<C: ComponentValue>(&mut self, entity: Entity, value: C) -> EcsResult<()> {
         match self.type_ids.get_t::<C>() {
             Some(id) => self.set(entity, id, value),
+            None => component_not_registered_err(),
+        }
+    }
+
+    #[inline]
+    pub fn get<C: ComponentValue>(&self, entity: Entity, id: Id) -> EcsResult<&C> {
+        const_assert!(|C| size_of::<C>() != 0, "can't use get for tag, did you want to check with has?");
+        get_component_value(self, entity, id)
+    }
+
+    pub fn get_t<C: ComponentValue>(&self, entity: Entity) -> EcsResult<&C> {
+        match self.type_ids.get_t::<C>() {
+            Some(id) => self.get(entity, id),
+            None => component_not_registered_err(),
+        }
+    }
+
+    #[inline]
+    pub fn get_mut<C: ComponentValue>(&mut self, entity: Entity, id: Id) -> EcsResult<&mut C> {
+        const_assert!(|C| size_of::<C>() != 0, "can't use get for tag, did you want to check with has?");
+        get_component_value_mut(self, entity, id)
+    }
+
+    pub fn get_mut_t<C: ComponentValue>(&mut self, entity: Entity) -> EcsResult<&mut C> {
+        match self.type_ids.get_t::<C>() {
+            Some(id) => self.get_mut(entity, id),
             None => component_not_registered_err(),
         }
     }

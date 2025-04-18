@@ -252,15 +252,18 @@ fn init_archetype_flags(world: &World, ty: &Type) -> ArchetypeFlags {
 
 fn new_archetype(world: &mut World, ty: Type) -> ArchetypeId {
     let flags = init_archetype_flags(world, &ty);
-    ArchetypeBuilder::new(world, ty.clone()).with_flags(flags).build()
+    ArchetypeBuilder::new( ty).with_flags(flags).build(world)
 }
 
-pub fn ensure_archetype(world: &mut World, ty: Type) -> ArchetypeId {
+fn ensure_archetype(world: &mut World, ty: Type) -> ArchetypeId {
     if ty.id_count() == 0 {
         world.root_arch
     }
     else {
-        world.archetype_map.get(&ty).copied().unwrap_or_else(||new_archetype(world, ty))
+        match world.archetype_map.get(&ty) {
+            Some(id) => *id,
+            None => new_archetype(world, ty),
+        }
     }
 }
 
