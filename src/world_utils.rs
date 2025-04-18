@@ -3,13 +3,12 @@ use std::any::TypeId;
 use crate::{component::ComponentValue, entity::Entity, error::{type_mismatch_err, EcsError, EcsResult}, graph::archetype_traverse_add, id::Id, storage::archetype::move_entity, world::World};
 
 pub(crate) fn set_component_value<C: ComponentValue>(world: &mut World, entity: Entity, id: Id, value: C) -> EcsResult<()> {
-    match world.type_infos.get(&id) {
+    match world.type_index.get(id) {
         Some(ti) => if ti.type_id != TypeId::of::<C>() { return type_mismatch_err(); },
         None => return Err(EcsError::Component("can't use set for tag, use add instead")),
     }
 
     let (arch_id, row) = world.entity_index.get_location(entity)?;
-
     let arch = world.archetypes.get_mut(arch_id).unwrap();
 
     // TODO: profile if hashmap is okay.
@@ -43,7 +42,7 @@ pub(crate) fn set_component_value<C: ComponentValue>(world: &mut World, entity: 
 }
 
 pub(crate) fn get_component_value<C: ComponentValue>(world: &World, entity: Entity, id: Id) -> EcsResult<&C> {
-    match world.type_infos.get(&id) {
+    match world.type_index.get(id) {
         Some(ti) => if ti.type_id != TypeId::of::<C>() { return type_mismatch_err(); },
         None => return Err(EcsError::Component("can't use get for tag, use has instead")),
     }
@@ -62,7 +61,7 @@ pub(crate) fn get_component_value<C: ComponentValue>(world: &World, entity: Enti
 }
 
 pub(crate) fn get_component_value_mut<C: ComponentValue>(world: &mut World, entity: Entity, id: Id) -> EcsResult<&mut C> {
-    match world.type_infos.get(&id) {
+    match world.type_index.get(id) {
         Some(ti) => if ti.type_id != TypeId::of::<C>() { return type_mismatch_err(); },
         None => return Err(EcsError::Component("can't use get for tag, use has instead")),
     }

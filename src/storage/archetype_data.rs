@@ -1,5 +1,5 @@
 use std::{alloc::Layout, ptr::NonNull, rc::Rc};
-use crate::{entity::{Entity, EntityFlags}, entity_index::EntityIndex, id::Id, pointer::{Ptr, PtrMut}, type_info::TypeInfo};
+use crate::{entity::Entity, entity_flags::EntityFlags, entity_index::EntityIndex, id::Id, pointer::{Ptr, PtrMut}, type_info::TypeInfo};
 
 
 /// Trait for allocating and reallocating memory for a type-erased array.
@@ -272,9 +272,18 @@ impl ArchetypeData {
     /// - The row must be in-bounds (`row` < `self.len`).
     pub unsafe fn get_entity_unchecked(&self, row: usize) -> Entity {
         debug_assert!(row < self.len, "row out of bounds");
-
         // SAFETY: The caller ensures that `row` is valid.
         unsafe { *(self.entities.as_ptr().add(row)) }
+    }
+
+    /// Returns the entity flags at the specified `row`.
+    /// 
+    /// # Safety
+    /// - The row must be in-bounds (`row` < `self.len`).
+    pub unsafe fn get_flags_mut(&self, row: usize) -> &mut EntityFlags {
+        debug_assert!(row < self.len, "row out of bounds");
+        // SAFETY: The caller ensures that `row` is valid.
+        unsafe { self.flags.add(row).as_mut() }
     }
 
     /// Deletes the row by swapping with the last row 

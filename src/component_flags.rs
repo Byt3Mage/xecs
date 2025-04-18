@@ -36,6 +36,7 @@ impl ComponentFlags {
     pub const CAN_TOGGLE: Self = Self(1 << 13);
     pub const IS_TRANSITIVE: Self = Self(1 << 14);
     pub const IS_INHERITABLE: Self = Self(1 << 15);
+    pub const IS_RELATIONSHIP: Self = Self(1 << 16);
 
     // Event flags
     pub(crate) const HAS_ON_ADD: Self = Self(1 << 16); // Same values as table flags

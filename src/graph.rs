@@ -214,7 +214,7 @@ fn init_archetype_flags(world: &World, ty: &Type) -> ArchetypeFlags {
         }
         else {
             if is_pair(id) {
-                let r = pair_first(id);
+                let r = pair_first(id) as u64;
                 flags |= ArchetypeFlags::HAS_PAIRS;
                 
                 if r == ECS_IS_A {
@@ -223,7 +223,7 @@ fn init_archetype_flags(world: &World, ty: &Type) -> ArchetypeFlags {
                 else if r == ECS_CHILD_OF {
                     flags |= ArchetypeFlags::HAS_CHILD_OF;
                     
-                    let tgt = world.entity_index.get_alive(pair_second(id));
+                    let tgt = world.entity_index.get_current(pair_second(id) as u64);
                     assert!(tgt != 0);
                     
                     if world.has(tgt, ECS_MODULE)

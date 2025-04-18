@@ -1,6 +1,6 @@
 use std::{alloc::Layout, usize};
 
-use crate::{entity::Entity, error::EntityIndexError, id::{generation, GENERATION_MASK}, storage::archetype_index::ArchetypeId};
+use crate::{entity::Entity, entity_flags::EntityFlags, error::EntityIndexError, id::{generation, GENERATION_MASK}, storage::archetype_index::ArchetypeId};
 
 const PAGE_BITS: usize = 12;
 const PAGE_SIZE: usize = 1 << PAGE_BITS;
@@ -18,10 +18,11 @@ pub const fn increment_generation(e: Entity) -> Entity {
 }
 
 pub(crate) struct EntityRecord {
-    pub component_record: Option<usize>,
+    pub cr: Option<u64>,
     pub arch: ArchetypeId,
     pub row: usize,
-    dense: usize
+    dense: usize,
+    pub flags: EntityFlags,
 }
 
 struct Page {
@@ -119,7 +120,7 @@ impl EntityIndex {
         let (page_index, record_index) = to_id(entity);
         let page = self.get_page(page_index)?;       
         let record = &page.records[record_index];
-        (record.dense == 0).then_some(record)
+        (record.dense != 0).then_some(record)
     }
 
     /// Returns the mutable [EntityRecord] for the [Entity].
@@ -129,7 +130,7 @@ impl EntityIndex {
         let (page_index, record_index) = to_id(entity);
         let page = self.pages.get_mut(page_index)?.as_mut()?;       
         let record = &mut page.records[record_index];
-        (record.dense == 0).then_some(record)
+        (record.dense != 0).then_some(record)
     }
 
     /// Returns the [EntityRecord] for the [Entity].
@@ -183,8 +184,9 @@ impl EntityIndex {
         }
     }
 
-    pub fn get_alive(&self, _entity: u64) -> Entity {
-        todo!()
+    /// Gets the entity with the current generation encoded.
+    pub fn get_current(&self, entity: u64) -> Entity {
+        self.get_record(entity).map_or(0, |r|self.entities[r.dense])
     }
 
     /// Checks if the [Entity] is alive
@@ -218,7 +220,7 @@ impl EntityIndex {
         
         let last_index = { self.alive_count -= 1; self.alive_count };
 
-        record.component_record = None;
+        record.cr = None;
         record.arch = ArchetypeId::null();
         record.row = 0;
         record.dense = last_index;
@@ -262,7 +264,7 @@ impl EntityIndex {
         let page = Self::ensure_page(&mut self.pages, (id as usize) >> PAGE_BITS);
         let record = &mut page.records[(id as usize) & PAGE_MASK];
         
-        record.component_record = None;
+        record.cr = None;
         record.arch = ArchetypeId::null();
         record.row = 0;
         record.dense = self.alive_count; self.alive_count += 1;

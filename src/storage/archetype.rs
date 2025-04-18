@@ -15,6 +15,8 @@ pub struct Archetype {
     pub(crate) node: GraphNode,
     /// Storage for entities and components.
     pub(crate) data: ArchetypeData,
+    /// Number of traversable entities in this archetype.
+    pub(crate) traversable_count: usize,
 }
 
 /// Moves entity from src archetype to dst.
@@ -103,5 +105,18 @@ pub(crate) fn move_entity_to_root(world: &mut World, entity: Entity) {
         unsafe {
             move_entity(world, entity, arch, row, world.root_arch);
         }
+    }
+}
+
+pub(crate) fn inc_traversable(arch: &mut Archetype, value: usize) {
+    arch.traversable_count += value;
+
+    if arch.traversable_count == 0 {
+        //arch.flags.remove(ArchetypeFlags::HAS_TRAVERSABLE);
+        todo!();
+    }
+    else if arch.traversable_count == value {
+        //arch.flags |= ArchetypeFlags::HAS_TRAVERSABLE;
+        todo!()
     }
 }

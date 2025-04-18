@@ -8,21 +8,27 @@ impl Drop for MyStruct {
     }
 }
 
+macro_rules! entity {
+    ($world: expr) => {
+        { let id = $world.new_entity(); $crate::entity_view::EntityView::new(&mut $world, id) }
+    };
+}
+
 #[test]
 fn world_init() {
     let mut world = World::new();
 
-    let _ = match world.component_t::<MyStruct>() {
-        Ok(view) => view.id(),
-        Err(b) => b.build(&mut world).id(),
+    let id = match world.component_t::<MyStruct>() {
+        Ok(b) => b.build(&mut world),
+        Err(id) => id,
     };
 
-    let mut bob = world.new_entity();
+    let mut bob = entity!(world);
     bob.set_t(MyStruct {x: 69}).unwrap();
 
     let bob  = bob.id();
 
-    let mut alice = world.new_entity();
+    let mut alice = entity!(world);
     alice.set_t(MyStruct {x: 42}).unwrap();
     alice.add(bob).unwrap();
 }

@@ -1,5 +1,5 @@
 use const_assert::const_assert;
-use std::{alloc::Layout, any::TypeId, collections::HashMap, hash::Hash, marker::PhantomData, mem::needs_drop, ops::Deref, ptr::NonNull, rc::Rc};
+use std::{alloc::Layout, any::TypeId, collections::HashMap, marker::PhantomData, ops::Deref, ptr::NonNull, rc::Rc};
 use crate::{component::ComponentValue, entity::Entity, id::Id, pointer::ConstNonNull};
 
 pub type TypeName = Box<str>;
@@ -56,11 +56,7 @@ impl <C: ComponentValue> TypeHooksBuilder<C>
     }
 
     pub fn with_default(mut self, f: fn() -> C) -> Self {
-        self.default = Some(Box::new(move |ptr|{
-            let ptr = ptr.as_ptr().cast::<C>();
-            unsafe { ptr.write(f());}
-        }));
-
+        self.default = Some(Box::new(move |ptr| unsafe { ptr.as_ptr().cast::<C>().write(f()); }));
         self
     }
 
@@ -219,33 +215,35 @@ impl Type {
 }
 
 pub struct TypeMap {
-    pub ids: HashMap<core::any::TypeId, Id>
+    pub ids: HashMap<core::any::TypeId, Id>,
+    pub infos: HashMap<Id, Rc<TypeInfo>>,
 }
 
 impl TypeMap {
     pub(crate) fn new() -> Self {
         Self {
-            ids: HashMap::new()
+            ids: HashMap::new(),
+            infos: HashMap::new(),
         }
     }
 
     #[inline]
-    pub fn get(&self, ty_id: core::any::TypeId) -> Option<Id> {
+    pub fn get_id(&self, ty_id: core::any::TypeId) -> Option<Id> {
         self.ids.get(&ty_id).copied()
     }
 
     #[inline]
-    pub fn get_t<T: ComponentValue>(&self) -> Option<Id> {
-        self.get(core::any::TypeId::of::<T>())
+    pub fn get_id_t<T: ComponentValue>(&self) -> Option<Id> {
+        self.get_id(core::any::TypeId::of::<T>())
     }
 
     #[inline]
-    pub(crate) fn set_t<T: ComponentValue>(&mut self, id: Id) {
-        self.set(TypeId::of::<T>(), id);
+    pub(crate) fn set_id_t<T: ComponentValue>(&mut self, id: Id) {
+        self.set_id(TypeId::of::<T>(), id);
     }
 
     #[inline]
-    pub(crate) fn set(&mut self, ty_id: TypeId, id: Id) {
+    pub(crate) fn set_id(&mut self, ty_id: TypeId, id: Id) {
         self.ids.insert(ty_id, id);
     }
 
@@ -257,5 +255,27 @@ impl TypeMap {
     #[inline]
     pub fn has_t<T: ComponentValue>(&self) -> bool {
         self.has(TypeId::of::<T>())
+    }
+}
+
+pub struct TypeIndex {
+    infos: HashMap<Id, Rc<TypeInfo>>
+}
+
+impl TypeIndex {
+    pub fn new() -> Self {
+        Self {
+            infos: HashMap::new()
+        }
+    }
+
+    #[inline(always)]
+    pub fn get(&self, id: Id) -> Option<&Rc<TypeInfo>> {
+        self.infos.get(&id)
+    }
+
+    #[inline(always)]
+    pub fn has_info(&self, id: Id) -> bool {
+        self.infos.contains_key(&id)
     }
 }

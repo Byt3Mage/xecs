@@ -231,18 +231,17 @@ impl ArchetypeBuilder {
             for (idx, &id) in self.type_.iter().enumerate() {
                 let mut cl = ComponentLocation{ id_index: idx, id_count: 1, column_index: None };
     
+                let cr = world.components.get_mut(id).expect("INTERNAL ERROR: component record not found.");
+                
                 // Component contains type_info, initialize a column for it.
-                if let Some(type_info)  = world.type_infos.get(&id) {
+                if let Some(ti)  = &cr.type_info {
                     let col_idx = columns.len();
 
-                    columns.push(Column::new(id, Rc::clone(type_info)));
+                    columns.push(Column::new(id, Rc::clone(ti)));
                     component_map.insert(id, col_idx);
-
                     cl.column_index = Some(col_idx);
                 }
-    
-                // TODO: get or create component record.
-                let cr = world.components.get_mut(&id).expect("INTERNAL ERROR: component record not found.");
+
                 cr.archetypes.insert(arch_id, cl);
             }
 
@@ -255,6 +254,7 @@ impl ArchetypeBuilder {
                 component_map,
                 node: self.node,
                 data: ArchetypeData::new(columns.into()),
+                traversable_count: 0,
             }
         })
     }
