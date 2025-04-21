@@ -1,7 +1,6 @@
 use std::{collections::HashMap, fmt::Display, mem::ManuallyDrop, rc::Rc};
-use crate::{component::ComponentLocation, graph::GraphNode, storage::archetype::Archetype, type_info::Type, world::World};
-
-use super::{archetype_data::{ArchetypeData, Column}, archetype_flags::ArchetypeFlags};
+use crate::{component::ComponentLocation, flags::ArchetypeFlags, graph::GraphNode, storage::archetype::Archetype, type_info::Type, world::World};
+use super::{ArchetypeData, Column};
 
 /// Stable, non-recycled handle into [ArchetypeIndex].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -211,7 +210,7 @@ pub(crate) struct ArchetypeBuilder {
 impl ArchetypeBuilder {
     pub(crate) fn new(type_ids: Type) -> Self {
         Self {
-            flags: ArchetypeFlags::empty(),
+            flags: ArchetypeFlags::default(),
             type_: type_ids,
             node: GraphNode::new(),
         }
@@ -229,10 +228,9 @@ impl ArchetypeBuilder {
             let mut component_map = HashMap::new();
 
             for (idx, &id) in self.type_.iter().enumerate() {
+                let cr = world.components.get_mut(id).expect("Component record not found.");
                 let mut cl = ComponentLocation{ id_index: idx, id_count: 1, column_index: None };
-    
-                let cr = world.components.get_mut(id).expect("INTERNAL ERROR: component record not found.");
-                
+            
                 // Component contains type_info, initialize a column for it.
                 if let Some(ti)  = &cr.type_info {
                     let col_idx = columns.len();

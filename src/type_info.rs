@@ -216,34 +216,32 @@ impl Type {
 
 pub struct TypeMap {
     pub ids: HashMap<core::any::TypeId, Id>,
-    pub infos: HashMap<Id, Rc<TypeInfo>>,
 }
 
 impl TypeMap {
     pub(crate) fn new() -> Self {
         Self {
             ids: HashMap::new(),
-            infos: HashMap::new(),
         }
     }
 
     #[inline]
-    pub fn get_id(&self, ty_id: core::any::TypeId) -> Option<Id> {
+    pub fn get(&self, ty_id: core::any::TypeId) -> Option<Id> {
         self.ids.get(&ty_id).copied()
     }
 
     #[inline]
-    pub fn get_id_t<T: ComponentValue>(&self) -> Option<Id> {
-        self.get_id(core::any::TypeId::of::<T>())
+    pub fn get_t<T: ComponentValue>(&self) -> Option<Id> {
+        self.get(core::any::TypeId::of::<T>())
     }
 
     #[inline]
-    pub(crate) fn set_id_t<T: ComponentValue>(&mut self, id: Id) {
-        self.set_id(TypeId::of::<T>(), id);
+    pub(crate) fn set_t<T: ComponentValue>(&mut self, id: Id) {
+        self.set(TypeId::of::<T>(), id);
     }
 
     #[inline]
-    pub(crate) fn set_id(&mut self, ty_id: TypeId, id: Id) {
+    pub(crate) fn set(&mut self, ty_id: TypeId, id: Id) {
         self.ids.insert(ty_id, id);
     }
 
@@ -277,5 +275,11 @@ impl TypeIndex {
     #[inline(always)]
     pub fn has_info(&self, id: Id) -> bool {
         self.infos.contains_key(&id)
+    }
+
+    #[inline(always)]
+    pub fn insert(&mut self, id: Id, ti: Rc<TypeInfo>)
+    {
+        self.infos.insert(id, ti);
     }
 }

@@ -1,4 +1,5 @@
 pub mod world;
+pub mod macros;
 
 mod component;
 mod component_flags;
@@ -10,9 +11,9 @@ mod entity_flags;
 mod entity_index;
 mod entity_view;
 mod error;
-mod event_flags;
 mod graph;
 mod id;
+mod flags;
 mod pointer;
 mod storage;
 mod type_info;

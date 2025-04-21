@@ -40,13 +40,13 @@ impl World {
 
     #[inline(always)]
     pub fn id_t<C: ComponentValue>(&mut self) -> Id {
-        self.type_ids.get_id_t::<C>().unwrap_or(0)
+        self.type_ids.get_t::<C>().unwrap_or(0)
     }
 
     /// Gets a builder for registering the component or returns the id if already registered.
     #[inline(always)]
     pub fn component_t<C: ComponentValue>(&mut self) -> Result<TypedComponentBuilder<C>, Id> {
-        match self.type_ids.get_id_t::<C>() {
+        match self.type_ids.get_t::<C>() {
             None => Ok(TypedComponentBuilder::new()),
             Some(id) => Err(id)
         }
@@ -104,21 +104,21 @@ impl World {
     pub fn add_t<C: ComponentValue>(&mut self, entity: Entity) -> EcsResult<()> {
         const_assert!(|C| std::mem::size_of::<C>() == 0, "can't use add_t for component, use set_t instead.");
 
-        match self.type_ids.get_id_t::<C>() {
+        match self.type_ids.get_t::<C>() {
             Some(id) => self.add(entity, id),
             None => component_not_registered_err(),
         }
     }
 
     #[inline]
-    pub fn add_p(&mut self, entity: Entity, rel: Id, obj: Id) -> EcsResult<()> {
+    pub fn add_r(&mut self, entity: Entity, rel: Id, obj: Id) -> EcsResult<()> {
         self.add(entity, pair(rel, obj))
     }
 
     /// Checks if the entity has the component.
     pub fn has(&self, entity: Entity, id: Id) -> bool {
-        let Ok((arch, _)) = self.entity_index.get_location(entity) else { return false };
         let Some(component) = self.components.get(id) else { return false; };
+        let Ok((arch, _)) = self.entity_index.get_location(entity) else { return false };  
         component.archetypes.contains_key(&arch)
     }
 
@@ -127,7 +127,7 @@ impl World {
     /// Returns `false` if the type is not registered 
     /// or the entity does not have the type.
     pub fn has_t<C: ComponentValue>(&self, entity: Entity) -> bool {
-        match self.type_ids.get_id_t::<C>() {
+        match self.type_ids.get_t::<C>() {
             Some(id) => self.has(entity, id),
             None => false,
         }
@@ -145,7 +145,7 @@ impl World {
     }
 
     pub fn set_t<C: ComponentValue>(&mut self, entity: Entity, value: C) -> EcsResult<()> {
-        match self.type_ids.get_id_t::<C>() {
+        match self.type_ids.get_t::<C>() {
             Some(id) => self.set(entity, id, value),
             None => component_not_registered_err(),
         }
@@ -158,7 +158,7 @@ impl World {
     }
 
     pub fn get_t<C: ComponentValue>(&self, entity: Entity) -> EcsResult<&C> {
-        match self.type_ids.get_id_t::<C>() {
+        match self.type_ids.get_t::<C>() {
             Some(id) => self.get(entity, id),
             None => component_not_registered_err(),
         }
@@ -171,7 +171,7 @@ impl World {
     }
 
     pub fn get_mut_t<C: ComponentValue>(&mut self, entity: Entity) -> EcsResult<&mut C> {
-        match self.type_ids.get_id_t::<C>() {
+        match self.type_ids.get_t::<C>() {
             Some(id) => self.get_mut(entity, id),
             None => component_not_registered_err(),
         }

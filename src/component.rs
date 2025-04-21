@@ -1,8 +1,13 @@
-use std::{collections::HashMap, fmt::Debug, marker::PhantomData, rc::Rc};
+use std::{alloc::Layout, any::TypeId, collections::HashMap, fmt::Debug, marker::PhantomData, rc::Rc};
 use const_assert::const_assert;
 use simple_ternary::tnr;
 use crate::{
-    component_flags::ComponentFlags, component_index::component_hash, entity::{add_flag, Entity, ECS_ANY, ECS_FLAG, ECS_WILDCARD}, entity_flags::EntityFlags, id::{is_pair, is_wildcard, pair, pair_first, pair_second, strip_generation, Id, COMPONENT_MASK, ID_FLAGS_MASK}, storage::{archetype::inc_traversable, archetype_index::ArchetypeId}, type_info::{TypeHooksBuilder, TypeInfo, TypeName}, world::{World, WorldRef}
+    entity::{Entity, ECS_ANY, ECS_WILDCARD}, 
+    flags::ComponentFlags, 
+    id::Id, 
+    storage::archetype_index::ArchetypeId, 
+    type_info::{TypeHooksBuilder, TypeInfo, TypeName}, 
+    world::{World, WorldRef}
 };
 
 pub trait ComponentValue: 'static {}
@@ -82,6 +87,7 @@ pub struct ComponentBuilder {
     id: Option<Id>,
     name: Option<TypeName>,
     flags: ComponentFlags,
+    type_info: Option<TypeInfo>,
 }
 
 impl ComponentBuilder {
@@ -90,6 +96,7 @@ impl ComponentBuilder {
             id,
             name: None,
             flags: ComponentFlags::empty(),
+            type_info: None,
         }
     }
 
@@ -98,11 +105,24 @@ impl ComponentBuilder {
             id,
             name: Some(name.into()),
             flags: ComponentFlags::empty(),
+            type_info: None,
         }
     }
 
     pub fn name(mut self, name: impl Into<TypeName>) -> Self {
         self.name = Some(name.into());
+        self
+    }
+
+    pub fn set_type<C: ComponentValue>(mut self, hooks: TypeHooksBuilder<C>) -> Self {
+        self.type_info = Some(TypeInfo { 
+            id: 0, 
+            layout: Layout::new::<C>(), 
+            hooks: hooks.build(), 
+            type_name: None, 
+            type_id: TypeId::of::<C>(),
+        });
+
         self
     }
 
@@ -123,81 +143,22 @@ impl ComponentBuilder {
 
     pub(crate) fn build(self, world: &mut World) -> Id {
         let id = self.id.unwrap_or_else(||world.new_entity());
-        
+
         debug_assert!(!world.components.contains(id), "component already exists");
+        assert!(id != 0 && id != ECS_WILDCARD && id != ECS_ANY, "INVALID ID: component id is null or forbidden");
 
         let mut cr = ComponentRecord::new(id, self.flags, None);
-        let mut rel;
-        let mut tgt = 0;
+        
+        if let Some(mut ti) = self.type_info {
+            ti.id = id;
+            ti.type_name = self.name;// TODO: add scoped names.
+            let ti = Rc::new(ti);
 
-        let is_wildcard = is_wildcard(id);
-        let is_pair = is_pair(id);
-
-        if is_pair {
-            rel = pair_first(id) as u64;
-            rel = world.entity_index.get_current( rel);
-
-            assert!(rel != 0, "INTERNAL ERROR: null entity used as relationship");
-
-            tgt = pair_second(id) as u64;
-
-            assert!(rel != 0, "INTERNAL ERROR: null entity used as target");
-
-            if !is_wildcard {
-                /* Inherit flags from (relationship, *) record */
-                cr.flags |= ensure_component(world, pair(rel, ECS_WILDCARD)).flags;
-
-                /* Initialize type info if id is not a tag*/
-                if !cr.flags.contains(ComponentFlags::TAG) {
-                    let ty_idx = &world.type_index;
-                    cr.type_info = ty_idx.get(rel).or_else(||tnr!{tgt != 0 => ty_idx.get(tgt) : None }).map(Rc::clone);
-                }
-            }
-        }
-        else {
-            rel = id & COMPONENT_MASK;
-            assert!(rel != 0, "INTERNAL ERROR: null entity can't be registered");
+            cr.type_info = Some(Rc::clone(&ti));
+            world.type_index.insert(id, ti);
         }
 
-        /* Flag for OnDelete policies */
-        add_flag(world, rel, EntityFlags::IS_ID);
-
-        if tgt != 0 {
-            /* Flag for OnDeleteTarget policies */
-            let tgt_r = world.entity_index.get_any_record_mut( tgt).unwrap();
-            
-            tgt_r.flags |= EntityFlags::IS_TARGET;
-
-            if cr.flags.contains(ComponentFlags::TRAVERSABLE) {
-                /* Flag used to determine if object should be traversed when
-                * propagating events or with super/subset queries */
-                if !tgt_r.flags.contains(EntityFlags::IS_TRAVERSABLE) {
-                    let arch = world.archetypes.get_mut(tgt_r.arch).unwrap();
-                    inc_traversable(arch, 1);
-                }
-
-                tgt_r.flags |= EntityFlags::IS_TRAVERSABLE;
-                /* Add reference to (*, tgt) component record to entity record */
-                tgt_r.cr = Some(component_hash(tgt));
-            }
-
-            /* If second element of pair determines the type, check if the pair 
-            * should be stored as a sparse component.*/
-            match &cr.type_info {
-                Some(ti) => {
-                    if ti.id == tgt {
-                        let cr_t = ensure_component(world, tgt);
-
-                        if cr_t.flags.contains(ComponentFlags::IS_SPARSE) {
-                            cr.flags |= ComponentFlags::IS_SPARSE;
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        // TODO: create type info.
-        // TODO: add to components map.
+        world.components.insert(id, cr);
         id
     }
 }
@@ -216,24 +177,16 @@ pub struct TypedComponentBuilder<C> {
 
 impl <C: ComponentValue> TypedComponentBuilder<C> {
     pub(crate) fn new() -> Self {
-        let hook_builder = const {
-            if size_of::<C>() != 0 { Some(TypeHooksBuilder::new()) } else { None }
-        };
-
         Self{
-            hooks: hook_builder,
+            hooks: const { tnr!{size_of::<C>() != 0 => Some(TypeHooksBuilder::new()) : None} },
             name: None,
             flags: ComponentFlags::empty(),
         }
     }
 
     pub fn new_named(name: impl Into<TypeName>) -> Self {
-        let hook_builder = const {
-            if size_of::<C>() != 0 { Some(TypeHooksBuilder::new()) } else { None }
-        };
-
         Self{
-            hooks: hook_builder,
+            hooks: const { tnr!{size_of::<C>() != 0 => Some(TypeHooksBuilder::new()) : None} },
             name: Some(name.into()),
             flags: ComponentFlags::empty(),
         }
@@ -296,45 +249,24 @@ impl <C: ComponentValue> TypedComponentBuilder<C> {
         debug_assert!(!world.type_ids.has_t::<C>(), "component already exists.");
 
         let id = world.new_entity();
-        let hash = component_hash(id);
+        let mut cr = ComponentRecord::new(id, self.flags, None);
+        
+        if let Some(hooks) = self.hooks {
+            let ti = Rc::new(TypeInfo {
+                id,
+                layout: Layout::new::<C>(),
+                hooks: hooks.build(),
+                type_name: Some(self.name.unwrap_or(std::any::type_name::<C>().into())), // TODO: scoped name.
+                type_id: TypeId::of::<C>(),
+            });
 
-        //let cr = ComponentRecord::new(id, self.flags);
+            cr.type_info = Some(Rc::clone(&ti));
+            world.type_index.insert(id, ti);
+        };
+
+        world.type_ids.set_t::<C>(id);
+        world.components.insert(id, cr);
 
         id
     }
-}
-
-pub(crate) fn ensure_component(world: &mut World, id: Id) -> &ComponentRecord {
-    todo!()
-}
-
-pub(crate) fn get_component(world: &World, id: Id) -> Option<&ComponentRecord> {
-    // TODO: revisit this.
-    /*
-    if (id == ecs_pair(EcsIsA, EcsWildcard)) {
-        return world->cr_isa_wildcard;
-    } else if (id == ecs_pair(EcsChildOf, EcsWildcard)) {
-        return world->cr_childof_wildcard;
-    } else if (id == ecs_pair_t(EcsIdentifier, EcsName)) {
-        return world->cr_identifier_name;
-    }
-    */
-    
-    world.components.get(id)
-}
-
-pub(crate) fn get_component_mut(world: &mut World, id: Id) -> Option<&mut ComponentRecord> {
-    // TODO: revisit this.
-    /*
-    if (id == ecs_pair(EcsIsA, EcsWildcard)) {
-        return world->cr_isa_wildcard;
-    } else if (id == ecs_pair(EcsChildOf, EcsWildcard)) {
-        return world->cr_childof_wildcard;
-    } else if (id == ecs_pair_t(EcsIdentifier, EcsName)) {
-        return world->cr_identifier_name;
-    }
-    */
-    
-    let hash = component_hash(id);
-    todo!();
 }

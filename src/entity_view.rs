@@ -34,28 +34,33 @@ impl <'a> EntityView<'a> {
     }
 
     #[inline]
-    pub fn add(&mut self, id: Id) -> EcsResult<()> {
-        self.world.add(self.id, id)
+    pub fn add(mut self, id: Id) -> EcsResult<Self> {
+        self.world.add(self.id, id)?;
+        Ok(self)
     }
 
     #[inline]
-    pub fn add_t<C: ComponentValue>(&mut self) -> EcsResult<()> {
-        self.world.add_t::<C>(self.id)
+    pub fn add_t<C: ComponentValue>(mut self) -> EcsResult<Self> {
+        self.world.add_t::<C>(self.id)?;
+        Ok(self)
     }
 
     #[inline]
-    pub fn add_p(&mut self, rel: Id, obj: Id) -> EcsResult<()> {
-        self.world.add_p(self.id, rel, obj)
+    pub fn add_r(mut self, rel: Id, obj: Id) -> EcsResult<Self> {
+        self.world.add_r(self.id, rel, obj)?;
+        Ok(self)
     }
 
     #[inline]
-    pub fn set_t<C: ComponentValue>(&mut self, value: C) -> EcsResult<()> {
-        self.world.set_t(self.id, value)
+    pub fn set_t<C: ComponentValue>(mut self, value: C) -> EcsResult<Self> {
+        self.world.set_t(self.id, value)?;
+        Ok(self)
     }
 
     #[inline]
-    pub fn set<C: ComponentValue>(&mut self, id: Id, value: C) -> EcsResult<()> {
-        self.world.set(self.id, id, value)
+    pub fn set<C: ComponentValue>(mut self, id: Id, value: C) -> EcsResult<Self> {
+        self.world.set(self.id, id, value)?;
+        Ok(self)
     }
 
     #[inline]

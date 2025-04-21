@@ -1,17 +1,12 @@
 use std::collections::HashMap;
 
 use crate::{
-    entity::{ECS_CHILD_OF, ECS_DISABLED, ECS_IS_A, ECS_MODULE, ECS_NOT_QUERYABLE, ECS_PREFAB},
-    id::{
+    component::ComponentBuilder, entity::{ECS_CHILD_OF, ECS_DISABLED, ECS_IS_A, ECS_MODULE, ECS_NOT_QUERYABLE, ECS_PREFAB}, flags::ArchetypeFlags, id::{
         has_id_flag, has_relation, is_pair, is_wildcard, pair_first, pair_second, Id, ECS_AUTO_OVERRIDE, ECS_TOGGLE,
-    },
-    storage::{
+    }, storage::{
         archetype::Archetype,
-        archetype_flags::ArchetypeFlags,
         archetype_index::{ArchetypeBuilder, ArchetypeId},
-    },
-    type_info::Type,
-    world::World,
+    }, type_info::Type, world::World
 };
 
 pub struct ArchetypeDiff {
@@ -274,5 +269,13 @@ fn ensure_archetype(world: &mut World, ty: Type) -> ArchetypeId {
 /// TODO: use archetype graph/diff to find the destination archetype.
 pub fn archetype_traverse_add(world: &mut World, from: ArchetypeId, with: Id) -> ArchetypeId {
     let from_arch = world.archetypes.get(from).expect("INTERNAL ERROR: archetype not found");
-    from_arch.type_.extend_with(with).map_or(from_arch.id, |ty| ensure_archetype(world, ty))
+    from_arch.type_.extend_with(with).map_or(from_arch.id, |ty| {
+        // ensure a record for the new component.
+        if !world.components.contains(with) {
+            ComponentBuilder::new(Some(with)).build(world);
+        }
+
+        // get or create archetype.
+        ensure_archetype(world, ty)
+    })
 }

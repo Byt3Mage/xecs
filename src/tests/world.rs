@@ -1,4 +1,4 @@
-use crate::world::World;
+use crate::{error::EcsResult, view, world::World};
 
 struct MyStruct { x: usize }
 
@@ -8,27 +8,28 @@ impl Drop for MyStruct {
     }
 }
 
-macro_rules! entity {
-    ($world: expr) => {
-        { let id = $world.new_entity(); $crate::entity_view::EntityView::new(&mut $world, id) }
-    };
-}
-
 #[test]
-fn world_init() {
+fn world_init() -> EcsResult<()>{
     let mut world = World::new();
 
-    let id = match world.component_t::<MyStruct>() {
+    match world.component_t::<MyStruct>() {
         Ok(b) => b.build(&mut world),
         Err(id) => id,
     };
 
-    let mut bob = entity!(world);
-    bob.set_t(MyStruct {x: 69}).unwrap();
+    let bob = world.new_entity();
+    let alice = world.new_entity();
 
-    let bob  = bob.id();
+    let alice = view!{
+        @from(world, alice)
+        .add(bob)
+        .set_t(MyStruct {x: 42})?
+    }?;
 
-    let mut alice = entity!(world);
-    alice.set_t(MyStruct {x: 42}).unwrap();
-    alice.add(bob).unwrap();
+    let alice = view!{
+        @use(alice)
+        .set_t(MyStruct{x: 69}) | "unable to set MyStruct"
+    };
+
+    Ok(())
 }

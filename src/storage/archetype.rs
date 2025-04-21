@@ -1,7 +1,7 @@
 use std::{collections::HashMap, rc::Rc};
 
-use crate::{entity::Entity, graph::GraphNode, id::Id, type_info::Type, world::World};
-use super::{archetype_data::ArchetypeData, archetype_flags::ArchetypeFlags, archetype_index::ArchetypeId};
+use crate::{entity::Entity, flags::ArchetypeFlags, graph::GraphNode, id::Id, type_info::Type, world::World};
+use super::{ArchetypeData, archetype_index::ArchetypeId};
 
 pub struct Archetype {
     /// Handle to self in [ArchetypeIndex](super::archetype_index::ArchetypeIndex).
