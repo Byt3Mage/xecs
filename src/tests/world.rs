@@ -19,17 +19,17 @@ fn world_init() -> EcsResult<()>{
 
     let bob = world.new_entity();
     let alice = world.new_entity();
+    
+    let start  = std::time::Instant::now();
 
-    let alice = view!{
-        @from(world, alice)
-        .add(bob)
-        .set_t(MyStruct {x: 42})?
-    }?;
+    let bob_rec = world.entity_index.get_location(bob);
+    let alice_rec = world.entity_index.get_location(alice);
 
-    let alice = view!{
-        @use(alice)
-        .set_t(MyStruct{x: 69}) | "unable to set MyStruct"
-    };
+    let end = start.elapsed();
 
+    println!("{}", bob_rec.unwrap().0);
+    println!("{}", alice_rec.unwrap().0);
+
+    println!("get record took {:?}", end);
     Ok(())
 }

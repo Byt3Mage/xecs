@@ -2,22 +2,23 @@ use std::{collections::HashMap, ops::{Deref, DerefMut}};
 use const_assert::const_assert;
 use crate::{
     component::{
-        ComponentBuilder, ComponentValue, 
-        ComponentView, TypedComponentBuilder
-    }, component_index::ComponentIndex, entity::Entity, entity_index::EntityIndex, error::{component_not_registered_err, EcsError, EcsResult}, graph::archetype_traverse_add, id::{pair, Id}, storage::{
+        ComponentBuilder, ComponentRecord, ComponentValue, ComponentView, TypedComponentBuilder
+    }, component_index::ComponentIndex, entity::Entity, entity_index::EntityIndex, error::{component_not_registered_err, EcsError, EcsResult}, graph::archetype_traverse_add, id::{pair, Id}, memory::{BlockArena, Ref}, storage::{
         archetype::{move_entity, move_entity_to_root},
         archetype_index::{ArchetypeBuilder, ArchetypeId, ArchetypeIndex},
     }, type_info::{Type, TypeIndex, TypeMap}, world_utils::{get_component_value, get_component_value_mut, set_component_value}
 };
 
 pub struct World {
-    pub(crate) entity_index: EntityIndex,
+    pub entity_index: EntityIndex,
     pub(crate) components: ComponentIndex,
     pub(crate) type_index: TypeIndex,
     pub(crate) archetypes: ArchetypeIndex,
     pub(crate) archetype_map: HashMap<Type, ArchetypeId>,
     pub(crate) root_arch: ArchetypeId,
     pub(crate) type_ids: TypeMap,
+    pub(crate) components_fast: Vec<Ref<ComponentRecord>>,
+    pub(crate) components_arena: BlockArena<ComponentRecord>
 }
 
 impl World {
@@ -30,6 +31,8 @@ impl World {
             archetype_map: HashMap::new(),
             root_arch: ArchetypeId::null(),
             type_ids: TypeMap::new(),
+            components_fast: Vec::new(),
+            components_arena: BlockArena::new(100)
         };
 
         let builder = ArchetypeBuilder::new(vec![].into());

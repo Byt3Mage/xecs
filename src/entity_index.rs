@@ -1,6 +1,5 @@
 use std::{alloc::Layout, usize};
-
-use crate::{entity::Entity, entity_flags::EntityFlags, error::EntityIndexError, id::{generation, GENERATION_MASK}, storage::archetype_index::ArchetypeId};
+use crate::{entity::Entity, error::EntityIndexError, flags::EntityFlags, id::{generation, GENERATION_MASK}, storage::archetype_index::ArchetypeId};
 
 const PAGE_BITS: usize = 12;
 const PAGE_SIZE: usize = 1 << PAGE_BITS;
@@ -17,8 +16,7 @@ pub const fn increment_generation(e: Entity) -> Entity {
     (e & !GENERATION_MASK) | ((0xFFFF & (generation(e) + 1)) << 32)
 }
 
-pub(crate) struct EntityRecord {
-    pub cr: Option<u64>,
+pub struct EntityRecord {
     pub arch: ArchetypeId,
     pub row: usize,
     dense: usize,
@@ -49,7 +47,7 @@ impl Page {
 
 type PagePtr = Option<Box<Page>>;
 
-pub(crate) struct EntityIndex {
+pub struct EntityIndex {
     entities: Vec<Entity>,
     pages: Vec<PagePtr>,
     alive_count: usize,
@@ -136,9 +134,14 @@ impl EntityIndex {
     /// Returns the [EntityRecord] for the [Entity].
     /// 
     /// [Entity] must exist and must be alive to have a record.
-    pub(crate) fn get_record(&self, entity: Entity) -> Result<&EntityRecord, EntityIndexError> {
+    pub fn get_record(&self, entity: Entity) -> Result<&EntityRecord, EntityIndexError> {
         let (page_index, record_index) = to_id(entity); 
-        let page = self.get_page(page_index).ok_or(EntityIndexError::NonExistent(entity))?;
+
+        let page = match self.pages.get(page_index).and_then(Option::as_deref) {
+            Some(p) => p,
+            None => return Err(EntityIndexError::NonExistent(entity)),
+        };
+
         let record = &page.records[record_index];
     
         if record.dense == 0 {
@@ -155,7 +158,7 @@ impl EntityIndex {
     /// Returns the mutable [EntityRecord] for the [Entity].
     /// 
     /// [Entity] must exist and must be alive to have a record.
-    pub(crate) fn get_record_mut(&mut self, entity: Entity) -> Result<&mut EntityRecord, EntityIndexError> {
+    pub fn get_record_mut(&mut self, entity: Entity) -> Result<&mut EntityRecord, EntityIndexError> {
         let (page_index, record_index) = to_id(entity); 
 
         let page = match self.pages.get_mut(page_index).and_then(Option::as_deref_mut) {
@@ -220,10 +223,10 @@ impl EntityIndex {
         
         let last_index = { self.alive_count -= 1; self.alive_count };
 
-        record.cr = None;
         record.arch = ArchetypeId::null();
         record.row = 0;
         record.dense = last_index;
+        record.flags = EntityFlags::empty();
 
         let last_entity = std::mem::replace(&mut self.entities[last_index], increment_generation(entity)); 
         
@@ -264,10 +267,10 @@ impl EntityIndex {
         let page = Self::ensure_page(&mut self.pages, (id as usize) >> PAGE_BITS);
         let record = &mut page.records[(id as usize) & PAGE_MASK];
         
-        record.cr = None;
         record.arch = ArchetypeId::null();
         record.row = 0;
         record.dense = self.alive_count; self.alive_count += 1;
+        record.flags = EntityFlags::empty();
         
         debug_assert!(self.alive_count == self.entities.len());
         

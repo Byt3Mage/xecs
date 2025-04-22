@@ -2,7 +2,7 @@ pub mod archetype;
 pub mod archetype_index;
 
 use std::{alloc::Layout, ptr::NonNull, rc::Rc};
-use crate::{entity::Entity, entity_flags::EntityFlags, entity_index::EntityIndex, id::Id, pointer::{Ptr, PtrMut}, type_info::TypeInfo};
+use crate::{entity::Entity, entity_index::EntityIndex, id::Id, pointer::{Ptr, PtrMut}, type_info::TypeInfo};
 
 
 /// Trait for allocating and reallocating memory for a type-erased array.
@@ -120,32 +120,6 @@ impl TypeErased for NonNull<Entity> {
     }
 }
 
-impl TypeErased for NonNull<EntityFlags> {
-    unsafe fn alloc(&mut self, new_cap: usize) {
-        let new_layout = Layout::array::<EntityFlags>(new_cap).expect("Invalid laout");
-        let new_ptr = unsafe { std::alloc::alloc(new_layout) };
-
-        *self = match NonNull::new(new_ptr as *mut EntityFlags) {
-            Some(p) => p,
-            None => std::alloc::handle_alloc_error(new_layout)
-        };
-    }
-
-    unsafe fn realloc(&mut self, old_cap: usize, new_cap: usize) {
-        debug_assert!(new_cap > old_cap, "realloc with smaller capacity");
-        
-        let new_layout = Layout::array::<EntityFlags>(new_cap).expect("Invalid layout");
-        let old_layout = Layout::array::<EntityFlags>(old_cap).expect("Invalid layout");
-        let old_ptr = self.as_ptr() as *mut u8;
-        let new_ptr = unsafe { std::alloc::realloc(old_ptr, old_layout, new_layout.size()) };
-        
-        *self = match NonNull::new(new_ptr as *mut EntityFlags) {
-            Some(p) => p,
-            None => std::alloc::handle_alloc_error(old_layout)
-        };
-    }
-}
-
 /// Swaps rows `a` and `b`
 /// 
 /// This function does not perform any bounds checking.
@@ -169,7 +143,6 @@ unsafe fn swap_entities(entities: &mut NonNull<Entity>, a: usize, b: usize) {
 
 pub(crate) struct ArchetypeData {
     pub(super) entities: NonNull<Entity>,
-    pub(super) flags: NonNull<EntityFlags>,
     pub(super) columns: Box<[Column]>,
     len: usize,
     cap: usize,
@@ -179,7 +152,6 @@ impl ArchetypeData {
     pub fn new(columns: Box<[Column]>) -> Self {
         Self {
             entities: NonNull::dangling(),
-            flags: NonNull::dangling(),
             columns,
             len: 0,
             cap: 0,
@@ -202,12 +174,10 @@ impl ArchetypeData {
         unsafe {
             if self.cap == 0 {
                 self.entities.alloc(required_cap);
-                self.flags.alloc(required_cap);
                 self.columns.iter_mut().for_each(|col| col.alloc(required_cap));
             }
             else {
                 self.entities.realloc(self.cap, required_cap);
-                self.flags.realloc(self.cap, required_cap); 
                 self.columns.iter_mut().for_each(|col| col.realloc(self.cap, required_cap));
             };
         }
@@ -230,7 +200,6 @@ impl ArchetypeData {
         // * NonNull ptr safe to write.
         unsafe { 
             self.entities.as_ptr().add(self.len).write(entity);
-            self.flags.as_ptr().add(self.len).write(EntityFlags::empty());
         }
 
         let row = self.len; self.len += 1;
@@ -277,16 +246,6 @@ impl ArchetypeData {
         debug_assert!(row < self.len, "row out of bounds");
         // SAFETY: The caller ensures that `row` is valid.
         unsafe { *(self.entities.as_ptr().add(row)) }
-    }
-
-    /// Returns the entity flags at the specified `row`.
-    /// 
-    /// # Safety
-    /// - The row must be in-bounds (`row` < `self.len`).
-    pub unsafe fn get_flags_mut(&self, row: usize) -> &mut EntityFlags {
-        debug_assert!(row < self.len, "row out of bounds");
-        // SAFETY: The caller ensures that `row` is valid.
-        unsafe { self.flags.add(row).as_mut() }
     }
 
     /// Deletes the row by swapping with the last row 
@@ -358,10 +317,6 @@ impl Drop for ArchetypeData {
             let entt_layout = Layout::array::<Entity>(self.cap).expect("Invalid layout");
             let entt_ptr = self.entities.as_ptr() as *mut u8;
             std::alloc::dealloc(entt_ptr, entt_layout);
-
-            let flags_layout = Layout::array::<EntityFlags>(self.cap).expect("Invalid layout");
-            let flags_ptr = self.flags.as_ptr() as *mut u8;
-            std::alloc::dealloc(flags_ptr, flags_layout);
 
             for col in self.columns.iter() {
                 let size = col.type_info.size();

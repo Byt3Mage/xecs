@@ -41,17 +41,19 @@ macro_rules! chain_methods_impl {
 
 #[macro_export]
 macro_rules! view {
-    // Construct new view from world + ID
     (@from($world:expr, $id:expr)) => {{
         $crate::entity_view::EntityView::new(&mut $world, $id)
     }};
     
-    // Use existing view
     (@use($view:expr)) => { $view };
     
-    // Entry points
     (@from($world:expr, $id:expr) $($methods:tt)*) => {{
         let receiver = view!(@from($world, $id));
+        || -> Result<_, $crate::error::EcsError> { Ok($crate::chain_methods_impl!(receiver, $($methods)*))}()
+    }};
+    
+    (@use($view:expr) $($methods:tt)*) => {{
+        let receiver = view!(@use($view));
         || -> Result<_, $crate::error::EcsError> { Ok($crate::chain_methods_impl!(receiver, $($methods)*))}()
     }};
     

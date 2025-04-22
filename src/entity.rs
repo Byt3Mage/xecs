@@ -1,4 +1,4 @@
-use crate::{entity_flags::EntityFlags, id::HI_COMPONENT_ID, storage::archetype::inc_traversable, world::World};
+use crate::{flags::EntityFlags, id::HI_COMPONENT_ID, world::World};
 
 pub type Entity = u64;
 
@@ -31,22 +31,7 @@ pub const ECS_CHILD_OF: Entity = HI_COMPONENT_ID + 34;
 pub const ECS_IS_A: Entity = HI_COMPONENT_ID + 35;
 pub const ECS_DEPENDS_ON: Entity = HI_COMPONENT_ID + 36;
 
-#[macro_export]
-macro_rules! record_add_flag {
-    ($world: expr, $record: expr, $flag: expr) => {
-        {
-            
-        }
-    };
-}
-
 pub(crate) fn add_flag(world: &mut World, entity: Entity, flag: EntityFlags) {
     let record= world.entity_index.get_record_mut(entity).unwrap();
-    
-    if flag == EntityFlags::IS_TRAVERSABLE && !record.flags.contains(flag) {
-        let arch = world.archetypes.get_mut(record.arch).unwrap();
-        inc_traversable(arch, 1);
-    }
-
     record.flags |= flag;
 }

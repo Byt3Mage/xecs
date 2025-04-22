@@ -92,6 +92,7 @@ pub(crate) fn move_entity_to_root(world: &mut World, entity: Entity) {
 
     if arch.is_null() {
         let root_arch = world.archetypes.get_mut(world.root_arch).expect("INTERNAL ERROR: world must initialize root archetype");
+        
         // SAFETY: we guarantee root archetype should never contain columns, 
         // so only the entities array is initialized. 
         let new_row = unsafe { root_arch.data.new_row_uninit(entity) };
@@ -102,21 +103,6 @@ pub(crate) fn move_entity_to_root(world: &mut World, entity: Entity) {
         // SAFETY:
         // - row is valid in enitity index.
         // - we just checked that arch and root_arch are not the same.
-        unsafe {
-            move_entity(world, entity, arch, row, world.root_arch);
-        }
-    }
-}
-
-pub(crate) fn inc_traversable(arch: &mut Archetype, value: usize) {
-    arch.traversable_count += value;
-
-    if arch.traversable_count == 0 {
-        //arch.flags.remove(ArchetypeFlags::HAS_TRAVERSABLE);
-        todo!();
-    }
-    else if arch.traversable_count == value {
-        //arch.flags |= ArchetypeFlags::HAS_TRAVERSABLE;
-        todo!()
+        unsafe { move_entity(world, entity, arch, row, world.root_arch); }
     }
 }
