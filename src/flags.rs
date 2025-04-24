@@ -85,55 +85,55 @@ macro_rules! impl_bitflags {
     };
 }
 
-/// Represents a set of flags for archetypes, used to define various properties
-/// and behaviors of archetypes.
+/// Represents a set of flags for tables, used to define various properties
+/// and behaviors of tables.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ArchetypeFlags(u64);
+pub struct TableFlags(u64);
 
-impl ArchetypeFlags {
-    /// Indicates that the archetype has built-in components.
+impl TableFlags {
+    /// Indicates that the table has built-in components.
     pub const HAS_BUILTINS: Self = Self(1 << 1);
 
-    /// Indicates that the archetype stores prefabs.
+    /// Indicates that the table stores prefabs.
     pub const IS_PREFAB: Self = Self(1 << 2);
 
-    /// Indicates that the archetype has an `IsA` relationship.
+    /// Indicates that the table has an `IsA` relationship.
     pub const HAS_IS_A: Self = Self(1 << 3);
 
-    /// Indicates that the archetype has a `ChildOf` relationship.
+    /// Indicates that the table has a `ChildOf` relationship.
     pub const HAS_CHILD_OF: Self = Self(1 << 4);
 
-    /// Indicates that the archetype has components for `(Identifier, Name)`.
+    /// Indicates that the table has components for `(Identifier, Name)`.
     pub const HAS_NAME: Self = Self(1 << 5);
 
-    /// Indicates that the archetype has pairs.
+    /// Indicates that the table has pairs.
     pub const HAS_PAIRS: Self = Self(1 << 6);
 
-    /// Indicates that the archetype has module data.
+    /// Indicates that the table has module data.
     pub const HAS_MODULE: Self = Self(1 << 7);
 
-    /// Indicates that the archetype has the `EcsDisabled` component.
+    /// Indicates that the table has the `EcsDisabled` component.
     pub const IS_DISABLED: Self = Self(1 << 8);
 
-    /// Indicates that the archetype should never be returned by queries.
+    /// Indicates that the table should never be returned by queries.
     pub const NOT_QUERYABLE: Self = Self(1 << 9);
 
-    /// Indicates that the archetype has constructors.
+    /// Indicates that the table has constructors.
     pub const HAS_CTORS: Self = Self(1 << 10);
 
-    /// Indicates that the archetype has destructors.
+    /// Indicates that the table has destructors.
     pub const HAS_DTORS: Self = Self(1 << 11);
 
-    /// Indicates that the archetype supports copy semantics.
+    /// Indicates that the table supports copy semantics.
     pub const HAS_COPY: Self = Self(1 << 12);
 
-    /// Indicates that the archetype supports move semantics.
+    /// Indicates that the table supports move semantics.
     pub const HAS_MOVE: Self = Self(1 << 13);
 
-    /// Indicates that the archetype supports toggling.
+    /// Indicates that the table supports toggling.
     pub const HAS_TOGGLE: Self = Self(1 << 14);
 
-    /// Indicates that the archetype has overrides.
+    /// Indicates that the table has overrides.
     pub const HAS_OVERRIDES: Self = Self(1 << 15);
 
     pub const HAS_ON_ADD: Self = Self(1 << 16);
@@ -147,7 +147,7 @@ impl ArchetypeFlags {
     pub const HAS_UNION: Self = Self(1 << 24);
 }
 
-impl_bitflags!(ArchetypeFlags);
+impl_bitflags!(TableFlags);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EntityFlags(u64);

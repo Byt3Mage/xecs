@@ -1,4 +1,4 @@
-use crate::entity::{Entity, ECS_ANY, ECS_WILDCARD};
+use crate::entity::{ECS_ANY, ECS_WILDCARD, Entity};
 
 pub type Id = u64;
 
@@ -13,9 +13,9 @@ pub(crate) const PAIR: Id = 1 << 63;
 pub(crate) const ID_TAG: u64 = 1 << 11;
 
 /* Id flags */
-pub(crate) const ECS_PAIR: Id          = 1 << 63;
+pub(crate) const ECS_PAIR: Id = 1 << 63;
 pub(crate) const ECS_AUTO_OVERRIDE: Id = 1 << 62;
-pub(crate) const ECS_TOGGLE: Id        = 1 << 61;
+pub(crate) const ECS_TOGGLE: Id = 1 << 61;
 
 #[inline]
 pub const fn entity_hi(id: Id) -> u32 {
@@ -59,7 +59,11 @@ pub const fn generation(e: Entity) -> u64 {
 
 pub const fn strip_generation(id: Id) -> Id {
     // If this is not a pair, erase the generation bits
-    if (id & ID_FLAGS_MASK) != 0 { id & !GENERATION_MASK } else { id }
+    if (id & ID_FLAGS_MASK) != 0 {
+        id & !GENERATION_MASK
+    } else {
+        id
+    }
 }
 
 pub const fn is_wildcard(id: Id) -> bool {
@@ -68,7 +72,7 @@ pub const fn is_wildcard(id: Id) -> bool {
     }
 
     if !is_pair(id) {
-        return false
+        return false;
     }
 
     let first = pair_first(id) as u64;

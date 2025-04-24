@@ -1,5 +1,5 @@
-pub mod archetype;
-pub mod archetype_index;
+pub mod table;
+pub mod table_index;
 
 use std::{alloc::Layout, ptr::NonNull, rc::Rc};
 use crate::{entity::Entity, entity_index::EntityIndex, id::Id, pointer::{Ptr, PtrMut}, type_info::TypeInfo};
@@ -24,7 +24,7 @@ trait TypeErased {
 }
 
 pub(crate) struct Column {
-    /// Component Id in archetype that owns this column.
+    /// Component Id in table that owns this column.
     /// 
     /// This id may be different from the id on type_info.
     component: Id,
@@ -141,14 +141,14 @@ unsafe fn swap_entities(entities: &mut NonNull<Entity>, a: usize, b: usize) {
     }
 }
 
-pub(crate) struct ArchetypeData {
+pub(crate) struct TableData {
     pub(super) entities: NonNull<Entity>,
     pub(super) columns: Box<[Column]>,
     len: usize,
     cap: usize,
 }
 
-impl ArchetypeData {
+impl TableData {
     pub fn new(columns: Box<[Column]>) -> Self {
         Self {
             entities: NonNull::dangling(),
@@ -158,7 +158,7 @@ impl ArchetypeData {
         }
     }
     
-    /// Returns number of rows in this archetype.
+    /// Returns number of rows in this table.
     #[inline]
     pub fn count(&self) -> usize {
         self.len
@@ -307,7 +307,7 @@ impl ArchetypeData {
     }
 }
 
-impl Drop for ArchetypeData {
+impl Drop for TableData {
     fn drop(&mut self) {
         if self.cap == 0 {
             return;

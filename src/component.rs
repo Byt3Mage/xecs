@@ -1,31 +1,33 @@
-use std::{alloc::Layout, any::TypeId, collections::HashMap, fmt::Debug, marker::PhantomData, rc::Rc};
+use crate::{
+    entity::{ECS_ANY, ECS_WILDCARD, Entity},
+    flags::ComponentFlags,
+    id::{HI_COMPONENT_ID, Id},
+    storage::table_index::TableId,
+    type_info::{TypeHooksBuilder, TypeInfo, TypeName},
+    world::{World, WorldRef},
+};
 use const_assert::const_assert;
 use simple_ternary::tnr;
-use crate::{
-    entity::{Entity, ECS_ANY, ECS_WILDCARD}, 
-    flags::ComponentFlags, 
-    id::Id, 
-    storage::archetype_index::ArchetypeId, 
-    type_info::{TypeHooksBuilder, TypeInfo, TypeName}, 
-    world::{World, WorldRef}
+use std::{
+    alloc::Layout, any::TypeId, collections::HashMap, fmt::Debug, marker::PhantomData, rc::Rc,
 };
 
 pub trait ComponentValue: 'static {}
 
-impl <T: 'static> ComponentValue for T {}
+impl<T: 'static> ComponentValue for T {}
 
 pub struct TypedComponentView<'a, C: ComponentValue> {
     id: Id,
     world: WorldRef<'a>,
-    phantom: PhantomData<fn()-> C>
+    phantom: PhantomData<fn() -> C>,
 }
 
-impl <'a, T: ComponentValue> TypedComponentView<'a, T> {
+impl<'a, T: ComponentValue> TypedComponentView<'a, T> {
     pub(crate) fn new(world: impl Into<WorldRef<'a>>, id: Id) -> Self {
         Self {
             id,
             world: world.into(),
-            phantom: PhantomData
+            phantom: PhantomData,
         }
     }
 
@@ -37,10 +39,10 @@ impl <'a, T: ComponentValue> TypedComponentView<'a, T> {
 
 pub struct ComponentView<'a> {
     id: Id,
-    world: WorldRef<'a>
+    world: WorldRef<'a>,
 }
 
-impl <'a> ComponentView <'a> {
+impl<'a> ComponentView<'a> {
     pub(crate) fn new(world: impl Into<WorldRef<'a>>, id: Id) -> Self {
         Self {
             id,
@@ -54,22 +56,21 @@ impl <'a> ComponentView <'a> {
     }
 }
 
-/// Component location info within an [Archetype](crate::storage::archetype::Archetype).
+/// Component location info within an [table](crate::storage::table::table).
 pub(crate) struct ComponentLocation {
-    /// First index of id within the archetype's [Type](crate::type_info::Type).
+    /// First index of id within the table's [Type](crate::type_info::Type).
     pub id_index: usize,
-    /// Number of times the id occurs in the archetype. E.g id, (id, \*), (\*, id).
+    /// Number of times the id occurs in the table. E.g id, (id, \*), (\*, id).
     pub id_count: usize,
-    /// First [Column](crate::storage::archetype_data::Column) index where the id appears (if not tag).
-    pub column_index: Option<usize>,
+    /// First [Column](crate::storage::Column) index where the id appears (if not tag).
+    pub column_index: isize,
 }
 
 pub struct ComponentRecord {
     pub id: Id,
     pub flags: ComponentFlags,
     pub type_info: Option<Rc<TypeInfo>>,
-    pub archetypes: HashMap<ArchetypeId, ComponentLocation>
-    
+    pub tables: HashMap<TableId, ComponentLocation>,
 }
 
 impl ComponentRecord {
@@ -78,7 +79,7 @@ impl ComponentRecord {
             id,
             flags,
             type_info: ti,
-            archetypes: HashMap::new(),
+            tables: HashMap::new(),
         }
     }
 }
@@ -115,11 +116,11 @@ impl ComponentBuilder {
     }
 
     pub fn set_type<C: ComponentValue>(mut self, hooks: TypeHooksBuilder<C>) -> Self {
-        self.type_info = Some(TypeInfo { 
-            id: 0, 
-            layout: Layout::new::<C>(), 
-            hooks: hooks.build(), 
-            type_name: None, 
+        self.type_info = Some(TypeInfo {
+            id: 0,
+            layout: Layout::new::<C>(),
+            hooks: hooks.build(),
+            type_name: None,
             type_id: TypeId::of::<C>(),
         });
 
@@ -142,16 +143,19 @@ impl ComponentBuilder {
     }
 
     pub(crate) fn build(self, world: &mut World) -> Id {
-        let id = self.id.unwrap_or_else(||world.new_entity());
+        let id = self.id.unwrap_or_else(|| world.new_entity());
 
         debug_assert!(!world.components.contains(id), "component already exists");
-        assert!(id != 0 && id != ECS_WILDCARD && id != ECS_ANY, "INVALID ID: component id is null or forbidden");
+        assert!(
+            id != 0 && id != ECS_WILDCARD && id != ECS_ANY,
+            "INVALID ID: component id is null or forbidden"
+        );
 
         let mut cr = ComponentRecord::new(id, self.flags, None);
-        
+
         if let Some(mut ti) = self.type_info {
             ti.id = id;
-            ti.type_name = self.name;// TODO: add scoped names.
+            ti.type_name = self.name; // TODO: add scoped names.
             let ti = Rc::new(ti);
 
             cr.type_info = Some(Rc::clone(&ti));
@@ -165,7 +169,9 @@ impl ComponentBuilder {
 
 impl Debug for ComponentBuilder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ComponentBuilder").field("id", &self.id).finish()
+        f.debug_struct("ComponentBuilder")
+            .field("id", &self.id)
+            .finish()
     }
 }
 
@@ -175,18 +181,22 @@ pub struct TypedComponentBuilder<C> {
     flags: ComponentFlags,
 }
 
-impl <C: ComponentValue> TypedComponentBuilder<C> {
+impl<C: ComponentValue> TypedComponentBuilder<C> {
     pub(crate) fn new() -> Self {
-        Self{
-            hooks: const { tnr!{size_of::<C>() != 0 => Some(TypeHooksBuilder::new()) : None} },
+        Self {
+            hooks: const {
+                tnr! {size_of::<C>() != 0 => Some(TypeHooksBuilder::new()) : None}
+            },
             name: None,
             flags: ComponentFlags::empty(),
         }
     }
 
     pub fn new_named(name: impl Into<TypeName>) -> Self {
-        Self{
-            hooks: const { tnr!{size_of::<C>() != 0 => Some(TypeHooksBuilder::new()) : None} },
+        Self {
+            hooks: const {
+                tnr! {size_of::<C>() != 0 => Some(TypeHooksBuilder::new()) : None}
+            },
             name: Some(name.into()),
             flags: ComponentFlags::empty(),
         }
@@ -224,22 +234,28 @@ impl <C: ComponentValue> TypedComponentBuilder<C> {
         self
     }
 
-    pub fn on_add<F>(mut self, f: F) -> Self 
-    where F: FnMut(Entity) + 'static {
+    pub fn on_add<F>(mut self, f: F) -> Self
+    where
+        F: FnMut(Entity) + 'static,
+    {
         const_assert!(|C| size_of::<C>() != 0, "can't set on_add hook for ZST");
         self.hooks = self.hooks.map(|b: TypeHooksBuilder<C>| b.with_add(f));
         self
     }
 
-    pub fn on_set<F>(mut self, f: F) -> Self 
-    where F: FnMut(Entity, &mut C) + 'static {
+    pub fn on_set<F>(mut self, f: F) -> Self
+    where
+        F: FnMut(Entity, &mut C) + 'static,
+    {
         const_assert!(|C| size_of::<C>() != 0, "can't set on_set hook for ZST");
         self.hooks = self.hooks.map(|b| b.with_set(f));
         self
     }
 
-    pub fn on_remove<F>(mut self, f: F) -> Self 
-    where F: FnMut(Entity, &mut C) + 'static {
+    pub fn on_remove<F>(mut self, f: F) -> Self
+    where
+        F: FnMut(Entity, &mut C) + 'static,
+    {
         const_assert!(|C| size_of::<C>() != 0, "can't set on_remove hook for ZST");
         self.hooks = self.hooks.map(|b| b.with_remove(f));
         self
@@ -250,7 +266,7 @@ impl <C: ComponentValue> TypedComponentBuilder<C> {
 
         let id = world.new_entity();
         let mut cr = ComponentRecord::new(id, self.flags, None);
-        
+
         if let Some(hooks) = self.hooks {
             let ti = Rc::new(TypeInfo {
                 id,

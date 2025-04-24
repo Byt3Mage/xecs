@@ -152,7 +152,7 @@ impl TypeInfo {
     }
 }
 
-/// Sorted list of ids in an [Arcehetype](crate::storage::archetype::Archetype)
+/// Sorted list of ids in an [Arcehetype](crate::storage::table::table)
 #[derive(Hash, PartialEq, Eq, Clone)]
 pub struct Type(Rc<[Id]>);
 
