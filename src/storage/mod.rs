@@ -1,11 +1,7 @@
-use component_sparse::ComponentSparse;
-use std::{
-    alloc::Layout,
-    collections::HashMap,
-    ptr::{NonNull, swap_nonoverlapping},
-    rc::Rc,
-};
+use component_sparse_set::ComponentSparseSet;
+use std::{alloc::Layout, collections::HashMap, ptr::NonNull, rc::Rc};
 use table_index::TableId;
+use tag_sparse_set::TagSparseSet;
 
 use crate::{
     component::ComponentLocation,
@@ -14,10 +10,11 @@ use crate::{
     type_info::TypeInfo,
 };
 
-pub mod component_sparse;
+pub mod component_sparse_set;
 pub mod table;
 pub mod table_data;
 pub mod table_index;
+pub mod tag_sparse_set;
 
 /// Trait for allocating and reallocating memory for a type-erased array.
 ///
@@ -185,6 +182,7 @@ pub enum StorageType {
 }
 
 pub enum Storage {
-    Sparse(ComponentSparse),
+    SparseTag(TagSparseSet),
+    SparseData(ComponentSparseSet),
     Tables(HashMap<TableId, ComponentLocation>),
 }

@@ -100,19 +100,16 @@ impl<T, const PAGE_SIZE: usize> PagedSparseSet<T, PAGE_SIZE> {
         let dense = page[offset];
 
         // entity not in set.
-        if dense == usize::MAX {
-            return None;
-        }
-
-        if self.dense[dense].entity != entity {
+        if dense == usize::MAX || self.dense[dense].entity != entity {
             return None;
         }
 
         page[offset] = usize::MAX;
 
+        let last_index = self.dense.len() - 1;
         let removed = self.dense.swap_remove(dense);
 
-        if dense != (self.dense.len() - 1) {
+        if dense != last_index {
             let entity = &self.dense[dense].entity;
             let page = self.pages[Self::page_index(entity.id())]
                 .as_mut()

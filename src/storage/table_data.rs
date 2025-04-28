@@ -92,6 +92,15 @@ impl TableData {
         self.cap = required_cap;
     }
 
+    fn grow(&mut self) {
+        let new_cap = if self.cap == 0 {
+            4
+        } else {
+            self.cap.checked_mul(2).expect("Capacity overflow")
+        };
+        self.reserve(new_cap);
+    }
+
     /// Creates a new row without initializing its elements.
     /// This function will grow all columns if necessary.
     ///
@@ -101,7 +110,7 @@ impl TableData {
     pub unsafe fn new_row_uninit(&mut self, entity: Entity) -> usize {
         // TODO: check if I should use `[Self::grow]` instead
         if self.len == self.cap {
-            self.reserve(1);
+            self.grow();
         }
 
         // SAFETY:

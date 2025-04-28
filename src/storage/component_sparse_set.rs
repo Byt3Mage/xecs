@@ -90,17 +90,24 @@ impl Dense {
         self.cap = required_cap;
     }
 
+    fn grow(&mut self) {
+        let new_cap = if self.cap == 0 {
+            4 // Initial capacity
+        } else {
+            self.cap.checked_mul(2).expect("Capacity overflow")
+        };
+
+        self.reserve(new_cap.saturating_sub(self.len));
+    }
+
     /// Adds the entity to the dense array
     /// and returns a mutable pointer to the component.
     ///
     /// # Safety
-    /// - The caller must ensure that the entity is not already present in the array.
     /// - The caller must uphold safety invariants of [ptr::write](std::ptr::write)
     unsafe fn push(&mut self, entity: Entity) -> PtrMut {
-        // TODO: check if I should use `grow` instead
-        // grow would use a growth factor to reduce allocation overhead.
         if self.len == self.cap {
-            self.reserve(1);
+            self.grow();
         }
 
         // SAFETY:
@@ -118,9 +125,9 @@ impl Dense {
     /// Returns the entity and component value.
     ///
     /// # Safety
-    /// - Caller must ensure that the column is not empty.
-    unsafe fn pop_unchecked(&mut self) -> (Entity, OwningPtr) {
-        debug_assert!(self.len > 0, "cannot pop from empty column");
+    /// - Caller must uphold safety invariants of [ptr::read](std::ptr::read)
+    unsafe fn pop(&mut self) -> (Entity, OwningPtr) {
+        assert!(self.len > 0, "cannot pop from empty column");
 
         let row = self.len - 1;
         self.len -= 1;
@@ -128,7 +135,6 @@ impl Dense {
         unsafe {
             let entity = self.entities.as_ptr().add(row).read();
             let ptr = self.column.get_mut(row).promote();
-
             (entity, ptr)
         }
     }
@@ -167,18 +173,16 @@ fn new_page() -> Page {
     }
 }
 
-/// Sparse set of entities with associated data.
+/// Type erased sparse set of entities with associated data.
 ///
 /// Provides pointer stability for the data.
-pub(crate) struct ComponentSparse {
+pub(crate) struct ComponentSparseSet {
     dense: Dense,
     pages: Vec<Option<Page>>,
 }
 
-impl ComponentSparse {
+impl ComponentSparseSet {
     pub(crate) fn new(component: Entity, type_info: Rc<TypeInfo>) -> Self {
-        // We initialize the sparse set with a single entity
-        // The `0` entity is used as the null entity.
         Self {
             dense: Dense::new(component, type_info),
             pages: vec![],
@@ -271,7 +275,7 @@ impl ComponentSparse {
 
         // SAFETY: dense array is not empty.
         unsafe {
-            let (_, ptr) = self.dense.pop_unchecked();
+            let (_, ptr) = self.dense.pop();
             Some(ptr.as_ptr().cast::<C>().read())
         }
     }

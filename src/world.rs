@@ -124,7 +124,8 @@ impl World {
         };
 
         match &cr.storage {
-            Storage::Sparse(set) => set.has_entity(entity),
+            Storage::SparseTag(set) => set.has_entity(entity),
+            Storage::SparseData(set) => set.has_entity(entity),
             Storage::Tables(tables) => {
                 let table = &self.table_index[r.table];
 

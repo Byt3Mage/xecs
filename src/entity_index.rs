@@ -210,11 +210,9 @@ impl EntityIndex {
             std::mem::replace(&mut self.entities[last_index], entity.inc_generation());
 
         // swap last alive entity with removed entity.
-        if dense != self.alive_count {
-            let last_page = self
-                .pages
-                .get_mut(page_index(last_entity))
-                .and_then(Option::as_mut)
+        if dense != last_index {
+            let last_page = self.pages[page_index(last_entity)]
+                .as_mut()
                 .expect("INTERNAL ERROR: entity index corrupted");
 
             let last_record = &mut last_page.records[page_offset(last_entity)];
