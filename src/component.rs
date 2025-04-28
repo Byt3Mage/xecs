@@ -1,60 +1,16 @@
 use crate::{
-    entity::{ECS_ANY, ECS_WILDCARD, Entity},
+    entity::Entity,
     flags::ComponentFlags,
-    id::{HI_COMPONENT_ID, Id},
-    storage::table_index::TableId,
-    type_info::{TypeHooksBuilder, TypeInfo, TypeName},
-    world::{World, WorldRef},
+    storage::Storage,
+    type_info::{HooksBuilder, TypeInfo, TypeName},
+    world::World,
 };
 use const_assert::const_assert;
 use simple_ternary::tnr;
-use std::{
-    alloc::Layout, any::TypeId, collections::HashMap, fmt::Debug, marker::PhantomData, rc::Rc,
-};
+use std::{alloc::Layout, any::TypeId, fmt::Debug, rc::Rc};
 
 pub trait ComponentValue: 'static {}
-
 impl<T: 'static> ComponentValue for T {}
-
-pub struct TypedComponentView<'a, C: ComponentValue> {
-    id: Id,
-    world: WorldRef<'a>,
-    phantom: PhantomData<fn() -> C>,
-}
-
-impl<'a, T: ComponentValue> TypedComponentView<'a, T> {
-    pub(crate) fn new(world: impl Into<WorldRef<'a>>, id: Id) -> Self {
-        Self {
-            id,
-            world: world.into(),
-            phantom: PhantomData,
-        }
-    }
-
-    #[inline]
-    pub fn id(&self) -> Id {
-        self.id
-    }
-}
-
-pub struct ComponentView<'a> {
-    id: Id,
-    world: WorldRef<'a>,
-}
-
-impl<'a> ComponentView<'a> {
-    pub(crate) fn new(world: impl Into<WorldRef<'a>>, id: Id) -> Self {
-        Self {
-            id,
-            world: world.into(),
-        }
-    }
-
-    #[inline]
-    pub fn id(&self) -> Id {
-        self.id
-    }
-}
 
 /// Component location info within an [table](crate::storage::table::table).
 pub(crate) struct ComponentLocation {
@@ -67,32 +23,21 @@ pub(crate) struct ComponentLocation {
 }
 
 pub struct ComponentRecord {
-    pub id: Id,
-    pub flags: ComponentFlags,
-    pub type_info: Option<Rc<TypeInfo>>,
-    pub tables: HashMap<TableId, ComponentLocation>,
-}
-
-impl ComponentRecord {
-    pub(crate) fn new(id: Id, flags: ComponentFlags, ti: Option<Rc<TypeInfo>>) -> Self {
-        Self {
-            id,
-            flags,
-            type_info: ti,
-            tables: HashMap::new(),
-        }
-    }
+    pub(crate) id: Entity,
+    pub(crate) flags: ComponentFlags,
+    pub(crate) type_info: Option<Rc<TypeInfo>>,
+    pub(crate) storage: Storage,
 }
 
 pub struct ComponentBuilder {
-    id: Option<Id>,
+    id: Entity,
     name: Option<TypeName>,
     flags: ComponentFlags,
     type_info: Option<TypeInfo>,
 }
 
 impl ComponentBuilder {
-    pub(crate) fn new(id: Option<Id>) -> Self {
+    pub(crate) fn new(id: Entity) -> Self {
         Self {
             id,
             name: None,
@@ -101,7 +46,7 @@ impl ComponentBuilder {
         }
     }
 
-    pub fn new_named(id: Option<Id>, name: impl Into<TypeName>) -> Self {
+    pub fn new_named(id: Entity, name: impl Into<TypeName>) -> Self {
         Self {
             id,
             name: Some(name.into()),
@@ -115,9 +60,9 @@ impl ComponentBuilder {
         self
     }
 
-    pub fn set_type<C: ComponentValue>(mut self, hooks: TypeHooksBuilder<C>) -> Self {
+    pub fn set_type<C: ComponentValue>(mut self, hooks: HooksBuilder<C>) -> Self {
         self.type_info = Some(TypeInfo {
-            id: 0,
+            id: Entity::NULL,
             layout: Layout::new::<C>(),
             hooks: hooks.build(),
             type_name: None,
@@ -142,28 +87,8 @@ impl ComponentBuilder {
         self
     }
 
-    pub(crate) fn build(self, world: &mut World) -> Id {
-        let id = self.id.unwrap_or_else(|| world.new_entity());
-
-        debug_assert!(!world.components.contains(id), "component already exists");
-        assert!(
-            id != 0 && id != ECS_WILDCARD && id != ECS_ANY,
-            "INVALID ID: component id is null or forbidden"
-        );
-
-        let mut cr = ComponentRecord::new(id, self.flags, None);
-
-        if let Some(mut ti) = self.type_info {
-            ti.id = id;
-            ti.type_name = self.name; // TODO: add scoped names.
-            let ti = Rc::new(ti);
-
-            cr.type_info = Some(Rc::clone(&ti));
-            world.type_index.insert(id, ti);
-        }
-
-        world.components.insert(id, cr);
-        id
+    pub(crate) fn build(self, world: &mut World) -> Entity {
+        todo!()
     }
 }
 
@@ -176,7 +101,7 @@ impl Debug for ComponentBuilder {
 }
 
 pub struct TypedComponentBuilder<C> {
-    hooks: Option<TypeHooksBuilder<C>>,
+    hooks: Option<HooksBuilder<C>>,
     name: Option<TypeName>,
     flags: ComponentFlags,
 }
@@ -185,7 +110,7 @@ impl<C: ComponentValue> TypedComponentBuilder<C> {
     pub(crate) fn new() -> Self {
         Self {
             hooks: const {
-                tnr! {size_of::<C>() != 0 => Some(TypeHooksBuilder::new()) : None}
+                tnr! {size_of::<C>() != 0 => Some(HooksBuilder::new()) : None}
             },
             name: None,
             flags: ComponentFlags::empty(),
@@ -195,7 +120,7 @@ impl<C: ComponentValue> TypedComponentBuilder<C> {
     pub fn new_named(name: impl Into<TypeName>) -> Self {
         Self {
             hooks: const {
-                tnr! {size_of::<C>() != 0 => Some(TypeHooksBuilder::new()) : None}
+                tnr! {size_of::<C>() != 0 => Some(HooksBuilder::new()) : None}
             },
             name: Some(name.into()),
             flags: ComponentFlags::empty(),
@@ -239,7 +164,7 @@ impl<C: ComponentValue> TypedComponentBuilder<C> {
         F: FnMut(Entity) + 'static,
     {
         const_assert!(|C| size_of::<C>() != 0, "can't set on_add hook for ZST");
-        self.hooks = self.hooks.map(|b: TypeHooksBuilder<C>| b.with_add(f));
+        self.hooks = self.hooks.map(|b: HooksBuilder<C>| b.with_add(f));
         self
     }
 
@@ -261,28 +186,7 @@ impl<C: ComponentValue> TypedComponentBuilder<C> {
         self
     }
 
-    pub fn build(self, world: &mut World) -> Id {
-        debug_assert!(!world.type_ids.has_t::<C>(), "component already exists.");
-
-        let id = world.new_entity();
-        let mut cr = ComponentRecord::new(id, self.flags, None);
-
-        if let Some(hooks) = self.hooks {
-            let ti = Rc::new(TypeInfo {
-                id,
-                layout: Layout::new::<C>(),
-                hooks: hooks.build(),
-                type_name: Some(self.name.unwrap_or(std::any::type_name::<C>().into())), // TODO: scoped name.
-                type_id: TypeId::of::<C>(),
-            });
-
-            cr.type_info = Some(Rc::clone(&ti));
-            world.type_index.insert(id, ti);
-        };
-
-        world.type_ids.set_t::<C>(id);
-        world.components.insert(id, cr);
-
-        id
+    pub fn build(self, world: &mut World) -> Entity {
+        todo!()
     }
 }

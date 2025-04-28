@@ -11,10 +11,10 @@ use std::{marker::PhantomData, mem::ManuallyDrop, ptr::NonNull};
 #[repr(transparent)]
 pub struct Ptr<'a> {
     inner: NonNull<u8>,
-    phantom: PhantomData<&'a u8>
+    phantom: PhantomData<&'a u8>,
 }
 
-impl <'a> Ptr <'a> {
+impl<'a> Ptr<'a> {
     #[inline]
     pub unsafe fn new(ptr: NonNull<u8>) -> Self {
         Self {
@@ -30,7 +30,7 @@ impl <'a> Ptr <'a> {
     #[inline]
     pub unsafe fn deref<T>(self) -> &'a T {
         // SAFETY: The caller ensures the pointee is of type `T` and the pointer can be dereferenced.
-        unsafe { & *(self.as_ptr().cast::<T>()) }
+        unsafe { &*(self.as_ptr().cast::<T>()) }
     }
 
     /// Gets the underlying pointer, erasing the associated lifetime.
@@ -57,11 +57,11 @@ impl <'a> Ptr <'a> {
 #[derive(Debug)]
 #[repr(transparent)]
 pub struct PtrMut<'a> {
-    inner: NonNull<u8>, 
+    inner: NonNull<u8>,
     phantom: PhantomData<&'a mut u8>,
 }
 
-impl <'a> PtrMut<'a> {
+impl<'a> PtrMut<'a> {
     /// Creates a new `PtrMut` from a NonNull ptr.
     ///
     /// # Safety
@@ -92,7 +92,17 @@ impl <'a> PtrMut<'a> {
         unsafe { &mut *(self.as_ptr().cast::<T>()) }
     }
 
-     /// Gets an immutable reference from this mutable reference
+    /// Writes the value to the pointee
+    ///
+    /// # Safety
+    /// `T` must be the erased pointee type for this [`PtrMut`].
+    /// Caller must uphold the safety guarantees of [`write`](std::ptr::write).
+    pub unsafe fn write<T>(self, value: T) {
+        // SAFETY: The caller ensures the pointee is of type `T` and the pointer can be dereferenced.
+        unsafe { self.as_ptr().cast::<T>().write(value) }
+    }
+
+    /// Gets an immutable reference from this mutable reference
     #[inline]
     pub fn as_ref(&self) -> Ptr<'a> {
         // SAFETY: The `PtrMut` type's guarantees about the validity of this pointer are a superset of `Ptr` s guarantees
@@ -102,7 +112,10 @@ impl <'a> PtrMut<'a> {
     #[inline]
     pub unsafe fn promote(self) -> OwningPtr<'a> {
         // SAFETY: The pointer is valid and the lifetime is accurate.
-        OwningPtr{ inner: self.inner, phantom: PhantomData }
+        OwningPtr {
+            inner: self.inner,
+            phantom: PhantomData,
+        }
     }
 }
 
@@ -124,11 +137,11 @@ impl From<PtrMut<'_>> for NonNull<u8> {
 #[derive(Debug)]
 #[repr(transparent)]
 pub struct OwningPtr<'a> {
-    inner: NonNull<u8>, 
+    inner: NonNull<u8>,
     phantom: PhantomData<&'a mut u8>,
 }
 
-impl <'a> OwningPtr<'a> {
+impl<'a> OwningPtr<'a> {
     /// Creates a new `OwnedPtr` from a NonNull ptr.
     ///
     /// # Safety

@@ -1,6 +1,6 @@
 use std::{fmt::Debug, rc::Rc};
 
-use crate::{component::ComponentView, entity::Entity, id::Id};
+use crate::entity::Entity;
 
 /// Error returned if accessing an entity [EntityRecord](crate::entity_index::EntityRecord) fails
 #[derive(Debug)]
@@ -12,12 +12,12 @@ pub enum EntityIndexError {
     NotAlive(Entity),
 
     /// [Entity] doesn't exist or exists but is not alive.
-    NotValid(Entity)
+    NotValid(Entity),
 }
 
 #[derive(Debug)]
 pub enum EntityCreateError {
-    NameInUse(Id, Rc<str>),
+    NameInUse(Entity, Rc<str>),
 }
 
 #[derive(Debug)]
@@ -25,6 +25,8 @@ pub enum EcsError {
     EntityIndex(EntityIndexError),
     EntityCreate(EntityCreateError),
     Component(&'static str),
+    UnregisteredComponent(Entity),
+    MissingComponent(Entity),
     TypeMismatch,
 }
 
@@ -36,12 +38,16 @@ impl From<EntityIndexError> for EcsError {
 
 pub type EcsResult<T> = Result<T, EcsError>;
 
-#[inline]
-pub(crate) const fn component_not_registered_err<T>() -> EcsResult<T> {
+pub(crate) const fn unregistered_component_err<T>() -> EcsResult<T> {
     Err(EcsError::Component("component not registered."))
 }
 
 #[inline]
 pub(crate) const fn type_mismatch_err<T>() -> EcsResult<T> {
     Err(EcsError::TypeMismatch)
+}
+
+#[inline]
+pub(crate) const fn missing_component_err<T>(id: Entity) -> EcsResult<T> {
+    Err(EcsError::MissingComponent(id))
 }

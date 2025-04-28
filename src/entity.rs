@@ -1,37 +1,59 @@
-use crate::{flags::EntityFlags, id::HI_COMPONENT_ID, world::World};
+use std::fmt::Display;
 
-pub type Entity = u64;
+use crate::{flags::EntityFlags, world::World};
 
-/// Tag used to indicate an entity is a module.
-pub const ECS_MODULE: Entity = HI_COMPONENT_ID + 4;
-/// Tag used to indicate an entity is private to a module.
-pub const ECS_PRIVATE: Entity = HI_COMPONENT_ID + 5;
-/// Tag used to indicate an entity is a prefab.
-pub const ECS_PREFAB: Entity = HI_COMPONENT_ID + 6;
-/// When added to an entity, the tag is skipped by queries,
-/// unless DISABLED is explicitly queried for.
-pub const ECS_DISABLED: Entity = HI_COMPONENT_ID + 7;
-/// Tag used for entities that should never be returned by queries.
-/// Used for entities that have special meaning to the query engine.
-pub const ECS_NOT_QUERYABLE: Entity = HI_COMPONENT_ID + 8;
+pub type EntityId = u32;
 
-/// Used for slots in prefabs.
-pub const ECS_SLOT_OF: Entity = HI_COMPONENT_ID + 9;
-/// Used to track entities used with id flags.
-pub const ECS_FLAG: Entity = HI_COMPONENT_ID + 10;
+/// FFI compatible representation of an entity.
+#[repr(transparent)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Entity(u64);
 
-/* Marker entities for query encoding */
-pub const ECS_WILDCARD: Entity = HI_COMPONENT_ID + 11;
-pub const ECS_ANY: Entity = HI_COMPONENT_ID + 12;
-pub const ECS_THIS: Entity = HI_COMPONENT_ID + 13;
-pub const ECS_VARIABLE: Entity = HI_COMPONENT_ID + 14;
+impl Display for Entity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Entity({}, {})", self.id(), self.generation())
+    }
+}
 
-/* Builtin relationships */
-pub const ECS_CHILD_OF: Entity = HI_COMPONENT_ID + 34;
-pub const ECS_IS_A: Entity = HI_COMPONENT_ID + 35;
-pub const ECS_DEPENDS_ON: Entity = HI_COMPONENT_ID + 36;
+impl Entity {
+    pub const NULL: Entity = Entity(0);
+
+    /// Creates a new `Entity` from raw bits.
+    pub const fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    /// Converts the `Entity` back to raw bits.
+    pub const fn to_raw(&self) -> u64 {
+        self.0
+    }
+
+    /// Returns the ID (lower 32 bits).
+    pub const fn id(&self) -> u32 {
+        self.0 as u32
+    }
+
+    /// Returns the generation (higher 32 bits).
+    pub const fn generation(&self) -> u32 {
+        (self.0 >> 32) as u32
+    }
+
+    /// Increments the generation counter (wraps on overflow).
+    ///
+    /// Allowed to wrap since its highly unlikely that
+    /// the same entity will be created and destroyed 4 billion times.
+    pub const fn inc_generation(&self) -> Self {
+        Self((((self.0 >> 32) + 1) as u64) << 32 | (self.id() as u64))
+    }
+
+    pub const fn as_usize(&self) -> usize {
+        self.0 as usize
+    }
+}
+
+pub const HI_COMPONENT_ID: Entity = Entity(256);
 
 pub(crate) fn add_flag(world: &mut World, entity: Entity, flag: EntityFlags) {
-    let record= world.entity_index.get_record_mut(entity).unwrap();
+    let record = world.entity_index.get_record_mut(entity).unwrap();
     record.flags |= flag;
 }

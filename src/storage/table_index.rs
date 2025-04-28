@@ -1,225 +1,96 @@
-use super::{Column, TableData};
 use crate::{
-    component::ComponentLocation, flags::TableFlags, graph::GraphNode, id::HI_COMPONENT_ID,
-    storage::table::Table, type_info::Type, world::World,
+    flags::TableFlags, graph::GraphNode, storage::table::Table, type_info::Type, world::World,
 };
 use std::{
-    alloc::Layout,
     collections::HashMap,
     fmt::Display,
-    mem::MaybeUninit,
-    ptr::{self, NonNull},
-    rc::Rc,
+    ops::{Index, IndexMut},
 };
-
-const PAGE_BITS: usize = 12;
-const PAGE_SIZE: usize = 1 << PAGE_BITS;
-const PAGE_MASK: usize = PAGE_SIZE - 1;
-
-#[inline(always)]
-const fn page_index(id: u32) -> usize {
-    (id as usize) >> PAGE_BITS
-}
-
-#[inline(always)]
-const fn page_offset(id: u32) -> usize {
-    (id as usize) & PAGE_MASK
-}
-
-#[inline(always)]
-const fn increase_version(id: TableId) -> TableId {
-    TableId {
-        idx: id.idx,
-        ver: id.ver + 1,
-    }
-}
 
 /// Stable, non-recycled handle into [TableIndex].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(C)]
-pub(crate) struct TableId {
-    idx: u32,
-    ver: u32,
-}
+#[repr(transparent)]
+pub(crate) struct TableId(usize);
 
 impl Display for TableId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "tableId({}, v{})", self.idx, self.ver)
+        write!(f, "TableId({})", self.0)
     }
 }
 
 impl TableId {
-    pub const fn null() -> Self {
-        Self {
-            idx: core::u32::MAX,
-            ver: 1,
-        }
-    }
-}
+    pub(crate) const NULL: Self = Self(usize::MAX);
 
-struct Page {
-    sparse: Box<[usize; PAGE_SIZE]>,
-    data: Box<[MaybeUninit<Table>; PAGE_SIZE]>,
-}
-
-impl Page {
-    fn new() -> Self {
-        let layout = Layout::array::<usize>(PAGE_SIZE).expect("Invalid layout");
-
-        let sparse = unsafe {
-            let ptr = std::alloc::alloc_zeroed(layout) as *mut usize;
-
-            if ptr.is_null() {
-                std::alloc::handle_alloc_error(layout)
-            }
-
-            Box::from_raw(ptr as *mut [usize; PAGE_SIZE])
-        };
-
-        let data = unsafe { Box::new_uninit().assume_init() };
-        Self { sparse, data }
+    pub(crate) const fn is_null(&self) -> bool {
+        self.0 == Self::NULL.0
     }
 }
 
 pub(crate) struct TableIndex {
-    dense: Vec<TableId>,
-    pages: Vec<Option<Page>>,
-    alive_count: usize,
-    max_id: u64,
-}
-
-impl Drop for TableIndex {
-    fn drop(&mut self) {
-        // Iterate through all alive entries
-        // 0 is reserved for the root table
-        for id in self.dense[1..self.alive_count].iter() {
-            if let Some(page) = self
-                .pages
-                .get_mut(page_index(id.idx))
-                .and_then(Option::as_mut)
-            {
-                let offset = page_offset(id.idx);
-                let dense = page.sparse[offset];
-
-                if dense != 0 && dense < self.alive_count && self.dense[dense] == *id {
-                    // data is initialized, so it can be dropped safely
-                    unsafe { page.data[offset].assume_init_drop() };
-                }
-            }
-        }
-    }
+    tables: Vec<Table>,
+    table_ids: HashMap<Type, TableId>,
 }
 
 impl TableIndex {
     pub(crate) fn new() -> Self {
         Self {
-            dense: Vec::new(),
-            pages: Vec::new(),
-            alive_count: 0,
-            max_id: 0,
+            tables: Vec::new(),
+            table_ids: HashMap::new(),
         }
     }
 
-    fn ensure_page(pages: &mut Vec<Option<Page>>, idx: u32) -> &mut Page {
-        let page_idx = page_index(idx);
-
-        if page_idx >= pages.len() {
-            pages.resize_with(page_idx + 1, || None);
-        }
-        // Allocate a new page if not already created
-        pages[page_idx].get_or_insert_with(Page::new)
-    }
-
-    fn add_with_id<F>(&mut self, f: F) -> NonNull<Table>
+    fn add_with_id<F>(&mut self, f: F) -> TableId
     where
         F: FnOnce(TableId) -> Table,
     {
-        let dense_count = self.dense.len();
-        let alive_count = self.alive_count;
-
-        debug_assert!(alive_count <= dense_count);
-
-        if alive_count < dense_count {
-            // recycle id.
-            let id = self.dense[alive_count];
-            let table = f(id);
-
-            self.alive_count += 1;
-            let page = Self::ensure_page(&mut self.pages, id.idx);
-            let data = &mut page.data[page_offset(id.idx)];
-            let ptr = data.as_mut_ptr();
-
-            // SAFETY: ptr is stable and immovable. TODO
-            unsafe {
-                ptr.write(table);
-                NonNull::new_unchecked(ptr)
-            }
-        } else {
-            // create new id.
-            let id = TableId {
-                idx: (self.max_id + 1) as u32,
-                ver: 0,
-            };
-            let table = f(id);
-
-            self.max_id += 1;
-
-            debug_assert!(
-                self.max_id as u32 <= u32::MAX,
-                "Max number of tables reached"
-            );
-
-            self.dense.push(id);
-
-            let page = Self::ensure_page(&mut self.pages, id.idx);
-            let offset = page_offset(id.idx);
-            let data = &mut page.data[offset];
-            let ptr = data.as_mut_ptr();
-
-            page.sparse[offset] = self.alive_count;
-            self.alive_count += 1;
-
-            // SAFETY: ptr is stable. TODO
-            unsafe {
-                ptr.write(table);
-                NonNull::new_unchecked(ptr)
-            }
-        }
+        let id = TableId(self.tables.len());
+        let table = f(id);
+        self.table_ids.insert(table.type_.clone(), id);
+        self.tables.push(table);
+        id
     }
 
-    /// Removes and returns the [Table] corresponding to the handle if it exists.
-    fn remove(&mut self, id: TableId) -> Option<Table> {
-        let page = self
-            .pages
-            .get_mut(page_index(id.idx))
-            .and_then(Option::as_mut)?;
-        let offset = page_offset(id.idx);
-        let dense = page.sparse[offset];
+    #[inline]
+    pub(crate) fn get(&self, id: TableId) -> Option<&Table> {
+        self.tables.get(id.0)
+    }
 
-        if dense == 0 || dense >= self.alive_count || self.dense[dense].ver != id.ver {
-            return None;
+    #[inline]
+    pub(crate) fn get_mut(&mut self, id: TableId) -> Option<&mut Table> {
+        self.tables.get_mut(id.0)
+    }
+
+    #[inline]
+    pub(crate) fn get_id(&self, type_: &Type) -> Option<TableId> {
+        self.table_ids.get(type_).copied()
+    }
+
+    #[inline]
+    pub(crate) fn get_2_mut(&mut self, a: TableId, b: TableId) -> Option<(&mut Table, &mut Table)> {
+        let len = self.tables.len();
+
+        if a == b || a.0 >= len || b.0 >= len {
+            None
+        } else {
+            let ptr = self.tables.as_mut_ptr();
+            Some(unsafe { (&mut *(ptr.add(a.0)), &mut *(ptr.add(b.0))) })
         }
+    }
+}
 
-        let table = Some(unsafe { ptr::read(page.data[offset].as_mut_ptr()) });
-        let last_alive = {
-            self.alive_count -= 1;
-            self.alive_count
-        };
-        let last_id = std::mem::replace(&mut self.dense[last_alive], increase_version(id));
+impl Index<TableId> for TableIndex {
+    type Output = Table;
 
-        // swap last alive table with removed table.
-        if dense != last_alive {
-            let last_page = self
-                .pages
-                .get_mut(page_index(last_id.idx))
-                .and_then(Option::as_mut)
-                .expect("INTERNAL ERROR: Table index corrupted");
+    #[inline(always)]
+    fn index(&self, index: TableId) -> &Self::Output {
+        &self.tables[index.0]
+    }
+}
 
-            last_page.sparse[page_offset(last_id.idx)] = dense;
-            self.dense[dense] = last_id;
-        }
-
-        table
+impl IndexMut<TableId> for TableIndex {
+    #[inline(always)]
+    fn index_mut(&mut self, index: TableId) -> &mut Self::Output {
+        &mut self.tables[index.0]
     }
 }
 
@@ -234,7 +105,7 @@ impl TableBuilder {
         Self {
             flags: TableFlags::default(),
             type_: type_ids,
-            node: todo!(),
+            node: GraphNode::new(),
         }
     }
 
@@ -243,8 +114,8 @@ impl TableBuilder {
         self
     }
 
-    pub(crate) fn build(self, world: &mut World) -> NonNull<Table> {
-        world.tables.add_with_id(|table_id| {
+    pub(crate) fn build(self, world: &mut World) -> TableId {
+        /*world.table_index.add_with_id(|table_id| {
             let count = self.type_.id_count();
             let mut columns = Vec::with_capacity(count);
             let mut component_map_lo = [-1; HI_COMPONENT_ID as usize];
@@ -252,8 +123,7 @@ impl TableBuilder {
 
             for (idx, &id) in self.type_.iter().enumerate() {
                 let cr = world
-                    .components
-                    .get_mut(id)
+                    .get_component(id)
                     .expect("Component record not found.");
                 let mut cl = ComponentLocation {
                     id_index: idx,
@@ -275,8 +145,6 @@ impl TableBuilder {
 
                     columns.push(Column::new(id, Rc::clone(ti)));
                 }
-
-                cr.tables.insert(table_id, cl);
             }
 
             Table {
@@ -287,8 +155,9 @@ impl TableBuilder {
                 component_map_hi,
                 node: self.node,
                 data: TableData::new(columns.into()),
-                traversable_count: 0,
             }
-        })
+        })*/
+
+        todo!()
     }
 }

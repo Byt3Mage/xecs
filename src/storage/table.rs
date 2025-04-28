@@ -1,16 +1,13 @@
-use std::{collections::HashMap, ptr::NonNull, rc::Rc};
+use std::{collections::HashMap, rc::Rc};
 
-use super::{TableData, table_index::TableId};
+use super::{table_data::TableData, table_index::TableId};
 use crate::{
-    entity::Entity,
+    entity::{Entity, HI_COMPONENT_ID},
     flags::TableFlags,
     graph::GraphNode,
-    id::{HI_COMPONENT_ID, Id},
     type_info::Type,
     world::World,
 };
-
-pub(crate) type TablePtr = Option<NonNull<Table>>;
 
 pub(crate) struct Table {
     /// Handle to self in [tableIndex](super::table_index::tableIndex).
@@ -19,16 +16,14 @@ pub(crate) struct Table {
     pub(crate) flags: TableFlags,
     /// Vector of component [Id]s
     pub(crate) type_: Type,
-    /// Maps component ids to columns (fast path).
-    pub(crate) component_map_lo: [isize; HI_COMPONENT_ID as usize],
-    /// Maps component ids to columns (slow path).
-    pub(crate) component_map_hi: HashMap<Id, usize>,
-    /// Node representation for traversals.
-    pub(crate) node: GraphNode,
     /// Storage for entities and components.
     pub(crate) data: TableData,
-    /// Number of traversable entities in this table.
-    pub(crate) traversable_count: usize,
+    /// Maps component ids to columns (fast path).
+    pub(crate) component_map_lo: [isize; HI_COMPONENT_ID.as_usize()],
+    /// Maps component ids to columns (slow path).
+    pub(crate) component_map_hi: HashMap<Entity, usize>,
+    /// Node representation for traversals.
+    pub(crate) node: GraphNode,
 }
 
 /// Moves entity from src table to dst.
@@ -39,10 +34,12 @@ pub(crate) struct Table {
 pub(crate) unsafe fn move_entity(
     world: &mut World,
     entity: Entity,
-    src: &mut Table,
+    src: TableId,
     src_row: usize,
-    dst: &mut Table,
+    dst: TableId,
 ) -> usize {
+    let (src, dst) = world.table_index.get_2_mut(src, dst).unwrap();
+
     debug_assert!(src_row < src.data.count(), "row out of bounds");
 
     let dst_row = unsafe { dst.data.new_row_uninit(entity) };
@@ -104,9 +101,7 @@ pub(crate) unsafe fn move_entity(
     src.data
         .delete_row(&mut world.entity_index, src_row, should_drop);
 
-    world
-        .entity_index
-        .set_location(entity, NonNull::from(dst), dst_row);
+    world.entity_index.set_location(entity, dst.id, dst_row);
 
     dst_row
 }
@@ -114,25 +109,22 @@ pub(crate) unsafe fn move_entity(
 pub(crate) fn move_entity_to_root(world: &mut World, entity: Entity) {
     let r = world.entity_index.get_record_mut(entity).unwrap();
 
-    if r.table.is_none() {
+    if r.table.is_null() {
+        r.table = world.root_table;
+        let root = &mut world.table_index[world.root_table];
         // SAFETY:
-        // * root_table is NonNull.
-        // * root_table should never contain columns, so only the entities array is initialized.
-        r.table = Some(world.root_table);
-        r.row = unsafe { world.root_table.as_mut().data.new_row_uninit(entity) };
-    } else {
-        // SAFETY: we just checked that the table is not None.
-        let mut table = unsafe { r.table.unwrap_unchecked() };
-        let mut root = world.root_table;
+        // * root_table should never contain columns,
+        // so only the entities array is initialized.
+        r.row = unsafe { root.data.new_row_uninit(entity) };
+    } else if r.table != world.root_table {
+        let src = r.table;
         let row = r.row;
 
-        if table != world.root_table {
-            // SAFETY:
-            // - row is valid in enitity index.
-            // - we just checked that src and dst tables are not the same.
-            unsafe {
-                move_entity(world, entity, table.as_mut(), row, root.as_mut());
-            }
+        // SAFETY:
+        // - row is valid in enitity index.
+        // - we just checked that src and dst tables are not the same.
+        unsafe {
+            move_entity(world, entity, src, row, world.root_table);
         }
     }
 }

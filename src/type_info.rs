@@ -1,11 +1,14 @@
+use crate::{component::ComponentValue, entity::Entity, pointer::ConstNonNull};
 use const_assert::const_assert;
-use std::{alloc::Layout, any::TypeId, collections::HashMap, marker::PhantomData, ops::Deref, ptr::NonNull, rc::Rc};
-use crate::{component::ComponentValue, entity::Entity, id::Id, pointer::ConstNonNull};
+use std::{
+    alloc::Layout, any::TypeId, collections::HashMap, marker::PhantomData, ops::Deref,
+    ptr::NonNull, rc::Rc,
+};
 
 pub type TypeName = Box<str>;
 
 /// Built-in move function for components.
-/// 
+///
 /// # Safety
 /// - The caller must ensure that the pointers are non-null and aligned for T.
 /// - The caller must ensure to never read from src until it is written to.
@@ -16,12 +19,14 @@ unsafe fn move_fn<T: ComponentValue>(src: NonNull<u8>, dst: NonNull<u8>) {
 }
 
 /// Built-in drop function for components.
-/// 
+///
 /// # Safety
 /// - The caller must ensure that the pointer is non-null and aligned for T.
 /// - The caller must ensure to never use the pointer after the drop.
 unsafe fn drop_fn<T>(ptr: NonNull<u8>) {
-   unsafe { ptr.cast::<T>().drop_in_place(); }
+    unsafe {
+        ptr.cast::<T>().drop_in_place();
+    }
 }
 
 type DefaultHook = Box<dyn Fn(NonNull<u8>)>;
@@ -30,18 +35,16 @@ type AddHook = Box<dyn FnMut(Entity)>;
 type SetHook = Box<dyn FnMut(Entity, NonNull<u8>)>;
 type RemoveHook = Box<dyn FnMut(Entity, NonNull<u8>)>;
 
-pub struct TypeHooksBuilder<C> 
-{
+pub struct HooksBuilder<C> {
     default: Option<DefaultHook>,
     clone: Option<CloneHook>,
     on_add: Option<AddHook>,
     on_set: Option<SetHook>,
     on_remove: Option<RemoveHook>,
-    phantom: PhantomData<fn(Entity, &mut C)>
+    phantom: PhantomData<fn(Entity, &mut C)>,
 }
 
-impl <C: ComponentValue> TypeHooksBuilder<C>
-{
+impl<C: ComponentValue> HooksBuilder<C> {
     pub const fn new() -> Self {
         const_assert!(|C| size_of::<C>() != 0, "can't create type hooks for ZST");
 
@@ -56,44 +59,64 @@ impl <C: ComponentValue> TypeHooksBuilder<C>
     }
 
     pub fn with_default(mut self, f: fn() -> C) -> Self {
-        self.default = Some(Box::new(move |ptr| unsafe { ptr.as_ptr().cast::<C>().write(f()); }));
+        self.default = Some(Box::new(move |ptr| unsafe {
+            ptr.as_ptr().cast::<C>().write(f());
+        }));
         self
     }
 
     pub fn with_clone(mut self, f: fn(&C) -> C) -> Self {
-        self.clone = Some(Box::new(move |src, dst|{
+        self.clone = Some(Box::new(move |src, dst| {
             let src = src.cast::<C>();
             let dst = dst.cast::<C>();
-            unsafe { dst.write(f(src.as_ref()));}
+            unsafe {
+                dst.write(f(src.as_ref()));
+            }
         }));
 
         self
     }
 
-    pub fn with_add<F>(mut self, mut f: F) -> Self 
-    where F: FnMut(Entity) + 'static {
+    pub fn with_add<F>(mut self, mut f: F) -> Self
+    where
+        F: FnMut(Entity) + 'static,
+    {
         self.on_add = Some(Box::new(move |entity| f(entity)));
         self
     }
 
-    pub fn with_set<F>(mut self, mut f: F) -> Self 
-    where F: FnMut(Entity, &mut C) + 'static {
-        self.on_set = Some(Box::new(move |entity, ptr| f(entity, unsafe { ptr.cast().as_mut() })));
+    pub fn with_set<F>(mut self, mut f: F) -> Self
+    where
+        F: FnMut(Entity, &mut C) + 'static,
+    {
+        self.on_set = Some(Box::new(move |entity, ptr| {
+            f(entity, unsafe { ptr.cast().as_mut() })
+        }));
         self
     }
 
-    pub fn with_remove<F>(mut self, mut f: F) -> Self 
-    where F: FnMut(Entity, &mut C) + 'static {
-        self.on_remove = Some(Box::new(move |entity, ptr| f(entity, unsafe { ptr.cast().as_mut() })));
+    pub fn with_remove<F>(mut self, mut f: F) -> Self
+    where
+        F: FnMut(Entity, &mut C) + 'static,
+    {
+        self.on_remove = Some(Box::new(move |entity, ptr| {
+            f(entity, unsafe { ptr.cast().as_mut() })
+        }));
         self
     }
 
     pub fn build(self) -> TypeHooks {
         TypeHooks {
             move_fn: move_fn::<C>,
-            drop_fn: const { if std::mem::needs_drop::<C>() { Some(drop_fn::<C>)} else {None} },
+            drop_fn: const {
+                if std::mem::needs_drop::<C>() {
+                    Some(drop_fn::<C>)
+                } else {
+                    None
+                }
+            },
             default: self.default,
-            clone:self.clone,
+            clone: self.clone,
             on_add: self.on_add,
             on_set: self.on_set,
             on_remove: self.on_remove,
@@ -101,20 +124,19 @@ impl <C: ComponentValue> TypeHooksBuilder<C>
     }
 }
 
-
 pub struct TypeHooks {
     /// Built-in move function for components.
-    /// 
+    ///
     /// # Safety
     /// - The caller must ensure that the pointers are non-null and aligned for data type.
     /// - The caller must ensure to never use `src` after the move.
-    pub(crate) move_fn: unsafe fn (src: NonNull<u8>, dst: NonNull<u8>),
+    pub(crate) move_fn: unsafe fn(src: NonNull<u8>, dst: NonNull<u8>),
     /// Built-in drop function for components.
-    /// 
+    ///
     /// # Safety
     /// - The caller must ensure that the pointer is non-null and aligned for the data type.
     /// - The caller must ensure to never use the pointer after the drop.
-    pub(crate) drop_fn: Option<unsafe fn (ptr: NonNull<u8>)>,
+    pub(crate) drop_fn: Option<unsafe fn(ptr: NonNull<u8>)>,
     pub(crate) default: Option<DefaultHook>,
     pub(crate) clone: Option<CloneHook>,
     pub(crate) on_add: Option<AddHook>,
@@ -123,7 +145,7 @@ pub struct TypeHooks {
 }
 
 pub struct TypeInfo {
-    pub(crate) id: Id,
+    pub(crate) id: Entity,
     pub(crate) layout: Layout,
     pub(crate) hooks: TypeHooks,
     pub(crate) type_name: Option<TypeName>,
@@ -132,7 +154,7 @@ pub struct TypeInfo {
 
 impl TypeInfo {
     #[inline]
-    pub fn id(&self) -> Id {
+    pub fn id(&self) -> Entity {
         self.id
     }
 
@@ -153,30 +175,23 @@ impl TypeInfo {
 }
 
 /// Sorted list of ids in an [Arcehetype](crate::storage::table::table)
-#[derive(Hash, PartialEq, Eq, Clone)]
-pub struct Type(Rc<[Id]>);
+#[derive(Hash, PartialEq, Eq)]
+pub struct Type(Rc<[Entity]>);
 
-impl Type {
-    #[inline]
-    pub fn ids(&self) -> &[Id] {
-        &self.0
-    }
-
-    #[inline]
-    pub fn id_count(&self) -> usize {
-        self.0.len()
+impl Clone for Type {
+    fn clone(&self) -> Self {
+        Self(Rc::clone(&self.0))
     }
 }
 
-impl From<Vec<Id>> for Type {
-    fn from(value: Vec<Id>) -> Self {
+impl From<Vec<Entity>> for Type {
+    fn from(value: Vec<Entity>) -> Self {
         Self(value.into())
     }
 }
 
-
 impl Deref for Type {
-    type Target = [Id];
+    type Target = [Entity];
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -184,12 +199,22 @@ impl Deref for Type {
 }
 
 impl Type {
+    #[inline]
+    pub fn ids(&self) -> &[Entity] {
+        &self.0
+    }
+
+    #[inline]
+    pub fn id_count(&self) -> usize {
+        self.0.len()
+    }
+
     /// Creates a new sorted type from [Type] and new id.
     ///
     /// Returns [None] if the source type already contains id.
-    pub fn extend_with(&self, with: Id) -> Option<Self> {
+    pub fn extend_with(&self, with: Entity) -> Option<Self> {
         /// Find location where to insert id into type
-        fn find_type_insert(ids: &[Id], to_add: Id) -> Option<usize> {
+        fn find_type_insert(ids: &[Entity], to_add: Entity) -> Option<usize> {
             for (i, &id) in ids.iter().enumerate() {
                 if id == to_add {
                     return None;
@@ -215,7 +240,7 @@ impl Type {
 }
 
 pub struct TypeMap {
-    pub ids: HashMap<core::any::TypeId, Id>,
+    pub ids: HashMap<core::any::TypeId, Entity>,
 }
 
 impl TypeMap {
@@ -226,22 +251,22 @@ impl TypeMap {
     }
 
     #[inline]
-    pub fn get(&self, ty_id: core::any::TypeId) -> Option<Id> {
+    pub fn get(&self, ty_id: core::any::TypeId) -> Option<Entity> {
         self.ids.get(&ty_id).copied()
     }
 
     #[inline]
-    pub fn get_t<T: ComponentValue>(&self) -> Option<Id> {
+    pub fn get_t<T: ComponentValue>(&self) -> Option<Entity> {
         self.get(core::any::TypeId::of::<T>())
     }
 
     #[inline]
-    pub(crate) fn set_t<T: ComponentValue>(&mut self, id: Id) {
+    pub(crate) fn set_t<T: ComponentValue>(&mut self, id: Entity) {
         self.set(TypeId::of::<T>(), id);
     }
 
     #[inline]
-    pub(crate) fn set(&mut self, ty_id: TypeId, id: Id) {
+    pub(crate) fn set(&mut self, ty_id: TypeId, id: Entity) {
         self.ids.insert(ty_id, id);
     }
 
@@ -257,29 +282,28 @@ impl TypeMap {
 }
 
 pub struct TypeIndex {
-    infos: HashMap<Id, Rc<TypeInfo>>
+    infos: HashMap<Entity, Rc<TypeInfo>>,
 }
 
 impl TypeIndex {
     pub fn new() -> Self {
         Self {
-            infos: HashMap::new()
+            infos: HashMap::new(),
         }
     }
 
     #[inline(always)]
-    pub fn get(&self, id: Id) -> Option<&Rc<TypeInfo>> {
+    pub fn get(&self, id: Entity) -> Option<&Rc<TypeInfo>> {
         self.infos.get(&id)
     }
 
     #[inline(always)]
-    pub fn has_info(&self, id: Id) -> bool {
+    pub fn has_info(&self, id: Entity) -> bool {
         self.infos.contains_key(&id)
     }
 
     #[inline(always)]
-    pub fn insert(&mut self, id: Id, ti: Rc<TypeInfo>)
-    {
+    pub fn insert(&mut self, id: Entity, ti: Rc<TypeInfo>) {
         self.infos.insert(id, ti);
     }
 }
