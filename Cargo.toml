@@ -7,6 +7,7 @@ description = "eXtended ecs"
 [dependencies]
 const-assert = {git = "https://github.com/aquarius2019/const-assert.git"}
 simple-ternary = "0.3.0"
+thiserror = "2.0.12"
 
 [dev-dependencies]
 criterion = "0.5.1"

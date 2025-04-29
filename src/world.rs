@@ -1,15 +1,8 @@
-use std::{
-    collections::HashMap,
-    ops::{Deref, DerefMut},
-};
-
-use const_assert::const_assert;
-
 use crate::{
     component::{ComponentBuilder, ComponentRecord, ComponentValue, TypedComponentBuilder},
     entity::{Entity, HI_COMPONENT_ID},
     entity_index::EntityIndex,
-    error::EcsResult,
+    error::{EcsResult, MissingComponent, UnregisteredComponent, UnregisteredType},
     storage::{
         Storage,
         table::move_entity_to_root,
@@ -18,7 +11,35 @@ use crate::{
     type_id::TypeImpl,
     type_info::TypeIndex,
 };
+use const_assert::const_assert;
+use std::{
+    collections::HashMap,
+    ops::{Deref, DerefMut},
+};
 
+macro_rules! get_component {
+    ($world: expr, $id: expr) => {{
+        if $id < $crate::entity::HI_COMPONENT_ID {
+            Ok(&$world.components_lo[$id.id() as usize])
+        } else {
+            $world
+                .components_hi
+                .get(&$id)
+                .ok_or(UnregisteredComponent($id))
+        }
+    }};
+
+    (mut, $world: expr, $id: expr) => {{
+        if $id < $crate::entity::HI_COMPONENT_ID {
+            Ok(&mut $world.components_lo[$id.id() as usize])
+        } else {
+            $world
+                .components_hi
+                .get_mut(&$id)
+                .ok_or(UnregisteredComponent($id))
+        }
+    }};
+}
 pub struct World {
     pub entity_index: EntityIndex,
     pub(crate) type_index: TypeIndex,
@@ -48,24 +69,24 @@ impl World {
     /// # Panics
     /// Panics if the component type is not registered.
     #[inline(always)]
-    pub fn id_t<C: ComponentValue>(&mut self) -> Entity {
+    pub fn id_t<C: ComponentValue>(&mut self) -> Result<Entity, UnregisteredType> {
         TypeImpl::<C>::id(self)
     }
 
     /// Gets a builder for registering the component or returns the id if already registered.
     #[inline(always)]
     pub fn component_t<C: ComponentValue>(&mut self) -> Result<TypedComponentBuilder<C>, Entity> {
-        match TypeImpl::<C>::try_id(self) {
-            None => Ok(TypedComponentBuilder::new()),
-            Some(id) => Err(id),
+        match TypeImpl::<C>::id(self) {
+            Ok(id) => Err(id),
+            Err(_) => Ok(TypedComponentBuilder::new()),
         }
     }
 
     /// Gets the registered component or returns a builder to create one from `id`.
     pub fn component(&mut self, id: Entity) -> Option<ComponentBuilder> {
-        match self.get_component(id) {
-            Some(_) => None,
-            None => Some(ComponentBuilder::new(id)),
+        match get_component!(self, id) {
+            Ok(_) => None,
+            Err(_) => Some(ComponentBuilder::new(id)),
         }
     }
 
@@ -79,14 +100,6 @@ impl World {
         let entity = self.entity_index.new_id();
         move_entity_to_root(self, entity);
         entity
-    }
-
-    pub(crate) fn get_component(&self, id: Entity) -> Option<&ComponentRecord> {
-        if id < HI_COMPONENT_ID {
-            Some(&self.components_lo[id.id() as usize])
-        } else {
-            self.components_hi.get(&id)
-        }
     }
 
     /// Add the `id` as tag to entity.
@@ -108,34 +121,27 @@ impl World {
             "can't use add_t for component, use set_t instead."
         );
 
-        self.add(entity, TypeImpl::<C>::id(self))
+        self.add(entity, TypeImpl::<C>::id(self)?)
     }
 
     /// Checks if the entity has the component.
-    pub fn has(&self, entity: Entity, id: Entity) -> bool {
-        let Some(cr) = self.get_component(id) else {
-            // id is not a component.
-            return false;
-        };
-
-        let Ok(r) = self.entity_index.get_record(entity) else {
-            // entity is not alive.
-            return false;
-        };
+    pub fn has(&self, entity: Entity, id: Entity) -> EcsResult<bool> {
+        let cr = get_component!(self, id)?;
+        let r = self.entity_index.get_record(entity)?;
 
         match &cr.storage {
-            Storage::SparseTag(set) => set.has_entity(entity),
-            Storage::SparseData(set) => set.has_entity(entity),
+            Storage::SparseTag(set) => Ok(set.has(entity)),
+            Storage::SparseData(set) => Ok(set.has(entity)),
             Storage::Tables(tables) => {
                 let table = &self.table_index[r.table];
 
                 if id < HI_COMPONENT_ID {
                     if table.component_map_lo[id.as_usize()] >= 0 {
-                        return true;
+                        return Ok(true);
                     }
                 }
 
-                tables.contains_key(&r.table)
+                Ok(tables.contains_key(&r.table))
             }
         }
     }
@@ -144,8 +150,8 @@ impl World {
     ///
     /// Returns `false` if the type is not registered
     /// or the entity does not have the type.
-    pub fn has_t<C: ComponentValue>(&self, entity: Entity) -> bool {
-        self.has(entity, TypeImpl::<C>::id(self))
+    pub fn has_t<C: ComponentValue>(&self, entity: Entity) -> EcsResult<bool> {
+        self.has(entity, TypeImpl::<C>::id(self)?)
     }
 
     #[inline]
@@ -163,7 +169,7 @@ impl World {
     }
 
     pub fn set_t<C: ComponentValue>(&mut self, entity: Entity, value: C) -> EcsResult<()> {
-        self.set(entity, TypeImpl::<C>::id(self), value)
+        self.set(entity, TypeImpl::<C>::id(self)?, value)
     }
 
     #[inline]
@@ -173,11 +179,26 @@ impl World {
             "can't use get for tag, did you want to check with has?"
         );
 
-        todo!()
+        let cr = get_component!(self, id)?;
+        let r = self.entity_index.get_record(entity)?;
+        let comp = match &cr.storage {
+            Storage::SparseTag(_) => None,
+            Storage::SparseData(set) => {
+                // SAFETY: TODO: type checking.
+                unsafe { set.get::<C>(entity) }
+            }
+            Storage::Tables(_) => {
+                let t = &self.table_index[r.table];
+                // SAFETY: valid entity must have valid row
+                unsafe { t.get::<C>(r.row, id) }
+            }
+        };
+
+        comp.ok_or_else(|| MissingComponent(id, entity).into())
     }
 
     pub fn get_t<C: ComponentValue>(&self, entity: Entity) -> EcsResult<&C> {
-        self.get(entity, TypeImpl::<C>::id(self))
+        self.get(entity, TypeImpl::<C>::id(self)?)
     }
 
     #[inline]
@@ -187,11 +208,25 @@ impl World {
             "can't use get for tag, did you want to check with has?"
         );
 
-        todo!()
+        // TODO: type checking.
+
+        let cr = get_component!(mut, self, id)?;
+        let r = self.entity_index.get_record(entity)?;
+        let comp = match &mut cr.storage {
+            Storage::SparseTag(_) => None,
+            Storage::SparseData(set) => unsafe { set.get_mut::<C>(entity) },
+            Storage::Tables(_) => {
+                let t = &mut self.table_index[r.table];
+                // SAFETY: valid entity must have valid row
+                unsafe { t.get_mut::<C>(r.row, id) }
+            }
+        };
+
+        comp.ok_or_else(|| MissingComponent(id, entity).into())
     }
 
     pub fn get_mut_t<C: ComponentValue>(&mut self, entity: Entity) -> EcsResult<&mut C> {
-        self.get_mut(entity, TypeImpl::<C>::id(self))
+        self.get_mut(entity, TypeImpl::<C>::id(self)?)
     }
 }
 

@@ -49,6 +49,10 @@ impl Entity {
     pub const fn as_usize(&self) -> usize {
         self.0 as usize
     }
+
+    pub const fn is_null(&self) -> bool {
+        self.0 == Self::NULL.0
+    }
 }
 
 pub const HI_COMPONENT_ID: Entity = Entity(256);

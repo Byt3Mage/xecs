@@ -6,7 +6,11 @@ use std::{
     },
 };
 
-use crate::{entity::Entity, world::World};
+use crate::{
+    entity::Entity,
+    error::{EcsResult, UnregisteredComponent, UnregisteredType},
+    world::World,
+};
 
 static MAX_INDEX: AtomicUsize = AtomicUsize::new(0);
 
@@ -45,33 +49,20 @@ impl<T> TypeImpl<T> {
     }
 
     /// Gets the entity ID of the component type.
-    ///
-    /// # Panics
-    /// Panics if the component is not registered.
-    pub fn id(world: &World) -> Entity {
-        let id = match world.type_ids.get(Self::index()) {
-            Some(&id) if id != Entity::NULL => id,
-            _ => panic!(
-                "component '{}' must be registered before use",
-                std::any::type_name::<T>()
-            ),
-        };
+    pub fn id(world: &World) -> Result<Entity, UnregisteredType> {
+        let id = world
+            .type_ids
+            .get(Self::index())
+            .copied()
+            .ok_or_else(|| UnregisteredType(std::any::type_name::<T>()))?;
 
         // TODO: consider making it a full assert
-        debug_assert!(
+        assert!(
             world.entity_index.is_alive(id),
             "component '{}' was deleted, re-register before using",
             std::any::type_name::<T>()
         );
 
-        id
-    }
-
-    pub fn try_id(world: &World) -> Option<Entity> {
-        world
-            .type_ids
-            .get(Self::index())
-            .filter(|&&id| world.entity_index.is_alive(id))
-            .copied()
+        Ok(id)
     }
 }

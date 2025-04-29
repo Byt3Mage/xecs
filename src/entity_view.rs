@@ -19,12 +19,12 @@ impl<'a> EntityView<'a> {
     }
 
     #[inline]
-    pub fn has(&self, id: Entity) -> bool {
+    pub fn has(&self, id: Entity) -> EcsResult<bool> {
         self.world.has(self.entity, id)
     }
 
     #[inline]
-    pub fn has_t<C: ComponentValue>(&self) -> bool {
+    pub fn has_t<C: ComponentValue>(&self) -> EcsResult<bool> {
         self.world.has_t::<C>(self.entity)
     }
 

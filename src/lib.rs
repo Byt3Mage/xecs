@@ -11,7 +11,6 @@ mod flags;
 mod graph;
 mod memory;
 mod pointer;
-mod sparse_set;
 mod storage;
 mod type_id;
 mod type_info;

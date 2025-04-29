@@ -2,6 +2,7 @@ use std::{collections::HashMap, rc::Rc};
 
 use super::{table_data::TableData, table_index::TableId};
 use crate::{
+    component::ComponentValue,
     entity::{Entity, HI_COMPONENT_ID},
     flags::TableFlags,
     graph::GraphNode,
@@ -26,6 +27,63 @@ pub(crate) struct Table {
     pub(crate) node: GraphNode,
 }
 
+impl Table {
+    /// Gets a reference to the data for a component of an entity in this table.
+    ///
+    /// # Safety
+    /// - `row` must be a valid row in this table.
+    /// - the data in the column must have the correct type.
+    #[inline]
+    pub(crate) unsafe fn get<C: ComponentValue>(&self, row: usize, id: Entity) -> Option<&C> {
+        debug_assert!(row < self.data.count(), "row out of bounds");
+
+        unsafe {
+            if id < HI_COMPONENT_ID {
+                let col = self.component_map_lo[id.as_usize()];
+
+                if col >= 0 {
+                    Some(self.data.get_unchecked(col as usize, row).deref())
+                } else {
+                    return None;
+                }
+            } else {
+                self.component_map_hi
+                    .get(&id)
+                    .map(|col| self.data.get_unchecked(*col, row).deref())
+            }
+        }
+    }
+
+    /// Gets a mutablereference to the data for a component of an entity in this table.
+    ///
+    /// # Safety
+    /// - `row` must be a valid row in this table.
+    /// - the data in the column must have the correct type.
+    #[inline]
+    pub(crate) unsafe fn get_mut<C: ComponentValue>(
+        &mut self,
+        row: usize,
+        id: Entity,
+    ) -> Option<&mut C> {
+        debug_assert!(row < self.data.count(), "row out of bounds");
+
+        unsafe {
+            if id < HI_COMPONENT_ID {
+                let col = self.component_map_lo[id.as_usize()];
+
+                if col >= 0 {
+                    Some(self.data.get_unchecked_mut(col as usize, row).deref_mut())
+                } else {
+                    return None;
+                }
+            } else {
+                self.component_map_hi
+                    .get(&id)
+                    .map(|col| self.data.get_unchecked_mut(*col, row).deref_mut())
+            }
+        }
+    }
+}
 /// Moves entity from src table to dst.
 ///
 /// # Safety
