@@ -8,17 +8,17 @@ use std::{
 
 use crate::{
     entity::Entity,
-    error::{EcsResult, UnregisteredComponent, UnregisteredType},
+    error::{EcsError, EcsResult},
     world::World,
 };
 
 static MAX_INDEX: AtomicUsize = AtomicUsize::new(0);
 
-pub struct TypeImpl<T> {
+pub struct TypeImpl<T: 'static> {
     _marker: PhantomData<T>,
 }
 
-impl<T> TypeImpl<T> {
+impl<T: 'static> TypeImpl<T> {
     pub(crate) fn index() -> usize {
         static VALUE: LazyLock<usize> = LazyLock::new(|| MAX_INDEX.fetch_add(1, Ordering::Relaxed));
         *VALUE
@@ -49,14 +49,13 @@ impl<T> TypeImpl<T> {
     }
 
     /// Gets the entity ID of the component type.
-    pub fn id(world: &World) -> Result<Entity, UnregisteredType> {
+    pub fn id(world: &World) -> EcsResult<Entity> {
         let id = world
             .type_ids
             .get(Self::index())
             .copied()
-            .ok_or_else(|| UnregisteredType(std::any::type_name::<T>()))?;
+            .ok_or_else(|| EcsError::UnregisteredType(std::any::type_name::<T>()))?;
 
-        // TODO: consider making it a full assert
         assert!(
             world.entity_index.is_alive(id),
             "component '{}' was deleted, re-register before using",

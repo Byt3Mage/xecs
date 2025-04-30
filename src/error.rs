@@ -2,12 +2,26 @@ use crate::entity::Entity;
 use std::fmt::Debug;
 use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum EcsError {
+    #[error("{0}")]
     EntityIndex(EntityIndexError),
-    MissingComponent(MissingComponent),
-    UnregisteredType(UnregisteredType),
-    UnregisteredComponent(UnregisteredComponent),
+    #[error("Component {0} has no associated data (it's a tag)")]
+    ComponentHasNoData(Entity),
+    #[error("Component {0} has associated data, can't be used as a tag")]
+    ComponentHasData(Entity),
+    #[error("Entity {0} is missing component {1}")]
+    MissingComponent(Entity, Entity),
+    #[error("Type {0} is not registered for this world, must register before use")]
+    UnregisteredType(&'static str),
+    #[error("Entity {0} is not registered as a component")]
+    UnregisteredComponent(Entity),
+    #[error("TypeMismatch: expected {expected}, got {got}")]
+    TypeMismatch {
+        expected: &'static str,
+        got: &'static str,
+    },
+    #[error("User error: {0}")]
     Other(Box<dyn std::error::Error + Send + Sync + 'static>),
 }
 
@@ -17,50 +31,20 @@ pub type EcsResult<T> = Result<T, EcsError>;
 #[derive(Error, Debug)]
 pub enum EntityIndexError {
     /// [Entity] does not exist, was never created.
-    #[error("Entity {0} does not exist")]
+    #[error("Entity {0} does not exist, was never created")]
     NonExistent(Entity),
 
     /// [Entity] was created, but is now dead.
-    #[error("Entity {0} is dead")]
+    #[error("Entity {0} was created, but is now dead")]
     NotAlive(Entity),
 
     /// [Entity] doesn't exist or exists but is not alive.
-    #[error("Entity {0} is not valid")]
+    #[error("Entity {0} doesn't exist or exists but is not alive")]
     NotValid(Entity),
 }
 
 impl From<EntityIndexError> for EcsError {
     fn from(err: EntityIndexError) -> Self {
         EcsError::EntityIndex(err)
-    }
-}
-
-#[derive(Error, Debug)]
-#[error("Component {0} is missing from entity {1}")]
-pub struct MissingComponent(pub Entity, pub Entity);
-
-impl From<MissingComponent> for EcsError {
-    fn from(err: MissingComponent) -> Self {
-        EcsError::MissingComponent(err)
-    }
-}
-
-#[derive(Error, Debug)]
-#[error("Type {0} is not registered for this world, must register before use")]
-pub struct UnregisteredType(pub &'static str);
-
-impl From<UnregisteredType> for EcsError {
-    fn from(err: UnregisteredType) -> Self {
-        EcsError::UnregisteredType(err)
-    }
-}
-
-#[derive(Error, Debug)]
-#[error("Entity {0} is not registered as a component")]
-pub struct UnregisteredComponent(pub Entity);
-
-impl From<UnregisteredComponent> for EcsError {
-    fn from(err: UnregisteredComponent) -> Self {
-        EcsError::UnregisteredComponent(err)
     }
 }

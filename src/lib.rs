@@ -9,11 +9,12 @@ mod entity_view;
 mod error;
 mod flags;
 mod graph;
-mod memory;
 mod pointer;
+mod relationships;
 mod storage;
 mod type_id;
 mod type_info;
+mod world_utils;
 
 #[cfg(test)]
 mod tests;

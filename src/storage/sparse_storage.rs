@@ -1,16 +1,19 @@
-use super::sparse_set::{PagedSparseSet, SparseSet};
-use crate::{component::ComponentValue, entity::Entity, type_info::TypeInfo};
+use super::sparse_set::{Entry, PagedSparseSet, SparseSet};
+use crate::{
+    component::ComponentValue,
+    entity::Entity,
+    error::{EcsError, EcsResult},
+};
 use const_assert::const_assert;
-use std::{any::TypeId, ptr::NonNull, rc::Rc};
+use std::ptr::NonNull;
 
 const PAGE_SIZE: usize = 4096;
 
 pub struct ComponentSparseSet {
     inner: NonNull<u8>,
-    has_fn: fn(NonNull<u8>, Entity) -> bool,
+    has_fn: fn(NonNull<u8>, &Entity) -> bool,
     drop_fn: fn(NonNull<u8>),
     is_paged: bool,
-    type_info: Rc<TypeInfo>,
 }
 
 impl Drop for ComponentSparseSet {
@@ -20,31 +23,32 @@ impl Drop for ComponentSparseSet {
 }
 
 impl ComponentSparseSet {
-    fn new<C: ComponentValue>(type_info: Rc<TypeInfo>, set: SparseSet<C>) -> Self {
+    pub(crate) fn new<C: ComponentValue>() -> Self {
         const_assert!(
             |C| size_of::<C>() != 0,
             "Component type cannot be zero-sized, use TagSparseSet"
         );
 
-        assert!(
-            type_info.type_id == TypeId::of::<C>(),
-            "component type info does not match sparse set type"
-        );
-
         let inner = {
-            let boxed = Box::new(set);
+            let boxed = Box::new(SparseSet::<Entity, C>::new());
             // Safety: Box::into_raw returns a non-null pointer
             unsafe { NonNull::new_unchecked(Box::into_raw(boxed) as *mut u8) }
         };
 
-        let has_fn = |ptr: NonNull<u8>, entity: Entity| unsafe {
-            ptr.cast::<SparseSet<C>>().as_ref().has_entity(entity)
+        // SAFETY: we are constructing this struct with the right pointer type
+        let has_fn = |ptr: NonNull<u8>, entity: &Entity| {
+            // Safety: We know that the pointer is valid and points to a PagedSparseSet<Entity, C>
+            unsafe {
+                ptr.cast::<PagedSparseSet<Entity, C>>()
+                    .as_ref()
+                    .contains(entity)
+            }
         };
 
         let drop_fn = |ptr: NonNull<u8>| {
-            // Safety: We know that the pointer is valid and points to a SparseSet<C>
+            // Safety: We know that the pointer is valid and points to a SparseSet<Entity, C>
             unsafe {
-                ptr.cast::<SparseSet<C>>().drop_in_place();
+                ptr.cast::<SparseSet<Entity, C>>().drop_in_place();
             }
         };
 
@@ -53,43 +57,34 @@ impl ComponentSparseSet {
             has_fn,
             drop_fn,
             is_paged: false,
-            type_info,
         }
     }
 
-    fn new_paged<C: ComponentValue>(
-        type_info: Rc<TypeInfo>,
-        set: PagedSparseSet<C, PAGE_SIZE>,
-    ) -> Self {
+    pub(crate) fn new_paged<C: ComponentValue>(page_size: usize) -> Self {
         const_assert!(
             |C| size_of::<C>() != 0,
             "Component type cannot be zero-sized, use TagSparseSet"
         );
 
-        assert!(
-            type_info.type_id == TypeId::of::<C>(),
-            "component type info does not match sparse set type"
-        );
-
         let inner = {
-            let boxed = Box::new(set);
+            let boxed = Box::new(PagedSparseSet::<Entity, C>::new(page_size));
             // Safety: Box::into_raw returns a non-null pointer
             unsafe { NonNull::new_unchecked(Box::into_raw(boxed) as *mut u8) }
         };
 
-        let has_fn = |ptr: NonNull<u8>, entity: Entity| {
-            // Safety: We know that the pointer is valid and points to a SparseSet<C>
+        let has_fn = |ptr: NonNull<u8>, entity: &Entity| {
+            // Safety: We know that the pointer is valid and points to a PagedSparseSet<Entity, C>
             unsafe {
-                ptr.cast::<PagedSparseSet<C, PAGE_SIZE>>()
+                ptr.cast::<PagedSparseSet<Entity, C>>()
                     .as_ref()
-                    .has_entity(entity)
+                    .contains(entity)
             }
         };
 
         let drop_fn = |set: NonNull<u8>| {
-            // Safety: We know that the pointer is valid and points to a SparseSet<C>
+            // Safety: We know that the pointer is valid and points to a PagedSparseSet<Entity, C>
             unsafe {
-                set.cast::<PagedSparseSet<C, PAGE_SIZE>>().drop_in_place();
+                set.cast::<PagedSparseSet<Entity, C>>().drop_in_place();
             }
         };
 
@@ -98,30 +93,24 @@ impl ComponentSparseSet {
             has_fn,
             drop_fn,
             is_paged: true,
-            type_info,
         }
     }
 
     /// Inserts a value into the sparse storage.
+    /// Returns a tuple containing a boolean indicating whether the insertion was successful,
+    /// and an optional value that was previously associated with the entity.
     ///
     /// # Safety
     /// The caller must ensure that the entity is valid and that the value is of the correct type.
     #[inline]
-    pub(crate) unsafe fn insert<C: ComponentValue>(
-        &mut self,
-        entity: Entity,
-        value: C,
-    ) -> Option<C> {
-        #[cfg(debug_assertions)]
-        debug_assert!(self.type_info.type_id == TypeId::of::<C>(), "Type mismatch");
-
+    pub(crate) unsafe fn insert<C: ComponentValue>(&mut self, entity: Entity, value: C) {
         unsafe {
             if self.is_paged {
-                let set = self.inner.cast::<PagedSparseSet<C, PAGE_SIZE>>().as_mut();
-                set.insert(entity, value)
+                let set = self.inner.cast::<PagedSparseSet<Entity, C>>().as_mut();
+                set.insert(entity, value);
             } else {
-                let set = self.inner.cast::<SparseSet<C>>().as_mut();
-                set.insert(entity, value)
+                let set = self.inner.cast::<SparseSet<Entity, C>>().as_mut();
+                set.insert(entity, value);
             }
         }
     }
@@ -131,16 +120,16 @@ impl ComponentSparseSet {
     /// # Safety
     /// The caller must ensure that the value is of the correct type.
     #[inline]
-    pub(crate) unsafe fn remove<C: ComponentValue>(&mut self, entity: Entity) -> Option<C> {
-        #[cfg(debug_assertions)]
-        debug_assert!(self.type_info.type_id == TypeId::of::<C>(), "Type mismatch");
-
+    pub(crate) unsafe fn remove<C: ComponentValue>(
+        &mut self,
+        entity: &Entity,
+    ) -> Option<Entry<Entity, C>> {
         unsafe {
             if self.is_paged {
-                let set = self.inner.cast::<PagedSparseSet<C, PAGE_SIZE>>().as_mut();
+                let set = self.inner.cast::<PagedSparseSet<Entity, C>>().as_mut();
                 set.remove(entity)
             } else {
-                let set = self.inner.cast::<SparseSet<C>>().as_mut();
+                let set = self.inner.cast::<SparseSet<Entity, C>>().as_mut();
                 set.remove(entity)
             }
         }
@@ -148,7 +137,7 @@ impl ComponentSparseSet {
 
     /// Checks if a value exists in the sparse storage.
     #[inline]
-    pub(crate) fn has(&self, entity: Entity) -> bool {
+    pub(crate) fn has(&self, entity: &Entity) -> bool {
         (self.has_fn)(self.inner, entity)
     }
 
@@ -157,17 +146,20 @@ impl ComponentSparseSet {
     /// # Safety
     /// The caller must ensure that the value is of the correct type.
     #[inline]
-    pub(crate) unsafe fn get<C: ComponentValue>(&self, entity: Entity) -> Option<&C> {
-        #[cfg(debug_assertions)]
-        debug_assert!(self.type_info.type_id == TypeId::of::<C>(), "Type mismatch");
-
+    pub(crate) unsafe fn get<C: ComponentValue>(
+        &self,
+        entity: Entity,
+        id: Entity,
+    ) -> EcsResult<&C> {
         unsafe {
             if self.is_paged {
-                let set = self.inner.cast::<PagedSparseSet<C, PAGE_SIZE>>().as_ref();
-                set.get(entity)
+                let set = self.inner.cast::<PagedSparseSet<Entity, C>>().as_ref();
+                set.get(&entity)
+                    .ok_or(EcsError::MissingComponent(entity, id))
             } else {
-                let set = self.inner.cast::<SparseSet<C>>().as_ref();
-                set.get(entity)
+                let set = self.inner.cast::<SparseSet<Entity, C>>().as_ref();
+                set.get(&entity)
+                    .ok_or(EcsError::MissingComponent(entity, id))
             }
         }
     }
@@ -177,17 +169,20 @@ impl ComponentSparseSet {
     /// # Safety
     /// The caller must ensure that the value is of the correct type.
     #[inline]
-    pub(crate) unsafe fn get_mut<C: ComponentValue>(&mut self, entity: Entity) -> Option<&mut C> {
-        #[cfg(debug_assertions)]
-        debug_assert!(self.type_info.type_id == TypeId::of::<C>(), "Type mismatch");
-
+    pub(crate) unsafe fn get_mut<C: ComponentValue>(
+        &mut self,
+        entity: Entity,
+        id: Entity,
+    ) -> EcsResult<&mut C> {
         unsafe {
             if self.is_paged {
-                let set = self.inner.cast::<PagedSparseSet<C, PAGE_SIZE>>().as_mut();
-                set.get_mut(entity)
+                let set = self.inner.cast::<PagedSparseSet<Entity, C>>().as_mut();
+                set.get_mut(&entity)
+                    .ok_or(EcsError::MissingComponent(entity, id))
             } else {
-                let set = self.inner.cast::<SparseSet<C>>().as_mut();
-                set.get_mut(entity)
+                let set = self.inner.cast::<SparseSet<Entity, C>>().as_mut();
+                set.get_mut(&entity)
+                    .ok_or(EcsError::MissingComponent(entity, id))
             }
         }
     }
@@ -205,10 +200,10 @@ impl Drop for TagSparseSet {
     }
 }
 
-impl From<SparseSet<()>> for TagSparseSet {
-    fn from(set: SparseSet<()>) -> Self {
+impl TagSparseSet {
+    pub(crate) fn new() -> Self {
         let inner = {
-            let boxed = Box::new(set);
+            let boxed = Box::new(SparseSet::<Entity, ()>::new());
             // Safety: Box::into_raw returns a non-null pointer
             unsafe { NonNull::new_unchecked(Box::into_raw(boxed) as *mut u8) }
         };
@@ -216,7 +211,7 @@ impl From<SparseSet<()>> for TagSparseSet {
         let drop_fn = |ptr: NonNull<u8>| {
             // Safety: We know that the pointer is valid and points to a SparseSet<()>
             unsafe {
-                ptr.cast::<SparseSet<()>>().drop_in_place();
+                ptr.cast::<SparseSet<Entity, ()>>().drop_in_place();
             }
         };
 
@@ -226,12 +221,10 @@ impl From<SparseSet<()>> for TagSparseSet {
             is_paged: false,
         }
     }
-}
 
-impl From<PagedSparseSet<(), PAGE_SIZE>> for TagSparseSet {
-    fn from(set: PagedSparseSet<(), PAGE_SIZE>) -> Self {
+    pub(crate) fn new_paged(page_size: usize) -> Self {
         let inner = {
-            let boxed = Box::new(set);
+            let boxed = Box::new(PagedSparseSet::<Entity, ()>::new(page_size));
             // Safety: Box::into_raw returns a non-null pointer
             unsafe { NonNull::new_unchecked(Box::into_raw(boxed) as *mut u8) }
         };
@@ -239,7 +232,7 @@ impl From<PagedSparseSet<(), PAGE_SIZE>> for TagSparseSet {
         let drop_fn = |ptr: NonNull<u8>| {
             // Safety: We know that the pointer is valid and points to a SparseSet<()>
             unsafe {
-                ptr.cast::<PagedSparseSet<(), PAGE_SIZE>>().drop_in_place();
+                ptr.cast::<PagedSparseSet<Entity, ()>>().drop_in_place();
             }
         };
 
@@ -249,50 +242,50 @@ impl From<PagedSparseSet<(), PAGE_SIZE>> for TagSparseSet {
             is_paged: true,
         }
     }
-}
 
-impl TagSparseSet {
     /// Inserts a value into the sparse storage.
+    ///
+    /// Returns `true` if the value was newly inserted, `false` if it already existed.
     #[inline]
-    pub(crate) fn insert(&mut self, entity: Entity) -> Option<()> {
+    pub(crate) fn insert(&mut self, entity: Entity) {
         // SAFETY: We only construct the set using the correct type.
         unsafe {
             if self.is_paged {
-                let set = self.inner.cast::<PagedSparseSet<(), PAGE_SIZE>>().as_mut();
-                set.insert(entity, ())
+                let set = self.inner.cast::<PagedSparseSet<Entity, ()>>().as_mut();
+                set.insert(entity, ());
             } else {
-                let set = self.inner.cast::<SparseSet<()>>().as_mut();
-                set.insert(entity, ())
+                let set = self.inner.cast::<SparseSet<Entity, ()>>().as_mut();
+                set.insert(entity, ());
             }
         }
     }
 
     /// Removes a value from the sparse storage.
     #[inline]
-    pub(crate) fn remove(&mut self, entity: Entity) -> Option<()> {
+    pub(crate) fn remove(&mut self, entity: &Entity) -> bool {
         // SAFETY: We only construct the set using the correct type.
         unsafe {
             if self.is_paged {
-                let set = self.inner.cast::<PagedSparseSet<(), PAGE_SIZE>>().as_mut();
-                set.remove(entity)
+                let set = self.inner.cast::<PagedSparseSet<Entity, ()>>().as_mut();
+                set.remove(entity).is_some()
             } else {
-                let set = self.inner.cast::<SparseSet<()>>().as_mut();
-                set.remove(entity)
+                let set = self.inner.cast::<SparseSet<Entity, ()>>().as_mut();
+                set.remove(entity).is_some()
             }
         }
     }
 
     /// Checks if a value exists in the sparse storage.
     #[inline]
-    pub(crate) fn has(&self, entity: Entity) -> bool {
+    pub(crate) fn has(&self, entity: &Entity) -> bool {
         // SAFETY: We only construct the set using the correct type.
         unsafe {
             if self.is_paged {
-                let set = self.inner.cast::<PagedSparseSet<(), PAGE_SIZE>>().as_ref();
-                set.has_entity(entity)
+                let set = self.inner.cast::<PagedSparseSet<Entity, ()>>().as_ref();
+                set.contains(entity)
             } else {
-                let set = self.inner.cast::<SparseSet<()>>().as_ref();
-                set.has_entity(entity)
+                let set = self.inner.cast::<SparseSet<Entity, ()>>().as_ref();
+                set.contains(entity)
             }
         }
     }

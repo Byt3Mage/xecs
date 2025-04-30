@@ -1,4 +1,9 @@
-use crate::{component::ComponentValue, entity::Entity, error::EcsResult, world::WorldRef};
+use crate::{
+    component::{Component, ComponentValue, Tag},
+    entity::Entity,
+    error::EcsResult,
+    world::WorldRef,
+};
 
 pub struct EntityView<'a> {
     entity: Entity,
@@ -29,14 +34,14 @@ impl<'a> EntityView<'a> {
     }
 
     #[inline]
-    pub fn add(mut self, id: Entity) -> EcsResult<Self> {
-        self.world.add(self.entity, id)?;
+    pub fn add(mut self, tag: Tag) -> EcsResult<Self> {
+        self.world.add(self.entity, tag)?;
         Ok(self)
     }
 
     #[inline]
-    pub fn add_t<C: ComponentValue>(mut self) -> EcsResult<Self> {
-        self.world.add_t::<C>(self.entity)?;
+    pub fn add_t<T: ComponentValue>(mut self) -> EcsResult<Self> {
+        self.world.add_t::<T>(self.entity)?;
         Ok(self)
     }
 
@@ -47,14 +52,14 @@ impl<'a> EntityView<'a> {
     }
 
     #[inline]
-    pub fn set<C: ComponentValue>(mut self, id: Entity, value: C) -> EcsResult<Self> {
-        self.world.set(self.entity, id, value)?;
+    pub fn set<C: ComponentValue>(mut self, component: Component<C>, value: C) -> EcsResult<Self> {
+        self.world.set(self.entity, component, value)?;
         Ok(self)
     }
 
     #[inline]
-    pub fn get<C: ComponentValue>(&mut self, id: Entity) -> EcsResult<&C> {
-        self.world.get(self.entity, id)
+    pub fn get<C: ComponentValue>(&mut self, component: Component<C>) -> EcsResult<&C> {
+        self.world.get(self.entity, component)
     }
 
     #[inline]
@@ -63,8 +68,8 @@ impl<'a> EntityView<'a> {
     }
 
     #[inline]
-    pub fn get_mut<C: ComponentValue>(&mut self, id: Entity) -> EcsResult<&mut C> {
-        self.world.get_mut(self.entity, id)
+    pub fn get_mut<C: ComponentValue>(&mut self, component: Component<C>) -> EcsResult<&mut C> {
+        self.world.get_mut(self.entity, component)
     }
 
     #[inline]

@@ -45,7 +45,7 @@ impl TableIndex {
     {
         let id = TableId(self.tables.len());
         let table = f(id);
-        self.table_ids.insert(table.type_.clone(), id);
+        self.table_ids.insert(table.ids.clone(), id);
         self.tables.push(table);
         id
     }

@@ -3,7 +3,8 @@ use std::{collections::HashMap, rc::Rc};
 use super::{table_data::TableData, table_index::TableId};
 use crate::{
     component::ComponentValue,
-    entity::{Entity, HI_COMPONENT_ID},
+    entity::Entity,
+    error::{EcsError, EcsResult},
     flags::TableFlags,
     graph::GraphNode,
     type_info::Type,
@@ -16,11 +17,11 @@ pub(crate) struct Table {
     /// Flags describing capabilites of this table
     pub(crate) flags: TableFlags,
     /// Vector of component [Id]s
-    pub(crate) type_: Type,
+    pub(crate) ids: Type,
     /// Storage for entities and components.
     pub(crate) data: TableData,
     /// Maps component ids to columns (fast path).
-    pub(crate) component_map_lo: [isize; HI_COMPONENT_ID.as_usize()],
+    pub(crate) component_map_lo: [isize; Entity::HI_COMPONENT_ID.as_usize()],
     /// Maps component ids to columns (slow path).
     pub(crate) component_map_hi: HashMap<Entity, usize>,
     /// Node representation for traversals.
@@ -34,22 +35,28 @@ impl Table {
     /// - `row` must be a valid row in this table.
     /// - the data in the column must have the correct type.
     #[inline]
-    pub(crate) unsafe fn get<C: ComponentValue>(&self, row: usize, id: Entity) -> Option<&C> {
+    pub(crate) unsafe fn get<C: ComponentValue>(&self, row: usize, id: Entity) -> EcsResult<&C> {
         debug_assert!(row < self.data.count(), "row out of bounds");
-
         unsafe {
-            if id < HI_COMPONENT_ID {
+            if id < Entity::HI_COMPONENT_ID {
                 let col = self.component_map_lo[id.as_usize()];
 
                 if col >= 0 {
-                    Some(self.data.get_unchecked(col as usize, row).deref())
+                    Ok(self.data.get_unchecked(col as usize, row).deref())
                 } else {
-                    return None;
+                    Err(EcsError::MissingComponent(
+                        self.data.get_entity_unchecked(row),
+                        id,
+                    ))
                 }
             } else {
-                self.component_map_hi
-                    .get(&id)
-                    .map(|col| self.data.get_unchecked(*col, row).deref())
+                match self.component_map_hi.get(&id) {
+                    Some(&col) => Ok(self.data.get_unchecked(col, row).deref()),
+                    None => Err(EcsError::MissingComponent(
+                        self.data.get_entity_unchecked(row),
+                        id,
+                    )),
+                }
             }
         }
     }
@@ -64,22 +71,28 @@ impl Table {
         &mut self,
         row: usize,
         id: Entity,
-    ) -> Option<&mut C> {
+    ) -> EcsResult<&mut C> {
         debug_assert!(row < self.data.count(), "row out of bounds");
-
         unsafe {
-            if id < HI_COMPONENT_ID {
+            if id < Entity::HI_COMPONENT_ID {
                 let col = self.component_map_lo[id.as_usize()];
 
                 if col >= 0 {
-                    Some(self.data.get_unchecked_mut(col as usize, row).deref_mut())
+                    Ok(self.data.get_unchecked_mut(col as usize, row).deref_mut())
                 } else {
-                    return None;
+                    Err(EcsError::MissingComponent(
+                        self.data.get_entity_unchecked(row),
+                        id,
+                    ))
                 }
             } else {
-                self.component_map_hi
-                    .get(&id)
-                    .map(|col| self.data.get_unchecked_mut(*col, row).deref_mut())
+                match self.component_map_hi.get(&id) {
+                    Some(&col) => Ok(self.data.get_unchecked_mut(col, row).deref_mut()),
+                    None => Err(EcsError::MissingComponent(
+                        self.data.get_entity_unchecked(row),
+                        id,
+                    )),
+                }
             }
         }
     }
@@ -156,10 +169,13 @@ pub(crate) unsafe fn move_entity(
         i_src += 1;
     }
 
-    src.data
-        .delete_row(&mut world.entity_index, src_row, should_drop);
+    let entity_index = &mut world.entity_index;
 
-    world.entity_index.set_location(entity, dst.id, dst_row);
+    src.data.delete_row(entity_index, src_row, should_drop);
+
+    let r = entity_index.get_record_mut(entity).unwrap();
+    r.table = dst.id;
+    r.row = dst_row;
 
     dst_row
 }

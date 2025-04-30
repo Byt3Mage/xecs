@@ -6,17 +6,17 @@ macro_rules! impl_bitflags {
             pub const fn empty() -> Self {
                 Self(0)
             }
-        
+
             #[inline]
             pub const fn contains(self, other: Self) -> bool {
                 (self.0 & other.0) == other.0
             }
-        
+
             #[inline]
             pub const fn insert(&mut self, other: Self) {
                 self.0 |= other.0;
             }
-        
+
             #[inline]
             pub const fn remove(&mut self, other: Self) {
                 self.0 &= !other.0;
@@ -33,55 +33,55 @@ macro_rules! impl_bitflags {
                 Self::empty()
             }
         }
-        
+
         impl std::ops::BitOr for $type {
             type Output = Self;
             fn bitor(self, rhs: Self) -> Self {
                 Self(self.0 | rhs.0)
             }
         }
-        
+
         impl std::ops::BitOrAssign for $type {
             #[inline]
             fn bitor_assign(&mut self, rhs: Self) {
                 self.0 |= rhs.0;
             }
         }
-        
+
         impl std::ops::BitAnd for $type {
             type Output = Self;
             fn bitand(self, rhs: Self) -> Self {
                 Self(self.0 & rhs.0)
             }
         }
-        
+
         impl std::ops::BitAndAssign for $type {
             #[inline]
             fn bitand_assign(&mut self, rhs: Self) {
                 self.0 &= rhs.0;
             }
         }
-        
+
         impl std::ops::BitXor for $type {
             type Output = Self;
             fn bitxor(self, rhs: Self) -> Self {
                 Self(self.0 ^ rhs.0)
             }
         }
-        
+
         impl std::ops::BitXorAssign for $type {
             #[inline]
             fn bitxor_assign(&mut self, rhs: Self) {
                 self.0 ^= rhs.0;
             }
         }
-        
+
         impl std::ops::Not for $type {
             type Output = Self;
             fn not(self) -> Self {
                 Self(!self.0)
             }
-        }        
+        }
     };
 }
 
@@ -161,25 +161,25 @@ impl EntityFlags {
 
 impl_bitflags!(EntityFlags);
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ComponentFlags(u64);
 
 impl ComponentFlags {
-    // OnDelete behavior flags
+    // OnDelete Relationship behavior flags
     pub const ON_DELETE_REMOVE: Self = Self(1 << 0);
     pub const ON_DELETE_DELETE: Self = Self(1 << 1);
     pub const ON_DELETE_PANIC: Self = Self(1 << 2);
-    pub(crate) const ON_DELETE_MASK: Self = Self(
-        Self::ON_DELETE_REMOVE.0 | Self::ON_DELETE_DELETE.0 | Self::ON_DELETE_PANIC.0
-    );
+    pub(crate) const ON_DELETE_MASK: Self =
+        Self(Self::ON_DELETE_REMOVE.0 | Self::ON_DELETE_DELETE.0 | Self::ON_DELETE_PANIC.0);
 
     // OnDeleteObject behavior flags
     pub const ON_DELETE_OBJECT_REMOVE: Self = Self(1 << 3);
     pub const ON_DELETE_OBJECT_DELETE: Self = Self(1 << 4);
     pub const ON_DELETE_OBJECT_PANIC: Self = Self(1 << 5);
     pub const ON_DELETE_OBJECT_MASK: Self = Self(
-        Self::ON_DELETE_OBJECT_REMOVE.0 | Self::ON_DELETE_OBJECT_DELETE.0 | Self::ON_DELETE_OBJECT_PANIC.0
+        Self::ON_DELETE_OBJECT_REMOVE.0
+            | Self::ON_DELETE_OBJECT_DELETE.0
+            | Self::ON_DELETE_OBJECT_PANIC.0,
     );
 
     // OnInstantiate behavior flags
@@ -187,7 +187,9 @@ impl ComponentFlags {
     pub const ON_INSTANTIATE_INHERIT: Self = Self(1 << 7);
     pub const ON_INSTANTIATE_DONT_INHERIT: Self = Self(1 << 8);
     pub const ON_INSTANTIATE_MASK: Self = Self(
-        Self::ON_INSTANTIATE_OVERRIDE.0 | Self::ON_INSTANTIATE_INHERIT.0 | Self::ON_INSTANTIATE_DONT_INHERIT.0
+        Self::ON_INSTANTIATE_OVERRIDE.0
+            | Self::ON_INSTANTIATE_INHERIT.0
+            | Self::ON_INSTANTIATE_DONT_INHERIT.0,
     );
 
     // Miscellaneous ID flags
@@ -208,8 +210,12 @@ impl ComponentFlags {
     pub(crate) const HAS_ON_TABLE_DELETE: Self = Self(1 << 22);
     pub(crate) const IS_SPARSE: Self = Self(1 << 23);
     pub(crate) const EVENT_MASK: Self = Self(
-        Self::HAS_ON_ADD.0 | Self::HAS_ON_REMOVE.0 | Self::HAS_ON_SET.0 |
-        Self::HAS_ON_TABLE_CREATE.0 | Self::HAS_ON_TABLE_DELETE.0 | Self::IS_SPARSE.0
+        Self::HAS_ON_ADD.0
+            | Self::HAS_ON_REMOVE.0
+            | Self::HAS_ON_SET.0
+            | Self::HAS_ON_TABLE_CREATE.0
+            | Self::HAS_ON_TABLE_DELETE.0
+            | Self::IS_SPARSE.0,
     );
 
     // Special flag

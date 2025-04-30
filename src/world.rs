@@ -1,53 +1,26 @@
 use crate::{
-    component::{ComponentBuilder, ComponentRecord, ComponentValue, TypedComponentBuilder},
-    entity::{Entity, HI_COMPONENT_ID},
+    component::{Component, ComponentBuilder, ComponentRecord, ComponentValue, Tag, TagBuilder},
+    entity::Entity,
     entity_index::EntityIndex,
-    error::{EcsResult, MissingComponent, UnregisteredComponent, UnregisteredType},
+    error::{EcsError, EcsResult},
     storage::{
         Storage,
+        sparse_set::SparseSet,
         table::move_entity_to_root,
         table_index::{TableId, TableIndex},
     },
     type_id::TypeImpl,
-    type_info::TypeIndex,
+    world_utils::{add_tag, get_component_value, get_component_value_mut, set_component_value},
 };
 use const_assert::const_assert;
-use std::{
-    collections::HashMap,
-    ops::{Deref, DerefMut},
-};
+use std::ops::{Deref, DerefMut};
 
-macro_rules! get_component {
-    ($world: expr, $id: expr) => {{
-        if $id < $crate::entity::HI_COMPONENT_ID {
-            Ok(&$world.components_lo[$id.id() as usize])
-        } else {
-            $world
-                .components_hi
-                .get(&$id)
-                .ok_or(UnregisteredComponent($id))
-        }
-    }};
-
-    (mut, $world: expr, $id: expr) => {{
-        if $id < $crate::entity::HI_COMPONENT_ID {
-            Ok(&mut $world.components_lo[$id.id() as usize])
-        } else {
-            $world
-                .components_hi
-                .get_mut(&$id)
-                .ok_or(UnregisteredComponent($id))
-        }
-    }};
-}
 pub struct World {
-    pub entity_index: EntityIndex,
-    pub(crate) type_index: TypeIndex,
+    pub(crate) entity_index: EntityIndex,
     pub(crate) table_index: TableIndex,
     pub(crate) root_table: TableId,
     pub(crate) type_ids: Vec<Entity>,
-    pub(crate) components_lo: Vec<ComponentRecord>,
-    pub(crate) components_hi: HashMap<Entity, ComponentRecord>,
+    pub(crate) components: SparseSet<Entity, ComponentRecord>,
 }
 
 impl World {
@@ -55,45 +28,40 @@ impl World {
         // TODO: world initialization
         Self {
             entity_index: EntityIndex::new(),
-            type_index: TypeIndex::new(),
             table_index: TableIndex::new(),
             root_table: TableId::NULL,
             type_ids: Vec::new(),
-            components_lo: Vec::new(),
-            components_hi: HashMap::new(),
+            components: SparseSet::new(),
         }
     }
 
     /// Gets the entity for the component type.
-    ///
-    /// # Panics
-    /// Panics if the component type is not registered.
     #[inline(always)]
-    pub fn id_t<C: ComponentValue>(&mut self) -> Result<Entity, UnregisteredType> {
-        TypeImpl::<C>::id(self)
+    pub fn id_t<T: 'static>(&mut self) -> EcsResult<Entity> {
+        TypeImpl::<T>::id(self)
     }
 
     /// Gets a builder for registering the component or returns the id if already registered.
     #[inline(always)]
-    pub fn component_t<C: ComponentValue>(&mut self) -> Result<TypedComponentBuilder<C>, Entity> {
+    pub fn component_t<C: ComponentValue>(&mut self) -> Result<ComponentBuilder<C>, Entity> {
         match TypeImpl::<C>::id(self) {
             Ok(id) => Err(id),
-            Err(_) => Ok(TypedComponentBuilder::new()),
+            Err(_) => Ok(ComponentBuilder::new(Entity::NULL)),
         }
     }
 
     /// Gets the registered component or returns a builder to create one from `id`.
-    pub fn component(&mut self, id: Entity) -> Option<ComponentBuilder> {
-        match get_component!(self, id) {
-            Ok(_) => None,
-            Err(_) => Some(ComponentBuilder::new(id)),
+    pub fn component(&mut self, id: Entity) -> Option<TagBuilder> {
+        match self.components.get(&id) {
+            Some(_) => None,
+            None => Some(TagBuilder::new(id)),
         }
     }
 
     /// Returns a builder to create a new component.
     #[inline]
-    pub fn new_component(&self) -> ComponentBuilder {
-        ComponentBuilder::new(Entity::NULL)
+    pub fn new_component(&self) -> TagBuilder {
+        TagBuilder::new(Entity::NULL)
     }
 
     pub fn new_entity(&mut self) -> Entity {
@@ -102,11 +70,12 @@ impl World {
         entity
     }
 
-    /// Add the `id` as tag to entity.
+    /// Add the `tag` to entity.
     ///
-    /// No side effect if the entity already contains the id.
-    pub fn add(&mut self, entity: Entity, id: Entity) -> EcsResult<()> {
-        todo!()
+    /// No side effect if the entity already contains the tag.
+    #[inline(always)]
+    pub fn add(&mut self, entity: Entity, tag: Tag) -> EcsResult<()> {
+        add_tag(self, entity, tag.id())
     }
 
     /// Add the type as tag to entity.
@@ -115,32 +84,32 @@ impl World {
     /// Component must be registered.
     ///
     /// Compilation fails if component is not ZST.
-    pub fn add_t<C: ComponentValue>(&mut self, entity: Entity) -> EcsResult<()> {
+    pub fn add_t<T: ComponentValue>(&mut self, entity: Entity) -> EcsResult<()> {
         const_assert!(
-            |C| std::mem::size_of::<C>() == 0,
-            "can't use add_t for component, use set_t instead."
+            |T| std::mem::size_of::<T>() == 0,
+            "can't use add_t for component, did you want to set?"
         );
 
-        self.add(entity, TypeImpl::<C>::id(self)?)
+        add_tag(self, entity, TypeImpl::<T>::id(self)?)
     }
 
     /// Checks if the entity has the component.
     pub fn has(&self, entity: Entity, id: Entity) -> EcsResult<bool> {
-        let cr = get_component!(self, id)?;
+        let cr = self
+            .components
+            .get(&id)
+            .ok_or(EcsError::UnregisteredComponent(id))?;
         let r = self.entity_index.get_record(entity)?;
 
         match &cr.storage {
-            Storage::SparseTag(set) => Ok(set.has(entity)),
-            Storage::SparseData(set) => Ok(set.has(entity)),
+            Storage::SparseTag(set) => Ok(set.has(&entity)),
+            Storage::SparseData(set) => Ok(set.has(&entity)),
             Storage::Tables(tables) => {
-                let table = &self.table_index[r.table];
-
-                if id < HI_COMPONENT_ID {
-                    if table.component_map_lo[id.as_usize()] >= 0 {
+                if id < Entity::HI_COMPONENT_ID {
+                    if self.table_index[r.table].component_map_lo[id.as_usize()] >= 0 {
                         return Ok(true);
                     }
                 }
-
                 Ok(tables.contains_key(&r.table))
             }
         }
@@ -154,79 +123,43 @@ impl World {
         self.has(entity, TypeImpl::<C>::id(self)?)
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn set<C: ComponentValue>(
         &mut self,
         entity: Entity,
-        id: Entity,
+        component: Component<C>,
         value: C,
     ) -> EcsResult<()> {
-        const_assert!(
-            |C| size_of::<C>() != 0,
-            "can't use set for tag, did you want to add?"
-        );
-        todo!()
+        set_component_value(self, entity, component.id(), value)
     }
 
+    #[inline(always)]
     pub fn set_t<C: ComponentValue>(&mut self, entity: Entity, value: C) -> EcsResult<()> {
-        self.set(entity, TypeImpl::<C>::id(self)?, value)
+        set_component_value(self, entity, TypeImpl::<C>::id(self)?, value)
     }
 
-    #[inline]
-    pub fn get<C: ComponentValue>(&self, entity: Entity, id: Entity) -> EcsResult<&C> {
-        const_assert!(
-            |C| size_of::<C>() != 0,
-            "can't use get for tag, did you want to check with has?"
-        );
-
-        let cr = get_component!(self, id)?;
-        let r = self.entity_index.get_record(entity)?;
-        let comp = match &cr.storage {
-            Storage::SparseTag(_) => None,
-            Storage::SparseData(set) => {
-                // SAFETY: TODO: type checking.
-                unsafe { set.get::<C>(entity) }
-            }
-            Storage::Tables(_) => {
-                let t = &self.table_index[r.table];
-                // SAFETY: valid entity must have valid row
-                unsafe { t.get::<C>(r.row, id) }
-            }
-        };
-
-        comp.ok_or_else(|| MissingComponent(id, entity).into())
+    #[inline(always)]
+    pub fn get<C: ComponentValue>(&self, entity: Entity, component: Component<C>) -> EcsResult<&C> {
+        get_component_value(self, entity, component.id())
     }
 
+    #[inline(always)]
     pub fn get_t<C: ComponentValue>(&self, entity: Entity) -> EcsResult<&C> {
-        self.get(entity, TypeImpl::<C>::id(self)?)
+        get_component_value(self, entity, TypeImpl::<C>::id(self)?)
     }
 
-    #[inline]
-    pub fn get_mut<C: ComponentValue>(&mut self, entity: Entity, id: Entity) -> EcsResult<&mut C> {
-        const_assert!(
-            |C| size_of::<C>() != 0,
-            "can't use get for tag, did you want to check with has?"
-        );
-
-        // TODO: type checking.
-
-        let cr = get_component!(mut, self, id)?;
-        let r = self.entity_index.get_record(entity)?;
-        let comp = match &mut cr.storage {
-            Storage::SparseTag(_) => None,
-            Storage::SparseData(set) => unsafe { set.get_mut::<C>(entity) },
-            Storage::Tables(_) => {
-                let t = &mut self.table_index[r.table];
-                // SAFETY: valid entity must have valid row
-                unsafe { t.get_mut::<C>(r.row, id) }
-            }
-        };
-
-        comp.ok_or_else(|| MissingComponent(id, entity).into())
+    #[inline(always)]
+    pub fn get_mut<C: ComponentValue>(
+        &mut self,
+        entity: Entity,
+        component: Component<C>,
+    ) -> EcsResult<&mut C> {
+        get_component_value_mut(self, entity, component.id())
     }
 
+    #[inline(always)]
     pub fn get_mut_t<C: ComponentValue>(&mut self, entity: Entity) -> EcsResult<&mut C> {
-        self.get_mut(entity, TypeImpl::<C>::id(self)?)
+        get_component_value_mut(self, entity, TypeImpl::<C>::id(self)?)
     }
 }
 

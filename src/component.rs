@@ -1,16 +1,21 @@
 use crate::{
     entity::Entity,
     flags::ComponentFlags,
-    storage::Storage,
+    storage::{
+        Storage, StorageType,
+        sparse_storage::{ComponentSparseSet, TagSparseSet},
+    },
+    type_id::TypeImpl,
     type_info::{HooksBuilder, TypeInfo, TypeName},
     world::World,
 };
 use const_assert::const_assert;
 use simple_ternary::tnr;
-use std::{alloc::Layout, any::TypeId, fmt::Debug, rc::Rc};
+use std::{
+    alloc::Layout, any::TypeId, collections::HashMap, fmt::Debug, marker::PhantomData, rc::Rc,
+};
 
 pub trait ComponentValue: 'static {}
-impl<T: 'static> ComponentValue for T {}
 
 /// Component location info within an [table](crate::storage::table::table).
 pub(crate) struct ComponentLocation {
@@ -25,33 +30,88 @@ pub(crate) struct ComponentLocation {
 pub struct ComponentRecord {
     pub(crate) id: Entity,
     pub(crate) flags: ComponentFlags,
-    pub(crate) type_info: Option<Rc<TypeInfo>>,
     pub(crate) storage: Storage,
+    pub(crate) with_ids: Box<[Entity]>,
+    pub(crate) type_info: Option<Rc<TypeInfo>>,
 }
 
-pub struct ComponentBuilder {
+impl ComponentRecord {
+    #[inline(always)]
+    pub(crate) fn is_tag(&self) -> bool {
+        self.type_info.is_none()
+    }
+}
+
+/// Typed component id
+///
+/// Guarantees that the id matches the component type.
+pub struct Component<C: ComponentValue> {
+    id: Entity,
+    _marker: PhantomData<C>,
+}
+
+impl<C: ComponentValue> Component<C> {
+    /// Creates a new component with the given id and world.
+    /// Returns None if the id is not a component or if the associated data type does not match.
+    pub fn new(world: &World, id: Entity) -> Option<Self> {
+        match world.components.get(&id) {
+            Some(ComponentRecord {
+                type_info: Some(ti),
+                ..
+            }) if ti.type_id == TypeId::of::<C>() => Some(Self {
+                id,
+                _marker: PhantomData,
+            }),
+            _ => None,
+        }
+    }
+
+    #[inline(always)]
+    pub fn id(&self) -> Entity {
+        self.id
+    }
+}
+
+/// Untyped component id.
+///
+/// Guarantees that id does not have associated data.
+pub struct Tag(Entity);
+
+impl Tag {
+    /// Creates a tag wrapper from the given id and world.
+    /// Returns None if the id is not a component of it it has associated data.
+    pub fn new(world: &World, id: Entity) -> Option<Self> {
+        match world.components.get(&id) {
+            Some(ComponentRecord {
+                type_info: None, ..
+            }) => Some(Self(id)),
+            _ => None,
+        }
+    }
+
+    /// Gets the id of the tag.
+    #[inline(always)]
+    pub fn id(&self) -> Entity {
+        self.0
+    }
+}
+
+pub struct TagBuilder {
     id: Entity,
     name: Option<TypeName>,
     flags: ComponentFlags,
-    type_info: Option<TypeInfo>,
+    with_ids: Vec<Entity>,
+    storage_type: StorageType,
 }
 
-impl ComponentBuilder {
+impl TagBuilder {
     pub(crate) fn new(id: Entity) -> Self {
         Self {
             id,
             name: None,
             flags: ComponentFlags::empty(),
-            type_info: None,
-        }
-    }
-
-    pub fn new_named(id: Entity, name: impl Into<TypeName>) -> Self {
-        Self {
-            id,
-            name: Some(name.into()),
-            flags: ComponentFlags::empty(),
-            type_info: None,
+            with_ids: vec![],
+            storage_type: StorageType::Tables,
         }
     }
 
@@ -60,15 +120,18 @@ impl ComponentBuilder {
         self
     }
 
-    pub fn set_type<C: ComponentValue>(mut self, hooks: HooksBuilder<C>) -> Self {
-        self.type_info = Some(TypeInfo {
-            id: Entity::NULL,
-            layout: Layout::new::<C>(),
-            hooks: hooks.build(),
-            type_name: None,
-            type_id: TypeId::of::<C>(),
-        });
+    pub fn storage(mut self, storage: StorageType) -> Self {
+        self.storage_type = storage;
+        self
+    }
 
+    pub fn with_id(mut self, id: Entity) -> Self {
+        self.with_ids.push(id);
+        self
+    }
+
+    pub fn with_ids(mut self, ids: impl IntoIterator<Item = Entity>) -> Self {
+        self.with_ids.extend(ids);
         self
     }
 
@@ -87,12 +150,38 @@ impl ComponentBuilder {
         self
     }
 
-    pub(crate) fn build(self, world: &mut World) -> Entity {
-        todo!()
+    pub fn build(self, world: &mut World) -> Entity {
+        let id = if self.id.is_null() {
+            world.new_entity()
+        } else {
+            debug_assert!(
+                !world.components.contains(&self.id),
+                "component already exists"
+            );
+            self.id
+        };
+
+        let storage = match self.storage_type {
+            StorageType::Tables => Storage::Tables(HashMap::new()),
+            StorageType::SparseSet => Storage::SparseTag(TagSparseSet::new()),
+            StorageType::PagedSparseSet(size) => Storage::SparseTag(TagSparseSet::new_paged(size)),
+        };
+
+        let cr = ComponentRecord {
+            id,
+            flags: self.flags,
+            storage,
+            with_ids: self.with_ids.into_boxed_slice(),
+            type_info: None,
+        };
+
+        world.components.insert(id, cr);
+
+        id
     }
 }
 
-impl Debug for ComponentBuilder {
+impl Debug for TagBuilder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ComponentBuilder")
             .field("id", &self.id)
@@ -100,35 +189,49 @@ impl Debug for ComponentBuilder {
     }
 }
 
-pub struct TypedComponentBuilder<C> {
+pub struct ComponentBuilder<C> {
+    id: Entity,
     hooks: Option<HooksBuilder<C>>,
     name: Option<TypeName>,
     flags: ComponentFlags,
+    with_ids: Vec<Entity>,
+    storage_type: StorageType,
 }
 
-impl<C: ComponentValue> TypedComponentBuilder<C> {
-    pub(crate) fn new() -> Self {
+impl<C: ComponentValue> ComponentBuilder<C> {
+    pub(crate) fn new(id: Entity) -> Self {
         Self {
+            id,
             hooks: const {
                 tnr! {size_of::<C>() != 0 => Some(HooksBuilder::new()) : None}
             },
             name: None,
             flags: ComponentFlags::empty(),
+            with_ids: vec![],
+            storage_type: StorageType::Tables,
         }
     }
 
-    pub fn new_named(name: impl Into<TypeName>) -> Self {
+    pub fn new_named(id: Entity, name: impl Into<TypeName>) -> Self {
         Self {
+            id,
             hooks: const {
                 tnr! {size_of::<C>() != 0 => Some(HooksBuilder::new()) : None}
             },
             name: Some(name.into()),
             flags: ComponentFlags::empty(),
+            with_ids: vec![],
+            storage_type: StorageType::Tables,
         }
     }
 
     pub fn name(mut self, name: impl Into<TypeName>) -> Self {
         self.name = Some(name.into());
+        self
+    }
+
+    pub fn storage(mut self, storage_type: StorageType) -> Self {
+        self.storage_type = storage_type;
         self
     }
 
@@ -187,6 +290,57 @@ impl<C: ComponentValue> TypedComponentBuilder<C> {
     }
 
     pub fn build(self, world: &mut World) -> Entity {
-        todo!()
+        let id = if self.id.is_null() {
+            let entity = world.new_entity();
+            TypeImpl::<C>::register(world, entity);
+            entity
+        } else {
+            debug_assert!(
+                !world.components.contains(&self.id),
+                "component already exists"
+            );
+            self.id
+        };
+
+        let storage = if const { size_of::<C>() == 0 } {
+            match self.storage_type {
+                StorageType::Tables => Storage::Tables(HashMap::new()),
+                StorageType::SparseSet => Storage::SparseTag(TagSparseSet::new()),
+                StorageType::PagedSparseSet(size) => {
+                    Storage::SparseTag(TagSparseSet::new_paged(size))
+                }
+            }
+        } else {
+            match self.storage_type {
+                StorageType::Tables => Storage::Tables(HashMap::new()),
+                StorageType::SparseSet => Storage::SparseData(ComponentSparseSet::new::<C>()),
+                StorageType::PagedSparseSet(size) => {
+                    Storage::SparseData(ComponentSparseSet::new_paged::<C>(size))
+                }
+            }
+        };
+
+        let type_info = self.hooks.map(|hooks| {
+            const_assert!(|C| size_of::<C>() != 0, "can't create type info for ZST");
+            Rc::new(TypeInfo {
+                id,
+                layout: Layout::new::<C>(),
+                hooks: hooks.build(),
+                type_name: std::any::type_name::<C>(),
+                type_id: TypeId::of::<C>(),
+            })
+        });
+
+        let cr = ComponentRecord {
+            id,
+            flags: self.flags,
+            storage,
+            with_ids: self.with_ids.into_boxed_slice(),
+            type_info,
+        };
+
+        world.components.insert(id, cr);
+
+        id
     }
 }

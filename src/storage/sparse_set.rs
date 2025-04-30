@@ -1,192 +1,215 @@
-use crate::{component::ComponentValue, entity::Entity};
 use std::{
     alloc::Layout,
-    ptr::{self, NonNull},
+    ops::{Index, IndexMut},
+    ptr::{self},
     usize,
 };
 
-type Page<const N: usize> = Box<[usize; N]>;
+pub trait SparseIndex: PartialEq + Clone + Eq {
+    fn to_sparse_index(&self) -> usize;
+}
 
-fn new_page<const SIZE: usize>() -> Page<SIZE> {
-    unsafe {
-        let layout = Layout::array::<usize>(SIZE).expect("Invalid layout");
-        let ptr = std::alloc::alloc(layout);
-
-        if ptr.is_null() {
-            std::alloc::handle_alloc_error(layout)
-        }
-
-        // set all bytes to 1, which means usize::MAX
-        ptr::write_bytes(ptr, 0xFF, const { SIZE * size_of::<usize>() });
-
-        // SAFETY: the pointer is valid and aligned
-        Box::from_raw(ptr as *mut [usize; SIZE])
+impl SparseIndex for usize {
+    #[inline(always)]
+    fn to_sparse_index(&self) -> usize {
+        *self
     }
 }
 
-struct Entry<T> {
-    value: T,
-    entity: Entity,
+struct Page {
+    dense_indices: Box<[usize]>,
+    size: usize,
+    is_active: bool,
+}
+
+impl Index<usize> for Page {
+    type Output = usize;
+
+    #[inline]
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.dense_indices[index]
+    }
+}
+
+impl IndexMut<usize> for Page {
+    #[inline]
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        &mut self.dense_indices[index]
+    }
+}
+
+impl Page {
+    fn new(size: usize) -> Self {
+        assert!(size != 0, "can't create empty page");
+
+        Self {
+            dense_indices: Box::from([]),
+            size,
+            is_active: false,
+        }
+    }
+
+    fn set_active(&mut self) -> &mut Self {
+        if self.is_active {
+            return self;
+        }
+
+        assert!(self.size != 0, "can't create empty page");
+
+        self.dense_indices = unsafe {
+            let layout = Layout::array::<usize>(self.size).unwrap();
+            let ptr = std::alloc::alloc(layout) as *mut usize;
+
+            if ptr.is_null() {
+                std::alloc::handle_alloc_error(layout);
+            }
+
+            // SAFETY: The pointer is valid and aligned, and the layout is correct.
+            ptr::write_bytes(ptr, 0xFF, self.size);
+            Box::from_raw(std::slice::from_raw_parts_mut(ptr, self.size))
+        };
+        self.is_active = true;
+        self
+    }
+}
+
+pub(crate) struct Entry<K: SparseIndex, V = K> {
+    key: K,
+    pub(crate) value: V,
+}
+
+impl<K: SparseIndex, V> Entry<K, V> {
+    #[inline]
+    pub fn key(&self) -> &K {
+        &self.key
+    }
 }
 
 /// Specialized sparse set of entities with associated data.
-pub(crate) struct PagedSparseSet<T, const PAGE_SIZE: usize> {
-    dense: Vec<Entry<T>>,
-    pages: Vec<Option<Page<PAGE_SIZE>>>,
+pub(crate) struct PagedSparseSet<K: SparseIndex, V> {
+    dense: Vec<Entry<K, V>>,
+    pages: Vec<Page>,
+    page_size: usize,
+    page_bits: usize,
+    page_mask: usize,
 }
 
-impl<T, const PAGE_SIZE: usize> PagedSparseSet<T, PAGE_SIZE> {
-    const PAGE_BITS: usize = PAGE_SIZE.trailing_zeros() as usize;
-    const PAGE_MASK: usize = PAGE_SIZE - 1;
-
-    #[inline(always)]
-    const fn page_index(id: u32) -> usize {
-        (id as usize) >> Self::PAGE_BITS
-    }
-
-    #[inline(always)]
-    const fn page_offset(id: u32) -> usize {
-        (id as usize) & Self::PAGE_MASK
-    }
-
-    pub(crate) fn new() -> Self {
+impl<K: SparseIndex, V> PagedSparseSet<K, V> {
+    pub(crate) fn new(page_size: usize) -> Self {
         Self {
             dense: vec![],
             pages: vec![],
+            page_size,
+            page_bits: page_size.trailing_zeros() as usize,
+            page_mask: page_size - 1,
         }
     }
 
-    fn ensure_page(pages: &mut Vec<Option<Page<PAGE_SIZE>>>, idx: u32) -> &mut Page<PAGE_SIZE> {
-        let page_idx = Self::page_index(idx);
-
-        if page_idx >= pages.len() {
-            pages.resize_with(page_idx + 1, || None);
+    fn ensure_page(pages: &mut Vec<Page>, page_index: usize, page_size: usize) -> &mut Page {
+        if page_index >= pages.len() {
+            pages.resize_with(page_index + 1, || Page::new(page_size));
         }
-
-        // Allocate a new page if not already created
-        pages[page_idx].get_or_insert_with(new_page)
+        pages[page_index].set_active()
     }
 
     /// Inserts a value into the set for the given entity.
     /// Replaces the data and returns the old value if the entity is already in the set.
-    pub(crate) fn insert(&mut self, entity: Entity, value: T) -> Option<T> {
-        debug_assert!(!entity.is_null(), "can't insert null entity into set");
-
-        let page = Self::ensure_page(&mut self.pages, entity.id());
-        let offset = Self::page_offset(entity.id());
-        let dense = page[offset];
+    /// Returns true if the value was inserted.
+    pub(crate) fn insert(&mut self, key: K, value: V) {
+        let sparse = key.to_sparse_index();
+        let page = Self::ensure_page(&mut self.pages, sparse >> self.page_bits, self.page_size);
+        let page_offset = sparse & self.page_mask;
+        let dense = page[page_offset];
 
         if dense != usize::MAX {
             debug_assert!(dense < self.dense.len(), "dense index out of bounds");
-
-            let entry = &mut self.dense[dense];
-
-            if entry.entity == entity {
-                Some(std::mem::replace(&mut entry.value, value))
-            } else {
-                None
-            }
+            self.dense[dense] = Entry { key, value };
         } else {
-            page[offset] = self.dense.len();
-            self.dense.push(Entry { entity, value });
-            None
+            page[page_offset] = self.dense.len();
+            self.dense.push(Entry { key, value });
         }
     }
 
     /// Removes an entity from the set.
     /// Returns the value associated with the entity if it was present.
-    pub(crate) fn remove(&mut self, entity: Entity) -> Option<T> {
-        let page = self
-            .pages
-            .get_mut(Self::page_index(entity.id()))
-            .and_then(Option::as_mut)?;
-        let offset = Self::page_offset(entity.id());
-        let dense = page[offset];
+    pub(crate) fn remove(&mut self, key: &K) -> Option<Entry<K, V>> {
+        let sparse = key.to_sparse_index();
+        let page = match self.pages.get_mut(sparse >> self.page_bits) {
+            Some(page) if page.is_active => page,
+            _ => return None,
+        };
 
-        // entity not in set.
-        if dense == usize::MAX || self.dense[dense].entity != entity {
+        let page_offset = sparse & self.page_mask;
+        let dense = page[page_offset];
+
+        // key not in set.
+        if dense == usize::MAX {
             return None;
         }
 
-        page[offset] = usize::MAX;
+        page[page_offset] = usize::MAX;
 
-        let last_index = self.dense.len() - 1;
         let removed = self.dense.swap_remove(dense);
 
-        if dense != last_index {
-            let entity = &self.dense[dense].entity;
-            let page = self.pages[Self::page_index(entity.id())]
-                .as_mut()
-                .expect("Sparse set corrupted");
-            page[Self::page_offset(entity.id())] = dense;
+        if dense != self.dense.len() {
+            let sparse_index = self.dense[dense].key.to_sparse_index();
+            let page = &mut self.pages[sparse_index >> self.page_bits];
+
+            assert!(page.is_active);
+
+            page[sparse_index & self.page_mask] = dense;
         }
 
-        Some(removed.value)
+        Some(removed)
     }
 
-    pub(crate) fn has_entity(&self, entity: Entity) -> bool {
-        self.pages
-            .get(Self::page_index(entity.id()))
-            .and_then(Option::as_ref)
-            .is_some_and(|page| page[Self::page_offset(entity.id())] != usize::MAX)
-    }
-
-    pub(crate) fn get(&self, entity: Entity) -> Option<&T> {
-        let page = self
-            .pages
-            .get(Self::page_index(entity.id()))
-            .and_then(Option::as_ref)?;
-        let dense = page[Self::page_offset(entity.id())];
-
-        if dense == usize::MAX {
-            return None;
-        }
-
-        debug_assert!(dense < self.dense.len(), "dense index out of bounds");
-
-        let entry = &self.dense[dense];
-
-        if entry.entity == entity {
-            Some(&entry.value)
-        } else {
-            None
+    pub(crate) fn contains(&self, key: &K) -> bool {
+        let sparse = key.to_sparse_index();
+        match self.pages.get(sparse >> self.page_bits) {
+            Some(page) => page.is_active && page[sparse & self.page_mask] < self.dense.len(),
+            None => false,
         }
     }
 
-    pub(crate) fn get_mut(&mut self, entity: Entity) -> Option<&mut T> {
-        let page = self
-            .pages
-            .get(Self::page_index(entity.id()))
-            .and_then(Option::as_ref)?;
-        let dense = page[Self::page_offset(entity.id())];
+    pub(crate) fn get(&self, key: &K) -> Option<&V> {
+        let sparse = key.to_sparse_index();
+        match self.pages.get(sparse >> self.page_bits) {
+            Some(page) if page.is_active => {
+                let dense = page[sparse & self.page_mask];
 
-        if dense == usize::MAX {
-            return None;
+                if dense < self.dense.len() {
+                    Some(&self.dense[dense].value)
+                } else {
+                    None
+                }
+            }
+            _ => return None,
         }
+    }
 
-        debug_assert!(dense < self.dense.len(), "dense index out of bounds");
+    pub(crate) fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+        let sparse = key.to_sparse_index();
+        match self.pages.get(sparse >> self.page_bits) {
+            Some(page) if page.is_active => {
+                let dense = page[sparse & self.page_mask];
 
-        let entry = &mut self.dense[dense];
-
-        if entry.entity == entity {
-            Some(&mut entry.value)
-        } else {
-            None
+                if dense < self.dense.len() {
+                    Some(&mut self.dense[dense].value)
+                } else {
+                    None
+                }
+            }
+            _ => return None,
         }
     }
 }
 
-#[inline(always)]
-const fn id_to_sparse(entity: Entity) -> usize {
-    entity.id() as usize
-}
-
-pub(crate) struct SparseSet<T> {
-    dense: Vec<Entry<T>>,
+pub(crate) struct SparseSet<K: SparseIndex, V> {
+    dense: Vec<Entry<K, V>>,
     sparse: Vec<usize>,
 }
 
-impl<T> SparseSet<T> {
+impl<K: SparseIndex, V> SparseSet<K, V> {
     pub(crate) fn new() -> Self {
         Self {
             dense: vec![],
@@ -197,105 +220,74 @@ impl<T> SparseSet<T> {
     /// Resizes the sparse array such that
     /// it can hold at least (`index` + 1) entries.
     #[inline(always)]
-    fn ensure_index(&mut self, index: usize) {
+    fn ensure_index(&mut self, index: usize) -> usize {
         if index >= self.sparse.len() {
             self.sparse.resize(index + 1, usize::MAX);
         }
+
+        self.sparse[index]
     }
 
     /// Inserts a value into the set for the given entity.
     /// Replaces the data and returns the old value if the entity is already in the set.
-    pub(crate) fn insert(&mut self, entity: Entity, value: T) -> Option<T> {
-        debug_assert!(!entity.is_null(), "can't insert null entity into set");
-
-        let sparse = id_to_sparse(entity);
-        self.ensure_index(sparse);
-
-        let dense = self.sparse[sparse];
+    /// Returns true if the value was inserted.
+    pub(crate) fn insert(&mut self, key: K, value: V) {
+        let sparse = key.to_sparse_index();
+        let dense = self.ensure_index(sparse);
 
         if dense != usize::MAX {
             debug_assert!(dense < self.dense.len(), "dense index is out of bounds");
-
-            /* Allowed to panic if the dense index is out of bounds.
-             * This is because valid dense index must be within bounds of dense.
-             */
-            let entry = &mut self.dense[dense];
-
-            if entry.entity == entity {
-                Some(std::mem::replace(&mut entry.value, value))
-            } else {
-                None
-            }
+            self.dense[dense] = Entry { key, value };
         } else {
             self.sparse[sparse] = self.dense.len();
-            self.dense.push(Entry { entity, value });
-            None
+            self.dense.push(Entry { key, value });
         }
     }
 
     /// Removes an entity from the set.
     /// Returns the value associated with the entity if it was present.
-    pub(crate) fn remove(&mut self, entity: Entity) -> Option<T> {
-        let sparse = id_to_sparse(entity);
-        let dense = self.sparse.get(sparse).copied()?;
+    pub(crate) fn remove(&mut self, key: &K) -> Option<Entry<K, V>> {
+        let sparse = key.to_sparse_index();
+        let dense = *(self.sparse.get(sparse)?);
 
         // entity not in set.
-        if dense == usize::MAX || self.dense[dense].entity != entity {
+        if dense == usize::MAX {
             return None;
         }
+
+        debug_assert!(dense < self.dense.len(), "dense index is out of bounds");
 
         self.sparse[sparse] = usize::MAX;
 
-        let last_index = self.dense.len() - 1;
         let removed = self.dense.swap_remove(dense);
 
-        if dense != last_index {
-            let entity = self.dense[dense].entity;
-            self.sparse[id_to_sparse(entity)] = dense;
+        if dense != self.dense.len() {
+            self.sparse[self.dense[dense].key.to_sparse_index()] = dense;
         }
 
-        Some(removed.value)
+        Some(removed)
     }
 
-    pub(crate) fn has_entity(&self, entity: Entity) -> bool {
-        self.sparse
-            .get(id_to_sparse(entity))
-            .is_some_and(|sparse| *sparse != usize::MAX)
-    }
-
-    pub(crate) fn get(&self, entity: Entity) -> Option<&T> {
-        let dense = *self.sparse.get(id_to_sparse(entity))?;
-
-        if dense == usize::MAX {
-            return None;
-        }
-
-        debug_assert!(dense < self.dense.len(), "dense index is out of bounds");
-
-        let entry = &self.dense[dense];
-
-        if entry.entity == entity {
-            Some(&entry.value)
-        } else {
-            None
+    pub(crate) fn contains(&self, key: &K) -> bool {
+        match self.sparse.get(key.to_sparse_index()) {
+            Some(&dense) => dense < self.dense.len(),
+            None => false,
         }
     }
 
-    pub(crate) fn get_mut(&mut self, entity: Entity) -> Option<&mut T> {
-        let dense = *self.sparse.get(id_to_sparse(entity))?;
-
-        if dense == usize::MAX {
-            return None;
+    pub(crate) fn get(&self, key: &K) -> Option<&V> {
+        match self.sparse.get(key.to_sparse_index()) {
+            Some(&dense) if dense < self.dense.len() => Some(&self.dense[dense].value),
+            _ => None,
         }
+    }
 
-        debug_assert!(dense < self.dense.len(), "dense index is out of bounds");
-
-        let entry = &mut self.dense[dense];
-
-        if entry.entity == entity {
-            Some(&mut entry.value)
-        } else {
-            None
+    pub(crate) fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+        match self.sparse.get(key.to_sparse_index()) {
+            Some(&dense) if dense < self.dense.len() => Some(&mut self.dense[dense].value),
+            _ => None,
         }
     }
 }
+
+pub fn profile_sparse_set() {}

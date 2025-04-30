@@ -26,18 +26,13 @@ trait TypeErased {
 }
 
 pub(crate) struct Column {
-    /// Component [Entity] that owns this column.
-    ///
-    /// This may be different from the entity on type_info.
-    component: Entity,
     pub(super) data: NonNull<u8>,
     pub(super) type_info: Rc<TypeInfo>,
 }
 
 impl Column {
-    pub fn new(component: Entity, type_info: Rc<TypeInfo>) -> Self {
+    pub fn new(type_info: Rc<TypeInfo>) -> Self {
         Self {
-            component,
             data: NonNull::dangling(),
             type_info,
         }
@@ -45,7 +40,7 @@ impl Column {
 
     #[inline]
     pub(crate) fn id(&self) -> Entity {
-        self.component
+        self.type_info.id()
     }
 
     /// #Safety

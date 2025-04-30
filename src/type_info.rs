@@ -1,4 +1,7 @@
-use crate::{component::ComponentValue, entity::Entity, pointer::ConstNonNull};
+use crate::{
+    component::ComponentValue, entity::Entity, pointer::ConstNonNull,
+    storage::sparse_set::SparseSet,
+};
 use const_assert::const_assert;
 use std::{
     alloc::Layout, any::TypeId, collections::HashMap, marker::PhantomData, ops::Deref,
@@ -148,7 +151,7 @@ pub struct TypeInfo {
     pub(crate) id: Entity,
     pub(crate) layout: Layout,
     pub(crate) hooks: TypeHooks,
-    pub(crate) type_name: Option<TypeName>,
+    pub(crate) type_name: &'static str,
     pub(crate) type_id: TypeId,
 }
 
@@ -278,32 +281,5 @@ impl TypeMap {
     #[inline]
     pub fn has_t<T: ComponentValue>(&self) -> bool {
         self.has(TypeId::of::<T>())
-    }
-}
-
-pub struct TypeIndex {
-    infos: HashMap<Entity, Rc<TypeInfo>>,
-}
-
-impl TypeIndex {
-    pub fn new() -> Self {
-        Self {
-            infos: HashMap::new(),
-        }
-    }
-
-    #[inline(always)]
-    pub fn get(&self, id: Entity) -> Option<&Rc<TypeInfo>> {
-        self.infos.get(&id)
-    }
-
-    #[inline(always)]
-    pub fn has_info(&self, id: Entity) -> bool {
-        self.infos.contains_key(&id)
-    }
-
-    #[inline(always)]
-    pub fn insert(&mut self, id: Entity, ti: Rc<TypeInfo>) {
-        self.infos.insert(id, ti);
     }
 }

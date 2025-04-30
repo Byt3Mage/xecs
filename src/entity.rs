@@ -1,6 +1,5 @@
+use crate::{flags::EntityFlags, storage::sparse_set::SparseIndex, world::World};
 use std::fmt::Display;
-
-use crate::{flags::EntityFlags, world::World};
 
 pub type EntityId = u32;
 
@@ -11,12 +10,13 @@ pub struct Entity(u64);
 
 impl Display for Entity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Entity({}, {})", self.id(), self.generation())
+        write!(f, "Entity({}, v{})", self.id(), self.generation())
     }
 }
 
 impl Entity {
     pub const NULL: Entity = Entity(0);
+    pub const HI_COMPONENT_ID: Entity = Entity(256);
 
     /// Creates a new `Entity` from raw bits.
     pub const fn from_raw(raw: u64) -> Self {
@@ -55,7 +55,12 @@ impl Entity {
     }
 }
 
-pub const HI_COMPONENT_ID: Entity = Entity(256);
+impl SparseIndex for Entity {
+    #[inline(always)]
+    fn to_sparse_index(&self) -> usize {
+        self.0 as usize
+    }
+}
 
 pub(crate) fn add_flag(world: &mut World, entity: Entity, flag: EntityFlags) {
     let record = world.entity_index.get_record_mut(entity).unwrap();
