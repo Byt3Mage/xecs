@@ -5,25 +5,23 @@ use crate::{
         Storage, StorageType,
         sparse_storage::{ComponentSparseSet, TagSparseSet},
     },
-    type_id::TypeImpl,
-    type_info::{HooksBuilder, TypeInfo, TypeName},
+    type_impl::TypeImpl,
+    type_info::{TypeHooks, TypeHooksBuilder, TypeInfo, TypeName},
     world::World,
 };
 use const_assert::const_assert;
 use simple_ternary::tnr;
-use std::{
-    alloc::Layout, any::TypeId, collections::HashMap, fmt::Debug, marker::PhantomData, rc::Rc,
-};
+use std::{collections::HashMap, fmt::Debug, marker::PhantomData};
 
-pub trait ComponentValue: 'static {}
+pub trait ComponentValue: TypeImpl {}
+impl<T: TypeImpl> ComponentValue for T {}
 
 /// Component location info within an [table](crate::storage::table::table).
-pub(crate) struct ComponentLocation {
+pub(crate) struct TableRecord {
     /// First index of id within the table's [Type](crate::type_info::Type).
     pub id_index: usize,
-    /// Number of times the id occurs in the table. E.g id, (id, \*), (\*, id).
-    pub id_count: usize,
-    /// First [Column](crate::storage::Column) index where the id appears (if not tag).
+    /// [Column](crate::storage::Column) index where the id appears.
+    /// Defaults to -1 if the id is a tag.
     pub column_index: isize,
 }
 
@@ -32,14 +30,8 @@ pub struct ComponentRecord {
     pub(crate) flags: ComponentFlags,
     pub(crate) storage: Storage,
     pub(crate) with_ids: Box<[Entity]>,
-    pub(crate) type_info: Option<Rc<TypeInfo>>,
-}
-
-impl ComponentRecord {
-    #[inline(always)]
-    pub(crate) fn is_tag(&self) -> bool {
-        self.type_info.is_none()
-    }
+    pub(crate) hooks: Option<TypeHooks>,
+    pub(crate) type_info: Option<&'static TypeInfo>,
 }
 
 /// Typed component id
@@ -47,6 +39,7 @@ impl ComponentRecord {
 /// Guarantees that the id matches the component type.
 pub struct Component<C: ComponentValue> {
     id: Entity,
+    type_info: &'static TypeInfo,
     _marker: PhantomData<C>,
 }
 
@@ -58,8 +51,9 @@ impl<C: ComponentValue> Component<C> {
             Some(ComponentRecord {
                 type_info: Some(ti),
                 ..
-            }) if ti.type_id == TypeId::of::<C>() => Some(Self {
+            }) if ti.is::<C>() => Some(Self {
                 id,
+                type_info: ti,
                 _marker: PhantomData,
             }),
             _ => None,
@@ -164,7 +158,7 @@ impl TagBuilder {
         let storage = match self.storage_type {
             StorageType::Tables => Storage::Tables(HashMap::new()),
             StorageType::SparseSet => Storage::SparseTag(TagSparseSet::new()),
-            StorageType::PagedSparseSet(size) => Storage::SparseTag(TagSparseSet::new_paged(size)),
+            StorageType::PagedSparseSet(_) => todo!(),
         };
 
         let cr = ComponentRecord {
@@ -172,6 +166,7 @@ impl TagBuilder {
             flags: self.flags,
             storage,
             with_ids: self.with_ids.into_boxed_slice(),
+            hooks: None,
             type_info: None,
         };
 
@@ -191,8 +186,8 @@ impl Debug for TagBuilder {
 
 pub struct ComponentBuilder<C> {
     id: Entity,
-    hooks: Option<HooksBuilder<C>>,
     name: Option<TypeName>,
+    hooks: TypeHooksBuilder<C>,
     flags: ComponentFlags,
     with_ids: Vec<Entity>,
     storage_type: StorageType,
@@ -200,12 +195,15 @@ pub struct ComponentBuilder<C> {
 
 impl<C: ComponentValue> ComponentBuilder<C> {
     pub(crate) fn new(id: Entity) -> Self {
+        const_assert!(
+            |C| size_of::<C>() != 0,
+            "can't use ComponentBuilder for ZST, use TagBuilder instead"
+        );
+
         Self {
             id,
-            hooks: const {
-                tnr! {size_of::<C>() != 0 => Some(HooksBuilder::new()) : None}
-            },
             name: None,
+            hooks: TypeHooksBuilder::new(),
             flags: ComponentFlags::empty(),
             with_ids: vec![],
             storage_type: StorageType::Tables,
@@ -215,9 +213,7 @@ impl<C: ComponentValue> ComponentBuilder<C> {
     pub fn new_named(id: Entity, name: impl Into<TypeName>) -> Self {
         Self {
             id,
-            hooks: const {
-                tnr! {size_of::<C>() != 0 => Some(HooksBuilder::new()) : None}
-            },
+            hooks: TypeHooksBuilder::new(),
             name: Some(name.into()),
             flags: ComponentFlags::empty(),
             with_ids: vec![],
@@ -252,22 +248,13 @@ impl<C: ComponentValue> ComponentBuilder<C> {
 
     pub fn default(mut self, f: fn() -> C) -> Self {
         const_assert!(|C| size_of::<C>() != 0, "can't set default hook for ZST");
-        self.hooks = self.hooks.map(|b| b.with_default(f));
+        self.hooks = self.hooks.with_default(f);
         self
     }
 
     pub fn clone(mut self, f: fn(&C) -> C) -> Self {
         const_assert!(|C| size_of::<C>() != 0, "can't set clone hook for ZST");
-        self.hooks = self.hooks.map(|b| b.with_clone(f));
-        self
-    }
-
-    pub fn on_add<F>(mut self, f: F) -> Self
-    where
-        F: FnMut(Entity) + 'static,
-    {
-        const_assert!(|C| size_of::<C>() != 0, "can't set on_add hook for ZST");
-        self.hooks = self.hooks.map(|b: HooksBuilder<C>| b.with_add(f));
+        self.hooks = self.hooks.with_clone(f);
         self
     }
 
@@ -276,7 +263,7 @@ impl<C: ComponentValue> ComponentBuilder<C> {
         F: FnMut(Entity, &mut C) + 'static,
     {
         const_assert!(|C| size_of::<C>() != 0, "can't set on_set hook for ZST");
-        self.hooks = self.hooks.map(|b| b.with_set(f));
+        self.hooks = self.hooks.with_set(f);
         self
     }
 
@@ -285,14 +272,14 @@ impl<C: ComponentValue> ComponentBuilder<C> {
         F: FnMut(Entity, &mut C) + 'static,
     {
         const_assert!(|C| size_of::<C>() != 0, "can't set on_remove hook for ZST");
-        self.hooks = self.hooks.map(|b| b.with_remove(f));
+        self.hooks = self.hooks.with_remove(f);
         self
     }
 
     pub fn build(self, world: &mut World) -> Entity {
         let id = if self.id.is_null() {
             let entity = world.new_entity();
-            TypeImpl::<C>::register(world, entity);
+            //TypeImpl::<C>::register(world, entity);
             entity
         } else {
             debug_assert!(
@@ -302,41 +289,29 @@ impl<C: ComponentValue> ComponentBuilder<C> {
             self.id
         };
 
+        let type_info = TypeInfo::of::<C>();
+
         let storage = if const { size_of::<C>() == 0 } {
             match self.storage_type {
                 StorageType::Tables => Storage::Tables(HashMap::new()),
                 StorageType::SparseSet => Storage::SparseTag(TagSparseSet::new()),
-                StorageType::PagedSparseSet(size) => {
-                    Storage::SparseTag(TagSparseSet::new_paged(size))
-                }
+                StorageType::PagedSparseSet(_) => todo!(),
             }
         } else {
             match self.storage_type {
                 StorageType::Tables => Storage::Tables(HashMap::new()),
-                StorageType::SparseSet => Storage::SparseData(ComponentSparseSet::new::<C>()),
-                StorageType::PagedSparseSet(size) => {
-                    Storage::SparseData(ComponentSparseSet::new_paged::<C>(size))
-                }
+                StorageType::SparseSet => Storage::SparseData(ComponentSparseSet::new(type_info)),
+                StorageType::PagedSparseSet(_) => todo!(),
             }
         };
-
-        let type_info = self.hooks.map(|hooks| {
-            const_assert!(|C| size_of::<C>() != 0, "can't create type info for ZST");
-            Rc::new(TypeInfo {
-                id,
-                layout: Layout::new::<C>(),
-                hooks: hooks.build(),
-                type_name: std::any::type_name::<C>(),
-                type_id: TypeId::of::<C>(),
-            })
-        });
 
         let cr = ComponentRecord {
             id,
             flags: self.flags,
             storage,
             with_ids: self.with_ids.into_boxed_slice(),
-            type_info,
+            hooks: Some(self.hooks.build()),
+            type_info: Some(type_info),
         };
 
         world.components.insert(id, cr);

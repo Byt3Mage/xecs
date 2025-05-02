@@ -1,14 +1,9 @@
-use std::{collections::HashMap, rc::Rc};
+use std::{collections::HashMap, ptr};
 
 use super::{table_data::TableData, table_index::TableId};
 use crate::{
-    component::ComponentValue,
-    entity::Entity,
-    error::{EcsError, EcsResult},
-    flags::TableFlags,
-    graph::GraphNode,
-    type_info::Type,
-    world::World,
+    component::ComponentValue, entity::Entity, flags::TableFlags, graph::GraphNode,
+    type_info::Type, world::World,
 };
 
 pub(crate) struct Table {
@@ -17,7 +12,7 @@ pub(crate) struct Table {
     /// Flags describing capabilites of this table
     pub(crate) flags: TableFlags,
     /// Vector of component [Id]s
-    pub(crate) ids: Type,
+    pub(crate) type_: Type,
     /// Storage for entities and components.
     pub(crate) data: TableData,
     /// Maps component ids to columns (fast path).
@@ -35,27 +30,21 @@ impl Table {
     /// - `row` must be a valid row in this table.
     /// - the data in the column must have the correct type.
     #[inline]
-    pub(crate) unsafe fn get<C: ComponentValue>(&self, row: usize, id: Entity) -> EcsResult<&C> {
+    pub(crate) unsafe fn get<C: ComponentValue>(&self, row: usize, id: Entity) -> Option<&C> {
         debug_assert!(row < self.data.count(), "row out of bounds");
         unsafe {
             if id < Entity::HI_COMPONENT_ID {
                 let col = self.component_map_lo[id.as_usize()];
 
                 if col >= 0 {
-                    Ok(self.data.get_unchecked(col as usize, row).deref())
+                    Some(self.data.get_unchecked(col as usize, row).deref())
                 } else {
-                    Err(EcsError::MissingComponent(
-                        self.data.get_entity_unchecked(row),
-                        id,
-                    ))
+                    None
                 }
             } else {
                 match self.component_map_hi.get(&id) {
-                    Some(&col) => Ok(self.data.get_unchecked(col, row).deref()),
-                    None => Err(EcsError::MissingComponent(
-                        self.data.get_entity_unchecked(row),
-                        id,
-                    )),
+                    Some(&col) => Some(self.data.get_unchecked(col, row).deref()),
+                    None => None,
                 }
             }
         }
@@ -71,32 +60,27 @@ impl Table {
         &mut self,
         row: usize,
         id: Entity,
-    ) -> EcsResult<&mut C> {
+    ) -> Option<&mut C> {
         debug_assert!(row < self.data.count(), "row out of bounds");
         unsafe {
             if id < Entity::HI_COMPONENT_ID {
                 let col = self.component_map_lo[id.as_usize()];
 
                 if col >= 0 {
-                    Ok(self.data.get_unchecked_mut(col as usize, row).deref_mut())
+                    Some(self.data.get_unchecked_mut(col as usize, row).deref_mut())
                 } else {
-                    Err(EcsError::MissingComponent(
-                        self.data.get_entity_unchecked(row),
-                        id,
-                    ))
+                    None
                 }
             } else {
                 match self.component_map_hi.get(&id) {
-                    Some(&col) => Ok(self.data.get_unchecked_mut(col, row).deref_mut()),
-                    None => Err(EcsError::MissingComponent(
-                        self.data.get_entity_unchecked(row),
-                        id,
-                    )),
+                    Some(&col) => Some(self.data.get_unchecked_mut(col, row).deref_mut()),
+                    None => None,
                 }
             }
         }
     }
 }
+
 /// Moves entity from src table to dst.
 ///
 /// # Safety
@@ -131,24 +115,21 @@ pub(crate) unsafe fn move_entity(
 
         if dst_id == src_id {
             debug_assert!(
-                Rc::ptr_eq(&dst_col.type_info, &src_col.type_info),
+                ptr::eq(dst_col.type_info, src_col.type_info),
                 "INTERNAL ERROR: Type mismatch"
             );
 
-            let ti = &dst_col.type_info;
-            let size = ti.size();
-            let move_fn = ti.hooks.move_fn;
+            let size = dst_col.type_info.size();
 
             // SAFETY:
-            // - caller guarantees that src_row and dst_row are valid indices.
-            // - caller ensures that move_fn implementation properly follows move semantics.
+            // - src_row and dst_row are valid indices.
             // - src_elem and dst_elem are valid pointers to the same type.
             unsafe {
-                let src_elem = src_col.data.add(src_row * size);
-                let dst_elem = dst_col.data.add(dst_row * size);
-                move_fn(src_elem, dst_elem);
+                let src_elem = src_col.data.as_ptr().add(src_row * size);
+                let dst_elem = dst_col.data.as_ptr().add(dst_row * size);
+                // move data from src_elem to dst_elem
+                ptr::copy_nonoverlapping(src_elem, dst_elem, size);
             }
-
             // Don't call drop on this column since we have moved the value.
             should_drop[i_src] = false;
         } else if dst_id < src_id {

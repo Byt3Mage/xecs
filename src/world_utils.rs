@@ -1,7 +1,5 @@
-use std::any::TypeId;
-
 use crate::{
-    component::ComponentValue,
+    component::{ComponentValue, TagBuilder},
     entity::Entity,
     error::{EcsError, EcsResult},
     storage::Storage,
@@ -14,17 +12,20 @@ use const_assert::const_assert;
 /// # Safety
 /// Caller ensures that id does not have associated data.
 pub(crate) fn add_tag(world: &mut World, entity: Entity, id: Entity) -> EcsResult<()> {
-    let cr = match world.components.get_mut(&id) {
-        Some(cr) => cr,
-        None => return Err(EcsError::UnregisteredComponent(id)),
-    };
-
-    debug_assert!(
-        cr.type_info.is_none(),
-        "id has associated data, can't use add"
-    );
-
     let r = world.entity_index.get_record(entity)?;
+
+    // Create ComponentRecord for tag if it doesn't exist.
+    // Unlike components, tags can be registered on the fly,
+    // allowing us to add regular entities without first registering them.
+    if !world.components.contains(&id) {
+        // TODO: default flags?
+        TagBuilder::new(id).build(world);
+    }
+
+    // Unwrap should never fail here, as we just ensured the component exists.
+    let cr = world.components.get_mut(&id).unwrap();
+
+    debug_assert!(cr.type_info.is_none(), "id has data, can't use add");
 
     match &mut cr.storage {
         Storage::SparseTag(tag) => Ok(tag.insert(entity)),
@@ -49,17 +50,16 @@ pub(crate) fn set_component_value<C: ComponentValue>(
     );
 
     let cr = match world.components.get_mut(&id) {
-        Some(cr) => cr,
+        Some(cr) => {
+            debug_assert!(
+                cr.type_info.as_ref().is_some_and(|ti| ti.is::<C>()),
+                "type mismatch"
+            );
+            cr
+        }
         None => return Err(EcsError::UnregisteredComponent(id)),
     };
     let r = world.entity_index.get_record(entity)?;
-
-    debug_assert!(
-        cr.type_info
-            .as_ref()
-            .is_some_and(|ti| ti.type_id == TypeId::of::<C>()),
-        "type mismatch"
-    );
 
     // SAFETY:
     // - Caller guarantees that the type matches the id.
@@ -67,7 +67,7 @@ pub(crate) fn set_component_value<C: ComponentValue>(
     match &mut cr.storage {
         Storage::SparseTag(_) => Err(EcsError::ComponentHasNoData(id)),
         Storage::Tables(_) => todo!(),
-        Storage::SparseData(data) => unsafe { Ok(data.insert(entity, value)) },
+        Storage::SparseData(set) => Ok(set.insert(entity, value)),
     }
 }
 
@@ -84,26 +84,27 @@ pub(crate) fn get_component_value<C: ComponentValue>(
     );
 
     let cr = match world.components.get(&id) {
-        Some(cr) => cr,
+        Some(cr) => {
+            debug_assert!(
+                cr.type_info.as_ref().is_some_and(|ti| ti.is::<C>()),
+                "type mismatch"
+            );
+            cr
+        }
         None => return Err(EcsError::UnregisteredComponent(id)),
     };
     let r = world.entity_index.get_record(entity)?;
 
-    debug_assert!(
-        cr.type_info
-            .as_ref()
-            .is_some_and(|ti| ti.type_id == TypeId::of::<C>()),
-        "type mismatch"
-    );
-
     // SAFETY
     // - Caller guarantees that the type matches the id.
     // - Valid entity must have valid table and row.
-    match &cr.storage {
-        Storage::SparseTag(_) => Err(EcsError::ComponentHasNoData(id)),
-        Storage::SparseData(set) => unsafe { set.get::<C>(entity, id) },
-        Storage::Tables(_) => unsafe { world.table_index[r.table].get::<C>(r.row, id) },
-    }
+    let value = match &cr.storage {
+        Storage::SparseTag(_) => return Err(EcsError::ComponentHasNoData(id)),
+        Storage::SparseData(set) => set.get(entity),
+        Storage::Tables(_) => unsafe { world.table_index[r.table].get(r.row, id) },
+    };
+
+    value.ok_or(EcsError::MissingComponent(entity, id))
 }
 
 /// #Safety
@@ -119,24 +120,25 @@ pub(crate) fn get_component_value_mut<C: ComponentValue>(
     );
 
     let cr = match world.components.get_mut(&id) {
-        Some(cr) => cr,
+        Some(cr) => {
+            debug_assert!(
+                cr.type_info.as_ref().is_some_and(|ti| ti.is::<C>()),
+                "type mismatch"
+            );
+            cr
+        }
         None => return Err(EcsError::UnregisteredComponent(id)),
     };
     let r = world.entity_index.get_record(entity)?;
 
-    debug_assert!(
-        cr.type_info
-            .as_ref()
-            .is_some_and(|ti| ti.type_id == TypeId::of::<C>()),
-        "type mismatch"
-    );
-
     // SAFETY
     // - Caller guarantees that the type matches the id.
     // - Valid entity must have valid row.
-    match &mut cr.storage {
-        Storage::SparseTag(_) => Err(EcsError::ComponentHasNoData(id)),
-        Storage::SparseData(set) => unsafe { set.get_mut::<C>(entity, id) },
-        Storage::Tables(_) => unsafe { world.table_index[r.table].get_mut::<C>(r.row, id) },
-    }
+    let value = match &mut cr.storage {
+        Storage::SparseTag(_) => return Err(EcsError::ComponentHasNoData(id)),
+        Storage::SparseData(set) => set.get_mut(entity),
+        Storage::Tables(_) => unsafe { world.table_index[r.table].get_mut(r.row, id) },
+    };
+
+    value.ok_or(EcsError::MissingComponent(entity, id))
 }

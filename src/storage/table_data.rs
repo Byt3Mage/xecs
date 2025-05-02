@@ -5,7 +5,10 @@ use crate::{
     type_info::TypeInfo,
 };
 use const_assert::const_assert;
-use std::{alloc::Layout, ptr::NonNull, rc::Rc};
+use std::{
+    alloc::Layout,
+    ptr::{self, NonNull},
+};
 
 /// Trait for allocating and reallocating memory for a type-erased array.
 ///
@@ -26,13 +29,16 @@ trait TypeErased {
 }
 
 pub(crate) struct Column {
+    /// Component id that owns this column.
+    id: Entity,
     pub(super) data: NonNull<u8>,
-    pub(super) type_info: Rc<TypeInfo>,
+    pub(super) type_info: &'static TypeInfo,
 }
 
 impl Column {
-    pub fn new(type_info: Rc<TypeInfo>) -> Self {
+    pub fn new(id: Entity, type_info: &'static TypeInfo) -> Self {
         Self {
+            id,
             data: NonNull::dangling(),
             type_info,
         }
@@ -40,7 +46,7 @@ impl Column {
 
     #[inline]
     pub(crate) fn id(&self) -> Entity {
-        self.type_info.id()
+        self.id
     }
 
     /// #Safety
@@ -73,7 +79,6 @@ impl Column {
     #[inline]
     unsafe fn swap_nonoverlapping(&self, a: usize, b: usize) {
         debug_assert!(a != b, "tried to swap with itself");
-
         // SAFETY:
         // data is non-null
         // caller guarantees a and b are valid and not equal.
@@ -187,18 +192,16 @@ impl Drop for TableData {
 
             for col in self.columns.iter() {
                 let (size, align) = col.type_info.size_align();
-                let layout =
-                    Layout::from_size_align(self.cap * size, align).expect("Invalid layout");
-
-                if let Some(drop_fn) = col.type_info.hooks.drop_fn {
-                    let mut ptr = col.data;
-
+                let drop_fn = col.type_info.drop_fn;
+                {
+                    let mut ptr = col.data.as_ptr();
                     for _ in 0..self.len {
                         drop_fn(ptr);
                         ptr = ptr.add(size)
                     }
                 }
-
+                
+                let layout = Layout::from_size_align(self.cap * size, align).unwrap();
                 std::alloc::dealloc(col.data.as_ptr(), layout);
             }
         }
@@ -333,43 +336,33 @@ impl TableData {
 
                 // Drop the values in row, then move values from last row into row.
                 for (i, col) in self.columns.iter().enumerate() {
-                    let ti = &col.type_info;
+                    let ti = col.type_info;
                     let size = ti.size();
-                    let row_ptr = col.data.add(row * size);
-                    let last_ptr = col.data.add(last * size);
+                    let base = col.data.as_ptr();
+                    let row_ptr = base.add(row * size);
+                    let last_ptr = base.add(last * size);
 
-                    match ti.hooks.drop_fn {
-                        Some(drop) if should_drop[i] => drop(row_ptr),
-                        _ => {}
+                    if should_drop[i] {
+                        (ti.drop_fn)(row_ptr);
                     }
 
-                    (ti.hooks.move_fn)(last_ptr, row_ptr)
+                    ptr::copy_nonoverlapping(last_ptr, row_ptr, size);
                 }
 
-                // Update entity record.
-                // Allowed to panic since last row must contain a valid entity.
-                let record = entity_index
-                    .get_record_mut(self.get_entity_unchecked(row))
-                    .unwrap();
+                let last_entity = self.get_entity_unchecked(row);
+                let record = entity_index.get_record_mut(last_entity).unwrap();
                 record.row = row;
-
-                // TODO: check if this is necessary.
-                self.entities.add(last).write(Entity::NULL);
             } else {
                 // Simply drop the values in the last row
                 for (i, col) in self.columns.iter().enumerate() {
-                    let ti = &col.type_info;
+                    let ti = col.type_info;
                     let size = ti.size();
-                    let row_ptr = col.data.add(row * size);
+                    let row_ptr = col.data.as_ptr().add(row * size);
 
-                    match ti.hooks.drop_fn {
-                        Some(drop) if should_drop[i] => drop(row_ptr),
-                        _ => {}
+                    if should_drop[i] {
+                        (ti.drop_fn)(row_ptr);
                     }
                 }
-
-                // TODO: check if this is necessary.
-                self.entities.add(row).write(Entity::NULL);
             }
         }
 

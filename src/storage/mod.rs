@@ -1,8 +1,7 @@
+use crate::component::TableRecord;
 use sparse_storage::{ComponentSparseSet, TagSparseSet};
 use std::collections::HashMap;
 use table_index::TableId;
-
-use crate::component::ComponentLocation;
 
 pub mod sparse_set;
 pub mod sparse_storage;
@@ -47,5 +46,5 @@ pub enum StorageType {
 pub enum Storage {
     SparseTag(TagSparseSet),
     SparseData(ComponentSparseSet),
-    Tables(HashMap<TableId, ComponentLocation>),
+    Tables(HashMap<TableId, TableRecord>),
 }

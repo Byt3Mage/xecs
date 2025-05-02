@@ -1,60 +1,37 @@
 use crate::{
-    component::ComponentValue, entity::Entity, pointer::ConstNonNull,
-    storage::sparse_set::SparseSet,
+    component::ComponentValue, entity::Entity, pointer::ConstNonNull, type_impl::TypeImpl,
 };
 use const_assert::const_assert;
 use std::{
-    alloc::Layout, any::TypeId, collections::HashMap, marker::PhantomData, ops::Deref,
-    ptr::NonNull, rc::Rc,
+    alloc::Layout,
+    any::TypeId,
+    marker::PhantomData,
+    ops::Deref,
+    ptr::{self, NonNull},
+    rc::Rc,
 };
 
-pub type TypeName = Box<str>;
-
-/// Built-in move function for components.
-///
-/// # Safety
-/// - The caller must ensure that the pointers are non-null and aligned for T.
-/// - The caller must ensure to never read from src until it is written to.
-unsafe fn move_fn<T: ComponentValue>(src: NonNull<u8>, dst: NonNull<u8>) {
-    let src = src.cast::<T>();
-    let dst = dst.cast::<T>();
-    unsafe { dst.write(src.read()) };
-}
-
-/// Built-in drop function for components.
-///
-/// # Safety
-/// - The caller must ensure that the pointer is non-null and aligned for T.
-/// - The caller must ensure to never use the pointer after the drop.
-unsafe fn drop_fn<T>(ptr: NonNull<u8>) {
-    unsafe {
-        ptr.cast::<T>().drop_in_place();
-    }
-}
-
+pub type TypeName = String;
 type DefaultHook = Box<dyn Fn(NonNull<u8>)>;
 type CloneHook = Box<dyn Fn(ConstNonNull<u8>, NonNull<u8>)>;
-type AddHook = Box<dyn FnMut(Entity)>;
 type SetHook = Box<dyn FnMut(Entity, NonNull<u8>)>;
 type RemoveHook = Box<dyn FnMut(Entity, NonNull<u8>)>;
 
-pub struct HooksBuilder<C> {
+pub struct TypeHooksBuilder<C> {
     default: Option<DefaultHook>,
     clone: Option<CloneHook>,
-    on_add: Option<AddHook>,
     on_set: Option<SetHook>,
     on_remove: Option<RemoveHook>,
-    phantom: PhantomData<fn(Entity, &mut C)>,
+    phantom: PhantomData<fn(&mut C)>,
 }
 
-impl<C: ComponentValue> HooksBuilder<C> {
+impl<C: ComponentValue> TypeHooksBuilder<C> {
     pub const fn new() -> Self {
         const_assert!(|C| size_of::<C>() != 0, "can't create type hooks for ZST");
 
         Self {
             default: None,
             clone: None,
-            on_add: None,
             on_set: None,
             on_remove: None,
             phantom: PhantomData,
@@ -80,14 +57,6 @@ impl<C: ComponentValue> HooksBuilder<C> {
         self
     }
 
-    pub fn with_add<F>(mut self, mut f: F) -> Self
-    where
-        F: FnMut(Entity) + 'static,
-    {
-        self.on_add = Some(Box::new(move |entity| f(entity)));
-        self
-    }
-
     pub fn with_set<F>(mut self, mut f: F) -> Self
     where
         F: FnMut(Entity, &mut C) + 'static,
@@ -110,17 +79,8 @@ impl<C: ComponentValue> HooksBuilder<C> {
 
     pub fn build(self) -> TypeHooks {
         TypeHooks {
-            move_fn: move_fn::<C>,
-            drop_fn: const {
-                if std::mem::needs_drop::<C>() {
-                    Some(drop_fn::<C>)
-                } else {
-                    None
-                }
-            },
             default: self.default,
             clone: self.clone,
-            on_add: self.on_add,
             on_set: self.on_set,
             on_remove: self.on_remove,
         }
@@ -128,51 +88,56 @@ impl<C: ComponentValue> HooksBuilder<C> {
 }
 
 pub struct TypeHooks {
-    /// Built-in move function for components.
-    ///
-    /// # Safety
-    /// - The caller must ensure that the pointers are non-null and aligned for data type.
-    /// - The caller must ensure to never use `src` after the move.
-    pub(crate) move_fn: unsafe fn(src: NonNull<u8>, dst: NonNull<u8>),
-    /// Built-in drop function for components.
-    ///
-    /// # Safety
-    /// - The caller must ensure that the pointer is non-null and aligned for the data type.
-    /// - The caller must ensure to never use the pointer after the drop.
-    pub(crate) drop_fn: Option<unsafe fn(ptr: NonNull<u8>)>,
     pub(crate) default: Option<DefaultHook>,
     pub(crate) clone: Option<CloneHook>,
-    pub(crate) on_add: Option<AddHook>,
     pub(crate) on_set: Option<SetHook>,
     pub(crate) on_remove: Option<RemoveHook>,
 }
 
 pub struct TypeInfo {
-    pub(crate) id: Entity,
+    /// Built-in drop function for the type.
+    ///
+    /// # Safety
+    /// - The caller must ensure that the pointer is non-null and aligned for the data type.
+    /// - The caller must ensure to never use the pointer after the drop.
+    pub(crate) drop_fn: unsafe fn(ptr: *mut u8),
     pub(crate) layout: Layout,
-    pub(crate) hooks: TypeHooks,
     pub(crate) type_name: &'static str,
     pub(crate) type_id: TypeId,
 }
 
 impl TypeInfo {
-    #[inline]
-    pub fn id(&self) -> Entity {
-        self.id
+    pub(crate) fn new<T: 'static>() -> Self {
+        Self {
+            drop_fn: |ptr| unsafe { ptr::drop_in_place(ptr.cast::<T>()) },
+            layout: Layout::new::<T>(),
+            type_name: std::any::type_name::<T>(),
+            type_id: TypeId::of::<T>(),
+        }
     }
 
     #[inline]
-    pub fn size(&self) -> usize {
+    pub fn of<T: TypeImpl>() -> &'static TypeInfo {
+        T::type_info()
+    }
+
+    #[inline]
+    pub fn is<T: 'static>(&self) -> bool {
+        self.type_id == TypeId::of::<T>()
+    }
+
+    #[inline]
+    pub const fn size(&self) -> usize {
         self.layout.size()
     }
 
     #[inline]
-    pub fn align(&self) -> usize {
+    pub const fn align(&self) -> usize {
         self.layout.align()
     }
 
     #[inline]
-    pub fn size_align(&self) -> (usize, usize) {
+    pub const fn size_align(&self) -> (usize, usize) {
         (self.size(), self.align())
     }
 }
@@ -239,47 +204,5 @@ impl Type {
         dst_array.extend_from_slice(&src_array[at..]);
 
         Some(dst_array.into())
-    }
-}
-
-pub struct TypeMap {
-    pub ids: HashMap<core::any::TypeId, Entity>,
-}
-
-impl TypeMap {
-    pub(crate) fn new() -> Self {
-        Self {
-            ids: HashMap::new(),
-        }
-    }
-
-    #[inline]
-    pub fn get(&self, ty_id: core::any::TypeId) -> Option<Entity> {
-        self.ids.get(&ty_id).copied()
-    }
-
-    #[inline]
-    pub fn get_t<T: ComponentValue>(&self) -> Option<Entity> {
-        self.get(core::any::TypeId::of::<T>())
-    }
-
-    #[inline]
-    pub(crate) fn set_t<T: ComponentValue>(&mut self, id: Entity) {
-        self.set(TypeId::of::<T>(), id);
-    }
-
-    #[inline]
-    pub(crate) fn set(&mut self, ty_id: TypeId, id: Entity) {
-        self.ids.insert(ty_id, id);
-    }
-
-    #[inline]
-    pub fn has(&self, ty_id: TypeId) -> bool {
-        self.ids.contains_key(&ty_id)
-    }
-
-    #[inline]
-    pub fn has_t<T: ComponentValue>(&self) -> bool {
-        self.has(TypeId::of::<T>())
     }
 }

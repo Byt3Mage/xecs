@@ -113,8 +113,7 @@ impl<K: SparseIndex, V> PagedSparseSet<K, V> {
     }
 
     /// Inserts a value into the set for the given entity.
-    /// Replaces the data and returns the old value if the entity is already in the set.
-    /// Returns true if the value was inserted.
+    /// Replaces the data if the entity is already in the set.
     pub(crate) fn insert(&mut self, key: K, value: V) {
         let sparse = key.to_sparse_index();
         let page = Self::ensure_page(&mut self.pages, sparse >> self.page_bits, self.page_size);
@@ -204,13 +203,13 @@ impl<K: SparseIndex, V> PagedSparseSet<K, V> {
     }
 }
 
-pub(crate) struct SparseSet<K: SparseIndex, V> {
+pub struct SparseSet<K: SparseIndex, V> {
     dense: Vec<Entry<K, V>>,
     sparse: Vec<usize>,
 }
 
 impl<K: SparseIndex, V> SparseSet<K, V> {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             dense: vec![],
             sparse: vec![],
@@ -229,9 +228,8 @@ impl<K: SparseIndex, V> SparseSet<K, V> {
     }
 
     /// Inserts a value into the set for the given entity.
-    /// Replaces the data and returns the old value if the entity is already in the set.
-    /// Returns true if the value was inserted.
-    pub(crate) fn insert(&mut self, key: K, value: V) {
+    /// Replaces the data if the entity is already in the set.
+    pub fn insert(&mut self, key: K, value: V) {
         let sparse = key.to_sparse_index();
         let dense = self.ensure_index(sparse);
 
@@ -268,26 +266,27 @@ impl<K: SparseIndex, V> SparseSet<K, V> {
         Some(removed)
     }
 
-    pub(crate) fn contains(&self, key: &K) -> bool {
+    #[inline]
+    pub fn contains(&self, key: &K) -> bool {
         match self.sparse.get(key.to_sparse_index()) {
             Some(&dense) => dense < self.dense.len(),
             None => false,
         }
     }
 
-    pub(crate) fn get(&self, key: &K) -> Option<&V> {
+    #[inline]
+    pub fn get(&self, key: &K) -> Option<&V> {
         match self.sparse.get(key.to_sparse_index()) {
             Some(&dense) if dense < self.dense.len() => Some(&self.dense[dense].value),
             _ => None,
         }
     }
 
-    pub(crate) fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+    #[inline]
+    pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
         match self.sparse.get(key.to_sparse_index()) {
             Some(&dense) if dense < self.dense.len() => Some(&mut self.dense[dense].value),
             _ => None,
         }
     }
 }
-
-pub fn profile_sparse_set() {}
