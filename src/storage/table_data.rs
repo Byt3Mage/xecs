@@ -1,13 +1,12 @@
 use crate::{
-    entity::Entity,
-    entity_index::EntityIndex,
-    pointer::{Ptr, PtrMut},
-    type_info::TypeInfo,
+    component::ComponentValue, entity::Entity, entity_index::EntityIndex,
+    types::type_info::TypeInfo,
 };
 use const_assert::const_assert;
 use std::{
     alloc::Layout,
     ptr::{self, NonNull},
+    rc::Rc,
 };
 
 /// Trait for allocating and reallocating memory for a type-erased array.
@@ -32,11 +31,11 @@ pub(crate) struct Column {
     /// Component id that owns this column.
     id: Entity,
     pub(super) data: NonNull<u8>,
-    pub(super) type_info: &'static TypeInfo,
+    pub(super) type_info: Rc<TypeInfo>,
 }
 
 impl Column {
-    pub fn new(id: Entity, type_info: &'static TypeInfo) -> Self {
+    pub fn new(id: Entity, type_info: Rc<TypeInfo>) -> Self {
         Self {
             id,
             data: NonNull::dangling(),
@@ -52,42 +51,27 @@ impl Column {
     /// #Safety
     /// Caller must ensure that `row` is valid for this column.
     #[inline]
-    unsafe fn get(&self, row: usize) -> Ptr {
+    pub(super) unsafe fn add_ptr(&self, row: usize) -> NonNull<u8> {
         // SAFETY:
         // data is non-null
         // caller guarantees row is valid.
-        unsafe { Ptr::new(self.data.add(row * self.type_info.size())) }
+        unsafe { self.data.add(row * self.type_info.size()) }
     }
 
-    /// #Safety
-    /// Caller must ensure that `row` is in bounds for column.
-    #[inline]
-    unsafe fn get_mut(&self, row: usize) -> PtrMut {
-        // SAFETY:
-        // data is non-null
-        // caller guarantees row is valid.
-        unsafe { PtrMut::new(self.data.add(row * self.type_info.size())) }
-    }
-
-    /// Swap rows `a` and `b`.
-    ///
-    /// This function does not do any bounds checking.
-    ///
-    /// # Safety
-    /// - Caller must ensure that `a` and `b` are in bounds for column.
-    /// - Caller must ensure that `a` and `b` are not equal.
-    #[inline]
-    unsafe fn swap_nonoverlapping(&self, a: usize, b: usize) {
-        debug_assert!(a != b, "tried to swap with itself");
-        // SAFETY:
-        // data is non-null
-        // caller guarantees a and b are valid and not equal.
+    unsafe fn drop(&mut self, len: usize, cap: usize) {
         unsafe {
-            let size = self.type_info.size();
-            let base = self.data.as_ptr();
-            let a_ptr = base.add(a * size);
-            let b_ptr = base.add(b * size);
-            std::ptr::swap_nonoverlapping(a_ptr, b_ptr, size);
+            let (size, align) = self.type_info.size_align();
+            let layout = Layout::from_size_align(size * cap, align).unwrap();
+
+            if let Some(drop_fn) = self.type_info.drop_fn {
+                let mut ptr = self.data;
+                for _ in 0..len {
+                    drop_fn(ptr);
+                    ptr = ptr.add(size)
+                }
+            }
+
+            std::alloc::dealloc(self.data.as_ptr(), layout);
         }
     }
 }
@@ -95,12 +79,12 @@ impl Column {
 impl TypeErased for Column {
     unsafe fn alloc(&mut self, new_cap: usize) {
         let (size, align) = self.type_info.size_align();
-        let new_layout = Layout::from_size_align(new_cap * size, align).expect("Invalid layout");
-        let new_ptr = unsafe { std::alloc::alloc(new_layout) };
+        let layout = Layout::from_size_align(new_cap * size, align).expect("Invalid layout");
+        let ptr = unsafe { std::alloc::alloc(layout) };
 
-        self.data = match NonNull::new(new_ptr) {
+        self.data = match NonNull::new(ptr) {
             Some(p) => p,
-            None => std::alloc::handle_alloc_error(new_layout),
+            None => std::alloc::handle_alloc_error(layout),
         };
     }
 
@@ -108,10 +92,10 @@ impl TypeErased for Column {
         debug_assert!(new_cap > old_cap, "tried to realloc with smaller capacity");
 
         let (size, align) = self.type_info.size_align();
-        let new_layout = Layout::from_size_align(new_cap * size, align).expect("Invalid layout");
         let old_layout = Layout::from_size_align(old_cap * size, align).expect("Invalid layout");
-        let new_ptr =
-            unsafe { std::alloc::realloc(self.data.as_ptr(), old_layout, new_layout.size()) };
+        let new_layout = Layout::from_size_align(new_cap * size, align).expect("Invalid layout");
+        let old_ptr = self.data.as_ptr();
+        let new_ptr = unsafe { std::alloc::realloc(old_ptr, old_layout, new_layout.size()) };
 
         self.data = match NonNull::new(new_ptr) {
             Some(p) => p,
@@ -122,21 +106,21 @@ impl TypeErased for Column {
 
 impl TypeErased for NonNull<Entity> {
     unsafe fn alloc(&mut self, new_cap: usize) {
-        let new_layout = Layout::array::<Entity>(new_cap).expect("Invalid laout");
-        let new_ptr = unsafe { std::alloc::alloc(new_layout) };
+        let layout = Layout::array::<Entity>(new_cap).expect("Invalid laout");
+        let ptr = unsafe { std::alloc::alloc(layout) };
 
-        *self = match NonNull::new(new_ptr as *mut Entity) {
+        *self = match NonNull::new(ptr as *mut Entity) {
             Some(p) => p,
-            None => std::alloc::handle_alloc_error(new_layout),
+            None => std::alloc::handle_alloc_error(layout),
         };
     }
 
     unsafe fn realloc(&mut self, old_cap: usize, new_cap: usize) {
         debug_assert!(new_cap > old_cap, "realloc with smaller capacity");
 
-        let new_layout = Layout::array::<Entity>(new_cap).expect("Invalid layout");
         let old_layout = Layout::array::<Entity>(old_cap).expect("Invalid layout");
-        let old_ptr = self.as_ptr() as *mut u8;
+        let new_layout = Layout::array::<Entity>(new_cap).expect("Invalid layout");
+        let old_ptr = self.as_ptr().cast();
         let new_ptr = unsafe { std::alloc::realloc(old_ptr, old_layout, new_layout.size()) };
 
         *self = match NonNull::new(new_ptr as *mut Entity) {
@@ -157,14 +141,23 @@ unsafe fn swap_entities(entities: &mut NonNull<Entity>, a: usize, b: usize) {
     debug_assert!(a != b, "attempting to swap same memory location");
 
     // SAFETY:
-    // - The caller must ensure that `row` and `last` are valid rows.
-    // - row and last are guaranteed not to overlap, since they are different rows.
+    // - The caller must ensure that `a` and `b` are valid rows.
+    // - a and b are guaranteed not to overlap, since they are different rows.
     unsafe {
         let base = entities.as_ptr();
         let ap = base.add(a);
         let bp = base.add(b);
         std::ptr::swap_nonoverlapping(ap, bp, 1);
     }
+}
+
+unsafe fn drop_entities(entities: &mut NonNull<Entity>, cap: usize) {
+    const_assert!(
+        || !std::mem::needs_drop::<Entity>(),
+        "Entity type must not require drop, otherwise implement drop"
+    );
+    let layout = Layout::array::<Entity>(cap).expect("Invalid layout");
+    unsafe { std::alloc::dealloc(entities.as_ptr().cast(), layout) };
 }
 
 pub(crate) struct TableData {
@@ -180,36 +173,18 @@ impl Drop for TableData {
             return;
         }
 
-        const_assert!(
-            || std::mem::needs_drop::<Entity>() == false,
-            "Entity type must not require drop, fix drop otherwise"
-        );
-
         unsafe {
-            let entt_layout = Layout::array::<Entity>(self.cap).expect("Invalid layout");
-            let entt_ptr = self.entities.as_ptr() as *mut u8;
-            std::alloc::dealloc(entt_ptr, entt_layout);
+            drop_entities(&mut self.entities, self.cap);
 
-            for col in self.columns.iter() {
-                let (size, align) = col.type_info.size_align();
-                let drop_fn = col.type_info.drop_fn;
-                {
-                    let mut ptr = col.data.as_ptr();
-                    for _ in 0..self.len {
-                        drop_fn(ptr);
-                        ptr = ptr.add(size)
-                    }
-                }
-                
-                let layout = Layout::from_size_align(self.cap * size, align).unwrap();
-                std::alloc::dealloc(col.data.as_ptr(), layout);
+            for col in self.columns.iter_mut() {
+                col.drop(self.len, self.cap);
             }
         }
     }
 }
 
 impl TableData {
-    pub fn new(columns: Box<[Column]>) -> Self {
+    pub(crate) fn new(columns: Box<[Column]>) -> Self {
         Self {
             entities: NonNull::dangling(),
             columns,
@@ -220,7 +195,7 @@ impl TableData {
 
     /// Returns number of rows in this table.
     #[inline]
-    pub fn count(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.len
     }
 
@@ -254,7 +229,8 @@ impl TableData {
         } else {
             self.cap.checked_mul(2).expect("Capacity overflow")
         };
-        self.reserve(new_cap);
+
+        self.reserve(new_cap - self.cap);
     }
 
     /// Creates a new row without initializing its elements.
@@ -263,7 +239,7 @@ impl TableData {
     /// # Safety
     /// - The rows for the new entity in all columns will be uninitialized (hence, unsafe).
     /// - The caller must ensure to initialize the new row in all columns before using it.
-    pub unsafe fn new_row_uninit(&mut self, entity: Entity) -> usize {
+    pub(crate) unsafe fn new_row_uninit(&mut self, entity: Entity) -> usize {
         // TODO: check if I should use `[Self::grow]` instead
         if self.len == self.cap {
             self.grow();
@@ -281,91 +257,165 @@ impl TableData {
         row
     }
 
-    /// Returns a [Ptr] to the element at `row`, in `column`, without doing bounds checking.
+    /// Sets the value of the component at `row`, in `column`.
+    ///
+    /// This function does not perform bounds or type checking.
     ///
     /// # Safety
-    /// - The caller ensures that `column` is valid.
-    /// - The caller ensures that `row` is valid.
-    pub unsafe fn get_unchecked(&self, column: usize, row: usize) -> Ptr {
-        debug_assert!(column < self.columns.len(), "column out of bounds");
+    /// - The caller ensures that `row` and `column` are valid.
+    /// - The caller ensures that the type matches.
+    /// - The caller ensures that the row is initialized.
+    pub(crate) unsafe fn set_unchecked<C: ComponentValue>(
+        &self,
+        column: usize,
+        row: usize,
+        val: C,
+    ) {
         debug_assert!(row < self.len, "row out of bounds");
-        // SAFETY: The caller ensures that `row` and `column` are valid.
-        unsafe { self.columns.get_unchecked(column).get(row) }
+        debug_assert!(column < self.columns.len(), "column out of bounds");
+
+        // SAFETY:
+        // - The caller ensures that `row` and `column` are valid.
+        // - The caller ensures that the type `C` matches the column.
+        // - The caller ensures that the row is initialized.
+        unsafe {
+            let col = self.columns.get_unchecked(column);
+            debug_assert!(col.type_info.is::<C>(), "TableData: type mismatch");
+            let ptr = col.add_ptr(row).as_ptr().cast();
+            let _ = ptr::replace(ptr, val);
+        }
     }
 
-    /// Returns a [PtrMut] to the element at `row`, in `column`, without doing bounds checking.
+    /// Sets the value of the component at `row`, in `column`.
+    ///
+    /// This function does not perform bounds or type checking.
     ///
     /// # Safety
-    /// - The caller ensures that `column` is in bounds.
-    /// - The caller ensures that `row` is in bounds.
-    pub unsafe fn get_unchecked_mut(&mut self, column: usize, row: usize) -> PtrMut {
-        debug_assert!(column < self.columns.len(), "column out of bounds");
+    /// - The caller ensures that `row` and `column` are valid.
+    /// - The caller ensures that the type matches.
+    /// - The caller ensures that the row is uinitialized.
+    pub(crate) unsafe fn set_unitialized<C: ComponentValue>(
+        &self,
+        column: usize,
+        row: usize,
+        val: C,
+    ) {
+        // SAFETY:
+        // - The caller ensures that `row` and `column` are valid.
+        // - The caller ensures that the type `C` matches the column.
+        // - The caller ensures that the row is uninitialized.
+        unsafe {
+            let col = self.columns.get_unchecked(column);
+            debug_assert!(col.type_info.is::<C>(), "TableData: type mismatch");
+            let ptr = col.add_ptr(row).as_ptr().cast();
+            ptr::write(ptr, val);
+        }
+    }
+
+    /// Returns a reference to the element at `row`, in `column`.
+    ///
+    /// This function does not perform bounds or type checking.
+    ///
+    /// # Safety
+    /// - The caller ensures that `row` and `column` are valid.
+    /// - The caller ensures that the type matches.
+    pub(crate) unsafe fn get_unchecked<C: ComponentValue>(&self, column: usize, row: usize) -> &C {
         debug_assert!(row < self.len, "row out of bounds");
-        // SAFETY: The caller ensures that `row` and `column` in bounds.
-        unsafe { self.columns.get_unchecked_mut(column).get_mut(row) }
+        debug_assert!(column < self.columns.len(), "column out of bounds");
+        // SAFETY:
+        // - The caller ensures that `row` and `column` are valid.
+        // - The caller ensures that the type `C` matches the column.
+        unsafe {
+            let col = self.columns.get_unchecked(column);
+            debug_assert!(col.type_info.is::<C>(), "TableData: type mismatch");
+            col.add_ptr(row).cast().as_ref()
+        }
+    }
+
+    /// Returns a mutable reference to the element at `row`, in `column`.
+    ///
+    /// This function does not perform bounds checking.
+    ///
+    /// # Safety
+    /// - The caller ensures that `row` and `column` are valid.
+    /// - The caller ensures that the type matches.
+    pub(crate) unsafe fn get_unchecked_mut<C: ComponentValue>(
+        &mut self,
+        column: usize,
+        row: usize,
+    ) -> &mut C {
+        debug_assert!(row < self.len, "row out of bounds");
+        debug_assert!(column < self.columns.len(), "column out of bounds");
+        // SAFETY:
+        // - The caller ensures that `row` and `column` in bounds.
+        // - The caller ensures that the type `C` matches the column.
+        unsafe {
+            let col = self.columns.get_unchecked_mut(column);
+            assert!(col.type_info.is::<C>(), "TableData: type mismatch");
+            col.add_ptr(row).cast().as_mut()
+        }
     }
 
     /// Returns the entity at the specified `row`.
     ///
     /// # Safety
     /// - The row must be in-bounds (`row` < `self.len`).
-    pub unsafe fn get_entity_unchecked(&self, row: usize) -> Entity {
+    pub(crate) unsafe fn get_entity_unchecked(&self, row: usize) -> &Entity {
         debug_assert!(row < self.len, "row out of bounds");
         // SAFETY: The caller ensures that `row` is valid.
-        unsafe { *(self.entities.as_ptr().add(row)) }
+        unsafe { self.entities.add(row).as_ref() }
     }
 
     /// Deletes the row by swapping with the last row
     /// and returns the entity that was in the last row
     /// or `None` if `row` was the last.
-    pub(super) fn delete_row(
-        &mut self,
-        entity_index: &mut EntityIndex,
-        row: usize,
-        should_drop: Vec<bool>,
-    ) {
+    ///
+    /// # Safety
+    /// - `row` must be in bounds.
+    /// - `drop_check` and `self.columns` must have the same length
+    pub(super) unsafe fn delete_row(&mut self, row: usize, drop_check: &[bool]) -> Option<Entity> {
         debug_assert!(row < self.len, "row out of bounds");
-        debug_assert!(self.columns.len() == should_drop.len());
+        debug_assert!(self.columns.len() == drop_check.len());
 
         let last = self.len - 1;
 
-        unsafe {
-            // Check is done outside loop to avoid doing the same check for all columns.
+        let last_entity = unsafe {
             if row != last {
                 swap_entities(&mut self.entities, row, last);
 
-                // Drop the values in row, then move values from last row into row.
-                for (i, col) in self.columns.iter().enumerate() {
-                    let ti = col.type_info;
+                for (col, &should_drop) in self.columns.iter().zip(drop_check) {
+                    let ti = &col.type_info;
                     let size = ti.size();
-                    let base = col.data.as_ptr();
-                    let row_ptr = base.add(row * size);
-                    let last_ptr = base.add(last * size);
+                    let row_ptr = col.data.add(row * size);
+                    let last_ptr = col.data.add(last * size);
 
-                    if should_drop[i] {
-                        (ti.drop_fn)(row_ptr);
+                    if should_drop {
+                        if let Some(drop_fn) = ti.drop_fn {
+                            (drop_fn)(row_ptr)
+                        }
                     }
 
-                    ptr::copy_nonoverlapping(last_ptr, row_ptr, size);
+                    ptr::copy_nonoverlapping(last_ptr.as_ptr(), row_ptr.as_ptr(), size);
                 }
 
-                let last_entity = self.get_entity_unchecked(row);
-                let record = entity_index.get_record_mut(last_entity).unwrap();
-                record.row = row;
+                Some(*self.get_entity_unchecked(row))
             } else {
                 // Simply drop the values in the last row
-                for (i, col) in self.columns.iter().enumerate() {
-                    let ti = col.type_info;
-                    let size = ti.size();
-                    let row_ptr = col.data.as_ptr().add(row * size);
+                for (col, &should_drop) in self.columns.iter().zip(drop_check) {
+                    let ti = &col.type_info;
 
-                    if should_drop[i] {
-                        (ti.drop_fn)(row_ptr);
+                    if should_drop {
+                        if let Some(drop_fn) = ti.drop_fn {
+                            (drop_fn)(col.data.add(row * ti.size()))
+                        }
                     }
                 }
+
+                None
             }
-        }
+        };
 
         self.len -= 1;
+        last_entity
     }
 }

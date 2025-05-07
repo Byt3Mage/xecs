@@ -1,21 +1,24 @@
+// Public modules
+pub mod component;
+pub mod entity;
+pub mod entity_view;
+pub mod error;
+pub mod flags;
 pub mod macros;
+pub mod storage;
+pub mod types;
 pub mod world;
 
-mod component;
-mod data_structures;
+// Internal modules
 mod dynamic_struct;
-mod entity;
 mod entity_index;
-mod entity_view;
-mod error;
-mod flags;
 mod graph;
 mod pointer;
 mod relationships;
-mod storage;
-mod type_impl;
-mod type_info;
+mod table_index;
+mod utils;
 mod world_utils;
 
+// Test modules
 #[cfg(test)]
 mod tests;

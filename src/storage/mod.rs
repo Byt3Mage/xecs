@@ -1,13 +1,14 @@
 use crate::component::TableRecord;
+use crate::table_index::TableId;
 use sparse_storage::{ComponentSparseSet, TagSparseSet};
 use std::collections::HashMap;
-use table_index::TableId;
 
-pub mod sparse_set;
-pub mod sparse_storage;
-pub mod table;
-pub mod table_data;
-pub mod table_index;
+pub(crate) mod sparse_set;
+pub(crate) mod sparse_storage;
+pub(crate) mod table;
+pub(crate) mod table_data;
+
+mod erased_vec;
 
 /// The type of storage used for components
 #[derive(Clone, Copy, PartialEq, Hash)]
@@ -43,7 +44,7 @@ pub enum StorageType {
     // but offers the fastest insertion and removal.
 }
 
-pub enum Storage {
+pub(crate) enum Storage {
     SparseTag(TagSparseSet),
     SparseData(ComponentSparseSet),
     Tables(HashMap<TableId, TableRecord>),

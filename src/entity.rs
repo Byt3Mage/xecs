@@ -1,7 +1,10 @@
-use crate::{flags::EntityFlags, storage::sparse_set::SparseIndex, world::World};
-use std::fmt::Display;
+use crate::{storage::sparse_set::SparseIndex, utils::NoOpHash};
+use std::{collections::HashMap, fmt::Display};
 
 pub type EntityId = u32;
+
+/// Specialized hashmap with optimized no-op hashing for entities.
+pub(crate) type EntityMap<V> = HashMap<Entity, V, NoOpHash>;
 
 /// FFI compatible representation of an entity.
 #[repr(transparent)]
@@ -60,9 +63,4 @@ impl SparseIndex for Entity {
     fn to_sparse_index(&self) -> usize {
         self.0 as usize
     }
-}
-
-pub(crate) fn add_flag(world: &mut World, entity: Entity, flag: EntityFlags) {
-    let record = world.entity_index.get_record_mut(entity).unwrap();
-    record.flags |= flag;
 }

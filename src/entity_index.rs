@@ -1,9 +1,4 @@
-use crate::{
-    entity::Entity,
-    error::{EcsResult, EntityIndexError},
-    flags::EntityFlags,
-    storage::table_index::TableId,
-};
+use crate::{entity::Entity, error::EntityIndexError, flags::EntityFlags, table_index::TableId};
 use std::{alloc::Layout, usize};
 
 const PAGE_BITS: usize = 12;

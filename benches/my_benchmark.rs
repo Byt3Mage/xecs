@@ -1,10 +1,16 @@
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use xecs::entity::Entity;
+use xecs::types::TypeMap;
 
-fn bench_sparse_set(c: &mut Criterion) {
-    c.bench_function("fill_usize_max", |b| {
+fn bench_type_map(c: &mut Criterion) {
+    let mut map = TypeMap::new();
+    map.insert::<usize>(Entity::NULL);
+    map.insert::<String>(Entity::NULL);
+
+    c.bench_function("get_type_map", |b| {
         b.iter(|| {});
     });
 }
 
-criterion_group!(benches, bench_sparse_set);
+criterion_group!(benches, bench_type_map);
 criterion_main!(benches);

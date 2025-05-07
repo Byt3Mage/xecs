@@ -1,87 +1,119 @@
-use std::{collections::HashMap, ptr};
+use std::ptr;
 
-use super::{table_data::TableData, table_index::TableId};
+use super::table_data::TableData;
 use crate::{
-    component::ComponentValue, entity::Entity, flags::TableFlags, graph::GraphNode,
-    type_info::Type, world::World,
+    component::ComponentValue,
+    entity::{Entity, EntityMap},
+    flags::TableFlags,
+    graph::GraphNode,
+    table_index::TableId,
+    types::IdList,
+    world::World,
 };
 
 pub(crate) struct Table {
     /// Handle to self in [tableIndex](super::table_index::tableIndex).
     pub(crate) id: TableId,
-    /// Flags describing capabilites of this table
+    /// Flags describing the capabilites of this table
     pub(crate) flags: TableFlags,
-    /// Vector of component [Id]s
-    pub(crate) type_: Type,
+    /// Vector of component [Entity] ids
+    pub(crate) ids: IdList,
     /// Storage for entities and components.
     pub(crate) data: TableData,
-    /// Maps component ids to columns (fast path).
-    pub(crate) component_map_lo: [isize; Entity::HI_COMPONENT_ID.as_usize()],
-    /// Maps component ids to columns (slow path).
-    pub(crate) component_map_hi: HashMap<Entity, usize>,
+    /// Maps component ids to columns.
+    /// Uses specialized no-op hashing for faster operations.
+    pub(crate) component_map: EntityMap<usize>,
     /// Node representation for traversals.
     pub(crate) node: GraphNode,
 }
 
 impl Table {
-    /// Gets a reference to the data for a component of an entity in this table.
+    /// Gets a reference to the component of an entity.
     ///
     /// # Safety
-    /// - `row` must be a valid row in this table.
-    /// - the data in the column must have the correct type.
+    /// - `row` must be a valid in this table.
+    /// - The type `C` must match the type of the column.
     #[inline]
     pub(crate) unsafe fn get<C: ComponentValue>(&self, row: usize, id: Entity) -> Option<&C> {
-        debug_assert!(row < self.data.count(), "row out of bounds");
-        unsafe {
-            if id < Entity::HI_COMPONENT_ID {
-                let col = self.component_map_lo[id.as_usize()];
-
-                if col >= 0 {
-                    Some(self.data.get_unchecked(col as usize, row).deref())
-                } else {
-                    None
-                }
-            } else {
-                match self.component_map_hi.get(&id) {
-                    Some(&col) => Some(self.data.get_unchecked(col, row).deref()),
-                    None => None,
-                }
-            }
-        }
+        debug_assert!(row < self.data.len(), "row out of bounds");
+        // SAFETY:
+        // - Column index index is valid and immutable when we create the table.
+        // - Caller ensures row is valid,
+        //   which it must be if the entity we're getting for is valid.
+        self.component_map
+            .get(&id)
+            .map(|&c| unsafe { self.data.get_unchecked(c, row) })
     }
 
-    /// Gets a mutablereference to the data for a component of an entity in this table.
+    /// Gets a mutable reference to the component of an entity.
     ///
     /// # Safety
-    /// - `row` must be a valid row in this table.
-    /// - the data in the column must have the correct type.
+    /// - `row` must be a valid in this table.
+    /// - The type `C` must match the type of the column.
     #[inline]
     pub(crate) unsafe fn get_mut<C: ComponentValue>(
         &mut self,
         row: usize,
         id: Entity,
     ) -> Option<&mut C> {
-        debug_assert!(row < self.data.count(), "row out of bounds");
-        unsafe {
-            if id < Entity::HI_COMPONENT_ID {
-                let col = self.component_map_lo[id.as_usize()];
+        // SAFETY:
+        // - Column index index is valid and immutable when we create the table.
+        // - Caller ensures row is valid,
+        //   which it must be if the entity we're getting for is valid.
+        self.component_map
+            .get(&id)
+            .map(|&c| unsafe { self.data.get_unchecked_mut(c, row) })
+    }
 
-                if col >= 0 {
-                    Some(self.data.get_unchecked_mut(col as usize, row).deref_mut())
-                } else {
-                    None
-                }
-            } else {
-                match self.component_map_hi.get(&id) {
-                    Some(&col) => Some(self.data.get_unchecked_mut(col, row).deref_mut()),
-                    None => None,
-                }
-            }
-        }
+    /// Sets the value of an initialized component of an entity.
+    /// Essentially replaces the previously contained value.
+    ///
+    /// # Safety
+    /// - `row` must be a valid in this table.
+    /// - The type `C` must match the type of the column.
+    #[inline]
+    pub(crate) unsafe fn set<C: ComponentValue>(
+        &self,
+        row: usize,
+        id: Entity,
+        val: C,
+    ) -> Option<()> {
+        // SAFETY:
+        // - Column index index is valid and immutable when we create the table.
+        // - Caller ensures row is valid,
+        //   which it must be if the entity we're getting for is valid.
+        self.component_map
+            .get(&id)
+            .map(|&c| unsafe { self.data.set_unchecked(c, row, val) })
+    }
+
+    /// Sets the value of an uninitialized component of an entity.
+    /// Should only be used to write the value of an uninit row after moving tables.
+    ///
+    /// # Safety
+    /// - `row` must be a valid in this table.
+    /// - The type `C` must match the type of the column.
+    /// - The row must not have been initialized to avoid leaking memory.
+    #[inline]
+    pub(crate) unsafe fn set_uninit<C: ComponentValue>(
+        &self,
+        row: usize,
+        id: Entity,
+        val: C,
+    ) -> Option<()> {
+        // SAFETY:
+        // - Column index index is valid and immutable when we create the table.
+        // - Caller ensures row is valid,
+        //   which it must be if the entity we're getting for is valid.
+        // - Caller ensures that row is not initialized for column.
+        self.component_map
+            .get(&id)
+            .map(|&c| unsafe { self.data.set_unitialized(c, row, val) })
     }
 }
 
 /// Moves entity from src table to dst.
+/// Returns the row in dst table.
 ///
 /// # Safety
 /// - `src_row` must be a valid row in `src`.
@@ -95,66 +127,52 @@ pub(crate) unsafe fn move_entity(
 ) -> usize {
     let (src, dst) = world.table_index.get_2_mut(src, dst).unwrap();
 
-    debug_assert!(src_row < src.data.count(), "row out of bounds");
+    debug_assert!(src_row < src.data.len(), "row out of bounds");
 
+    // Append a new row to the destination table, but don't initialize columns.
     let dst_row = unsafe { dst.data.new_row_uninit(entity) };
+    let src_columns = &mut src.data.columns;
+    let dst_columns = &mut dst.data.columns;
+    let mut drop_check = vec![true; src_columns.len()];
 
-    let mut i_src = 0;
-    let mut i_dst = 0;
-    let src_col_count = src.data.columns.len();
-    let dst_col_count = dst.data.columns.len();
-    let mut should_drop = vec![true; src_col_count];
+    for (i_src, src_col) in src_columns.iter_mut().enumerate() {
+        if let Some(&i_dst) = dst.component_map.get(&src_col.id()) {
+            let dst_col = &mut dst_columns[i_dst];
+            let ti = &dst_col.type_info;
 
-    // Transfer matching columns.
-    while (i_src < src_col_count) && (i_dst < dst_col_count) {
-        let src_col = &mut src.data.columns[i_src];
-        let dst_col = &mut dst.data.columns[i_dst];
+            debug_assert_eq!(ti.type_id, src_col.type_info.type_id, "type mismatch");
 
-        let src_id = src_col.id();
-        let dst_id = dst_col.id();
-
-        if dst_id == src_id {
-            debug_assert!(
-                ptr::eq(dst_col.type_info, src_col.type_info),
-                "INTERNAL ERROR: Type mismatch"
-            );
-
-            let size = dst_col.type_info.size();
+            let size = ti.size();
 
             // SAFETY:
-            // - src_row and dst_row are valid indices.
-            // - src_elem and dst_elem are valid pointers to the same type.
+            // - We guarantee that src_row and dst_row are valid.
+            // - We ensure that src_col and dst_col contain the same type.
+            // - Non-overlapping memory since both columns are different.
             unsafe {
-                let src_elem = src_col.data.as_ptr().add(src_row * size);
-                let dst_elem = dst_col.data.as_ptr().add(dst_row * size);
-                // move data from src_elem to dst_elem
-                ptr::copy_nonoverlapping(src_elem, dst_elem, size);
+                let src_data = src_col.data.as_ptr().add(src_row * size);
+                let dst_data = dst_col.data.as_ptr().add(dst_row * size);
+                ptr::copy_nonoverlapping(src_data, dst_data, size);
             }
-            // Don't call drop on this column since we have moved the value.
-            should_drop[i_src] = false;
-        } else if dst_id < src_id {
-            //invoke_add_hooks(world, dst, dst_col, &dst_entity, dst_row);
+
+            // Don't drop the data when deleting the row, since it's moved.
+            drop_check[i_src] = false;
+        } else {
+            // Component not in destination table.
+            // TODO:
+            // Emit remove hooks
         }
-
-        i_dst += (dst_id <= src_id) as usize;
-        i_src += (dst_id >= src_id) as usize;
     }
 
-    while i_dst < dst_col_count {
-        // invoke_add_hooks
-        i_dst += 1;
+    // update the record of the entity swapped into src_row.
+    if let Some(e) = unsafe { src.data.delete_row(src_row, &drop_check) } {
+        // unwrap should never fail, we don't keep invalid entities in tables.
+        let r = world.entity_index.get_record_mut(e).unwrap();
+        r.table = src.id; // set table just to be pendatic, not really necessary.
+        r.row = src_row;
     }
 
-    while i_src < src_col_count {
-        // invoke_remove_hook
-        i_src += 1;
-    }
-
-    let entity_index = &mut world.entity_index;
-
-    src.data.delete_row(entity_index, src_row, should_drop);
-
-    let r = entity_index.get_record_mut(entity).unwrap();
+    // update record of moved entity.
+    let r = world.entity_index.get_record_mut(entity).unwrap();
     r.table = dst.id;
     r.row = dst_row;
 
@@ -165,11 +183,11 @@ pub(crate) fn move_entity_to_root(world: &mut World, entity: Entity) {
     let r = world.entity_index.get_record_mut(entity).unwrap();
 
     if r.table.is_null() {
-        r.table = world.root_table;
         let root = &mut world.table_index[world.root_table];
         // SAFETY:
-        // * root_table should never contain columns,
-        // so only the entities array is initialized.
+        // - root_table should never contain columns,
+        //   so only the entities array is initialized.
+        r.table = root.id;
         r.row = unsafe { root.data.new_row_uninit(entity) };
     } else if r.table != world.root_table {
         let src = r.table;

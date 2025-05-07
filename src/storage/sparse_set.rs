@@ -244,7 +244,7 @@ impl<K: SparseIndex, V> SparseSet<K, V> {
 
     /// Removes an entity from the set.
     /// Returns the value associated with the entity if it was present.
-    pub(crate) fn remove(&mut self, key: &K) -> Option<Entry<K, V>> {
+    pub fn remove(&mut self, key: &K) -> Option<Entry<K, V>> {
         let sparse = key.to_sparse_index();
         let dense = *(self.sparse.get(sparse)?);
 

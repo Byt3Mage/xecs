@@ -2,6 +2,7 @@ use std::alloc::Layout;
 
 /// Computes the layout of a `repr(C)` struct.
 /// Returns (total_size, struct_alignment, field_offsets).
+#[allow(unused)]
 fn compute_c_layout(fields: &[Layout]) -> (usize, usize, Vec<usize>) {
     let mut max_align = 1;
     let mut current_offset = 0;

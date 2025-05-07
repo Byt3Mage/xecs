@@ -24,7 +24,7 @@ impl<'a> EntityView<'a> {
     }
 
     #[inline]
-    pub fn has(&self, id: Entity) -> EcsResult<bool> {
+    pub fn has(&self, id: impl Into<Entity>) -> EcsResult<bool> {
         self.world.has(self.entity, id)
     }
 
@@ -34,7 +34,7 @@ impl<'a> EntityView<'a> {
     }
 
     #[inline]
-    pub fn add(mut self, tag: Tag) -> EcsResult<Self> {
+    pub fn add(mut self, tag: impl Into<Tag>) -> EcsResult<Self> {
         self.world.add(self.entity, tag)?;
         Ok(self)
     }
@@ -52,23 +52,30 @@ impl<'a> EntityView<'a> {
     }
 
     #[inline]
-    pub fn set<C: ComponentValue>(mut self, component: Component<C>, value: C) -> EcsResult<Self> {
+    pub fn set<C: ComponentValue>(
+        mut self,
+        component: impl Into<Component<C>>,
+        value: C,
+    ) -> EcsResult<Self> {
         self.world.set(self.entity, component, value)?;
         Ok(self)
     }
 
     #[inline]
-    pub fn get<C: ComponentValue>(&mut self, component: Component<C>) -> EcsResult<&C> {
+    pub fn get<C: ComponentValue>(&self, component: impl Into<Component<C>>) -> EcsResult<&C> {
         self.world.get(self.entity, component)
     }
 
     #[inline]
-    pub fn get_t<C: ComponentValue>(&mut self) -> EcsResult<&C> {
+    pub fn get_t<C: ComponentValue>(&self) -> EcsResult<&C> {
         self.world.get_t(self.entity)
     }
 
     #[inline]
-    pub fn get_mut<C: ComponentValue>(&mut self, component: Component<C>) -> EcsResult<&mut C> {
+    pub fn get_mut<C: ComponentValue>(
+        &mut self,
+        component: impl Into<Component<C>>,
+    ) -> EcsResult<&mut C> {
         self.world.get_mut(self.entity, component)
     }
 

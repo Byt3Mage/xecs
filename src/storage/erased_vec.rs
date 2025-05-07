@@ -1,22 +1,24 @@
-use crate::type_info::TypeInfo;
 use std::{
     alloc::{self, Layout},
     ptr::{self, NonNull},
+    rc::Rc,
 };
+
+use crate::{component::ComponentValue, types::type_info::TypeInfo};
 
 /// Type-erased vector.
 pub(crate) struct ErasedVec {
     data: NonNull<u8>,
     len: usize,
     cap: usize,
-    type_info: &'static TypeInfo,
+    type_info: Rc<TypeInfo>,
 }
 
 impl ErasedVec {
-    pub(crate) fn new(type_info: &'static TypeInfo) -> Self {
+    pub(crate) fn new(type_info: Rc<TypeInfo>) -> Self {
         assert!(type_info.size() != 0, "can't create erased vec for ZSTs");
         Self {
-            data: NonNull::dangling(),
+            data: (type_info.dangling)(),
             len: 0,
             cap: 0,
             type_info,
@@ -56,11 +58,8 @@ impl ErasedVec {
     }
 
     /// Push an element into the vector
-    ///
-    /// # Panics
-    /// Panics if `elem` is not the correct type.
     pub(crate) fn push<T: 'static>(&mut self, elem: T) {
-        assert!(self.type_info.is::<T>(), "type mismatch");
+        debug_assert!(self.type_info.is::<T>(), "ErasedVec: type mismatch");
 
         if self.len == self.cap {
             self.grow();
@@ -73,26 +72,12 @@ impl ErasedVec {
         self.len += 1;
     }
 
-    pub(crate) fn pop<T: 'static>(&mut self) -> Option<T> {
-        assert!(self.type_info.is::<T>(), "type mismatch");
-
-        if self.len == 0 {
-            None
-        } else {
-            self.len -= 1;
-            let size = self.type_info.size();
-            unsafe { Some(self.data.add(size * self.len).cast().read()) }
-        }
-    }
-
     /// Returns a reference to the element at the given index
     /// without bounds or type checking.
     ///
     /// # Safety
     /// Caller must ensure that the index is within bounds and the type is correct.
-    pub(crate) unsafe fn set_unchecked<T: 'static>(&self, index: usize, elem: T) {
-        debug_assert!(self.type_info.is::<T>(), "type mismatch");
-        debug_assert!(self.len > index, "index out of bounds");
+    pub(crate) unsafe fn set_unchecked<C: ComponentValue>(&self, index: usize, elem: C) {
         unsafe {
             let ptr = self.data.add(self.type_info.size() * index).cast();
             let _ = ptr.replace(elem);
@@ -105,9 +90,9 @@ impl ErasedVec {
     /// # Panics
     /// Panics if the index is out of bounds or the type is incorrect.
     #[inline]
-    pub(crate) fn set<T: 'static>(&self, index: usize, elem: T) {
-        assert!(self.type_info.is::<T>(), "type mismatch");
-        assert!(self.len > index, "index out of bounds");
+    pub(crate) fn set<C: ComponentValue>(&self, index: usize, elem: C) {
+        debug_assert!(self.type_info.is::<C>(), "ErasedVec: type mismatch");
+        assert!(self.len > index, "ErasedVec: index out of bounds");
         unsafe { self.set_unchecked(index, elem) }
     }
 
@@ -117,17 +102,17 @@ impl ErasedVec {
     /// # Safety
     /// Caller must ensure that the index is within bounds and the type is correct.
     #[inline]
-    pub(crate) unsafe fn get_unchecked<T: 'static>(&self, index: usize) -> &T {
-        debug_assert!(self.type_info.is::<T>(), "type mismatch");
-        debug_assert!(self.len > index, "index out of bounds");
+    pub(crate) unsafe fn get_unchecked<C: ComponentValue>(&self, index: usize) -> &C {
         unsafe { self.data.add(self.type_info.size() * index).cast().as_ref() }
     }
 
     /// Returns a reference to the element at the given index.
-    /// Returns `None` if the index is out of bounds or the type is incorrect.
+    /// Returns `None` if the index is out of bounds.
     #[inline]
-    pub(crate) fn get<T: 'static>(&self, index: usize) -> Option<&T> {
-        if self.type_info.is::<T>() && index < self.len {
+    pub(crate) fn get<C: ComponentValue>(&self, index: usize) -> Option<&C> {
+        debug_assert!(self.type_info.is::<C>(), "ErasedVec: type mismatch");
+
+        if index < self.len {
             Some(unsafe { self.get_unchecked(index) })
         } else {
             None
@@ -140,17 +125,17 @@ impl ErasedVec {
     /// # Safety
     /// Caller must ensure that the index is within bounds and the type is correct.
     #[inline]
-    pub(crate) unsafe fn get_unchecked_mut<T: 'static>(&mut self, index: usize) -> &mut T {
-        debug_assert!(self.type_info.is::<T>(), "type mismatch");
-        debug_assert!(self.len > index, "index out of bounds");
+    pub(crate) unsafe fn get_unchecked_mut<C: ComponentValue>(&mut self, index: usize) -> &mut C {
         unsafe { self.data.add(self.type_info.size() * index).cast().as_mut() }
     }
 
     /// Returns a mutable reference to the element at the given index.
-    /// Returns `None` if the index is out of bounds or the type is incorrect.
+    /// Returns `None` if the index is out of bounds.
     #[inline]
-    pub(crate) fn get_mut<T: 'static>(&mut self, index: usize) -> Option<&mut T> {
-        if self.type_info.is::<T>() && index < self.len {
+    pub(crate) fn get_mut<C: ComponentValue>(&mut self, index: usize) -> Option<&mut C> {
+        debug_assert!(self.type_info.is::<C>(), "ErasedVec: type mismatch");
+
+        if index < self.len {
             Some(unsafe { self.get_unchecked_mut(index) })
         } else {
             None
@@ -162,9 +147,9 @@ impl ErasedVec {
     /// This does not preserve ordering of the remaining elements, but is O(1).
     ///
     /// # Panics
-    /// Panics if the index is out of bounds or the type is incorrect.
-    pub(crate) fn swap_remove<T: 'static>(&mut self, index: usize) -> T {
-        assert!(self.type_info.is::<T>(), "type mismatch");
+    /// Panics if the index is out of bounds.
+    pub(crate) fn swap_remove<C: ComponentValue>(&mut self, index: usize) -> C {
+        debug_assert!(self.type_info.is::<C>(), "ErasedVec: type mismatch");
 
         let len = self.len();
 
@@ -196,13 +181,13 @@ impl Drop for ErasedVec {
     fn drop(&mut self) {
         if self.cap != 0 {
             let (size, align) = self.type_info.size_align();
-            let drop_fn = self.type_info.drop_fn;
-            let mut ptr = self.data.as_ptr();
-
             unsafe {
-                for _ in 0..self.len {
-                    drop_fn(ptr.add(size));
-                    ptr = ptr.add(size);
+                if let Some(drop_fn) = self.type_info.drop_fn {
+                    let mut ptr = self.data;
+                    for _ in 0..self.len {
+                        (drop_fn)(ptr.add(size));
+                        ptr = ptr.add(size);
+                    }
                 }
 
                 let layout = Layout::from_size_align(size * self.cap, align).unwrap();

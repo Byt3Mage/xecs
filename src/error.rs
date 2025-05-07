@@ -48,3 +48,8 @@ impl From<EntityIndexError> for EcsError {
         EcsError::EntityIndex(err)
     }
 }
+
+#[inline(always)]
+pub fn unregistered_type_err<T, U>() -> EcsResult<U> {
+    Err(EcsError::UnregisteredType(std::any::type_name::<T>()))
+}

@@ -1,7 +1,6 @@
-use super::sparse_set::SparseIndex;
-use crate::{
-    component::ComponentValue, data_structures::ErasedVec, entity::Entity, type_info::TypeInfo,
-};
+use super::{erased_vec::ErasedVec, sparse_set::SparseIndex};
+use crate::{component::ComponentValue, entity::Entity, types::type_info::TypeInfo};
+use std::rc::Rc;
 
 /// Type-erased sparse set for storing component data.
 pub(crate) struct ComponentSparseSet {
@@ -11,7 +10,7 @@ pub(crate) struct ComponentSparseSet {
 }
 
 impl ComponentSparseSet {
-    pub fn new(type_info: &'static TypeInfo) -> Self {
+    pub(crate) fn new(type_info: Rc<TypeInfo>) -> Self {
         Self {
             data: ErasedVec::new(type_info),
             dense: vec![],
@@ -19,8 +18,6 @@ impl ComponentSparseSet {
         }
     }
 
-    /// Resizes the sparse array such that
-    /// it can hold at least (`index` + 1) entries.
     #[inline(always)]
     fn ensure_index(&mut self, index: usize) -> usize {
         if index >= self.sparse.len() {
@@ -32,12 +29,11 @@ impl ComponentSparseSet {
 
     /// Inserts a value into the set for the given entity.
     /// Replaces the data if the entity is already in the set.
-    pub fn insert<C: ComponentValue>(&mut self, entity: Entity, value: C) {
+    pub(crate) fn insert<C: ComponentValue>(&mut self, entity: Entity, value: C) {
         let sparse = entity.to_sparse_index();
         let dense = self.ensure_index(sparse);
 
-        if dense != usize::MAX {
-            debug_assert!(dense < self.data.len(), "dense index is out of bounds");
+        if dense < self.data.len() {
             self.dense[dense] = entity;
             self.data.set(dense, value);
         } else {
@@ -69,7 +65,7 @@ impl ComponentSparseSet {
     }
 
     #[inline]
-    pub fn has(&self, entity: Entity) -> bool {
+    pub(crate) fn has(&self, entity: Entity) -> bool {
         match self.sparse.get(entity.to_sparse_index()) {
             Some(&dense) => dense < self.data.len(),
             None => false,
@@ -77,7 +73,7 @@ impl ComponentSparseSet {
     }
 
     #[inline]
-    pub fn get<C: ComponentValue>(&self, entity: Entity) -> Option<&C> {
+    pub(crate) fn get<C: ComponentValue>(&self, entity: Entity) -> Option<&C> {
         match self.sparse.get(entity.to_sparse_index()) {
             Some(dense) => self.data.get(*dense),
             _ => None,
@@ -85,7 +81,7 @@ impl ComponentSparseSet {
     }
 
     #[inline]
-    pub fn get_mut<C: ComponentValue>(&mut self, entity: Entity) -> Option<&mut C> {
+    pub(crate) fn get_mut<C: ComponentValue>(&mut self, entity: Entity) -> Option<&mut C> {
         match self.sparse.get(entity.to_sparse_index()) {
             Some(&dense) => self.data.get_mut(dense),
             _ => None,
@@ -99,7 +95,7 @@ pub(crate) struct TagSparseSet {
 }
 
 impl TagSparseSet {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             dense: vec![],
             sparse: vec![],
@@ -119,7 +115,7 @@ impl TagSparseSet {
 
     /// Inserts the entity into the sparse set,
     /// effectively adding the tag to the entity.
-    pub fn insert(&mut self, entity: Entity) {
+    pub(crate) fn insert(&mut self, entity: Entity) {
         let sparse = entity.to_sparse_index();
         let dense = self.ensure_index(sparse);
 
@@ -150,7 +146,7 @@ impl TagSparseSet {
     }
 
     #[inline]
-    pub fn has(&self, entity: Entity) -> bool {
+    pub(crate) fn has(&self, entity: Entity) -> bool {
         match self.sparse.get(entity.to_sparse_index()) {
             Some(&dense) => dense < self.dense.len(),
             None => false,

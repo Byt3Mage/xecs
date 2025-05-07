@@ -1,4 +1,4 @@
-use crate::{storage::table::Table, type_info::Type};
+use crate::{storage::table::Table, types::IdList};
 use std::{
     collections::HashMap,
     fmt::Display,
@@ -26,7 +26,7 @@ impl TableId {
 
 pub(crate) struct TableIndex {
     tables: Vec<Table>,
-    table_ids: HashMap<Type, TableId>,
+    table_ids: HashMap<IdList, TableId>,
 }
 
 impl TableIndex {
@@ -43,7 +43,7 @@ impl TableIndex {
     {
         let id = TableId(self.tables.len());
         let table = f(id);
-        self.table_ids.insert(table.type_.clone(), id);
+        self.table_ids.insert(table.ids.clone(), id);
         self.tables.push(table);
         id
     }
@@ -59,8 +59,8 @@ impl TableIndex {
     }
 
     #[inline]
-    pub(crate) fn get_id(&self, type_: &Type) -> Option<TableId> {
-        self.table_ids.get(type_).copied()
+    pub(crate) fn get_id(&self, ids: &IdList) -> Option<TableId> {
+        self.table_ids.get(ids).copied()
     }
 
     #[inline]
@@ -73,6 +73,10 @@ impl TableIndex {
             let ptr = self.tables.as_mut_ptr();
             Some(unsafe { (&mut *(ptr.add(a.0)), &mut *(ptr.add(b.0))) })
         }
+    }
+
+    pub(crate) fn to_slice(&self) -> &[Table] {
+        &self.tables
     }
 }
 
