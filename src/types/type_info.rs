@@ -1,4 +1,4 @@
-use crate::{component::ComponentValue, entity::Entity, pointer::ConstNonNull};
+use crate::{component::Component, entity::Entity, pointer::ConstNonNull};
 use const_assert::const_assert;
 use std::{
     alloc::Layout,
@@ -21,7 +21,7 @@ pub struct TypeHooksBuilder<C> {
     phantom: PhantomData<fn(&mut C)>,
 }
 
-impl<C: ComponentValue> TypeHooksBuilder<C> {
+impl<C: Component> TypeHooksBuilder<C> {
     pub const fn new() -> Self {
         const_assert!(|C| size_of::<C>() != 0, "can't create type hooks for ZST");
         Self {
@@ -109,7 +109,7 @@ pub struct TypeInfo {
 }
 
 impl TypeInfo {
-    pub(crate) fn new<C: ComponentValue>(hooks: TypeHooksBuilder<C>) -> Self {
+    pub(crate) fn new<C: Component>(hooks: TypeHooksBuilder<C>) -> Self {
         fn drop_impl<T>(ptr: NonNull<u8>) {
             let ptr = ptr.as_ptr().cast::<T>();
             unsafe { ptr::drop_in_place(ptr) };
@@ -132,7 +132,7 @@ impl TypeInfo {
     }
 
     #[inline]
-    pub fn is<C: ComponentValue>(&self) -> bool {
+    pub fn is<C: Component>(&self) -> bool {
         self.type_id == TypeId::of::<C>()
     }
 

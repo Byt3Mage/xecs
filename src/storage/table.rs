@@ -2,10 +2,12 @@ use std::ptr;
 
 use super::table_data::TableData;
 use crate::{
-    component::ComponentValue,
+    component::Component,
     entity::{Entity, EntityMap},
+    error::{EcsError, EcsResult},
     flags::TableFlags,
     graph::GraphNode,
+    pointer::{Ptr, PtrMut},
     table_index::TableId,
     types::IdList,
     world::World,
@@ -32,37 +34,38 @@ impl Table {
     ///
     /// # Safety
     /// - `row` must be a valid in this table.
-    /// - The type `C` must match the type of the column.
     #[inline]
-    pub(crate) unsafe fn get<C: ComponentValue>(&self, row: usize, id: Entity) -> Option<&C> {
+    pub(crate) unsafe fn get(&self, entity: Entity, row: usize, id: Entity) -> EcsResult<Ptr> {
         debug_assert!(row < self.data.len(), "row out of bounds");
         // SAFETY:
         // - Column index index is valid and immutable when we create the table.
         // - Caller ensures row is valid,
         //   which it must be if the entity we're getting for is valid.
-        self.component_map
-            .get(&id)
-            .map(|&c| unsafe { self.data.get_unchecked(c, row) })
+        match self.component_map.get(&id) {
+            Some(&col) => Ok(unsafe { self.data.get_unchecked(col, row) }),
+            None => Err(EcsError::MissingComponent { entity, id }),
+        }
     }
 
     /// Gets a mutable reference to the component of an entity.
     ///
     /// # Safety
     /// - `row` must be a valid in this table.
-    /// - The type `C` must match the type of the column.
     #[inline]
-    pub(crate) unsafe fn get_mut<C: ComponentValue>(
+    pub(crate) unsafe fn get_mut(
         &mut self,
+        entity: Entity,
         row: usize,
         id: Entity,
-    ) -> Option<&mut C> {
+    ) -> EcsResult<PtrMut> {
         // SAFETY:
         // - Column index index is valid and immutable when we create the table.
         // - Caller ensures row is valid,
         //   which it must be if the entity we're getting for is valid.
-        self.component_map
-            .get(&id)
-            .map(|&c| unsafe { self.data.get_unchecked_mut(c, row) })
+        match self.component_map.get(&id) {
+            Some(&col) => Ok(unsafe { self.data.get_unchecked_mut(col, row) }),
+            None => Err(EcsError::MissingComponent { entity, id }),
+        }
     }
 
     /// Sets the value of an initialized component of an entity.
@@ -72,12 +75,7 @@ impl Table {
     /// - `row` must be a valid in this table.
     /// - The type `C` must match the type of the column.
     #[inline]
-    pub(crate) unsafe fn set<C: ComponentValue>(
-        &self,
-        row: usize,
-        id: Entity,
-        val: C,
-    ) -> Option<()> {
+    pub(crate) unsafe fn set<C: Component>(&self, row: usize, id: Entity, val: C) -> Option<()> {
         // SAFETY:
         // - Column index index is valid and immutable when we create the table.
         // - Caller ensures row is valid,
@@ -95,7 +93,7 @@ impl Table {
     /// - The type `C` must match the type of the column.
     /// - The row must not have been initialized to avoid leaking memory.
     #[inline]
-    pub(crate) unsafe fn set_uninit<C: ComponentValue>(
+    pub(crate) unsafe fn set_uninit<C: Component>(
         &self,
         row: usize,
         id: Entity,

@@ -25,7 +25,7 @@ impl Hasher for NoOpHasher {
             hash.rotate_left(8).wrapping_add(*b as u64)
         });
 
-        panic!("TypeIdHasher only supports hashing with write_u64");
+        panic!("NoOpHasher only supports hashing with write_u64");
     }
 
     #[inline]

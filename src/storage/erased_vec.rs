@@ -4,7 +4,11 @@ use std::{
     rc::Rc,
 };
 
-use crate::{component::ComponentValue, types::type_info::TypeInfo};
+use crate::{
+    component::Component,
+    pointer::{Ptr, PtrMut},
+    types::type_info::TypeInfo,
+};
 
 /// Type-erased vector.
 pub(crate) struct ErasedVec {
@@ -77,7 +81,7 @@ impl ErasedVec {
     ///
     /// # Safety
     /// Caller must ensure that the index is within bounds and the type is correct.
-    pub(crate) unsafe fn set_unchecked<C: ComponentValue>(&self, index: usize, elem: C) {
+    pub(crate) unsafe fn set_unchecked<C: Component>(&self, index: usize, elem: C) {
         unsafe {
             let ptr = self.data.add(self.type_info.size() * index).cast();
             let _ = ptr.replace(elem);
@@ -85,12 +89,12 @@ impl ErasedVec {
     }
 
     /// Returns a reference to the element at the given index
-    /// without bounds or type checking.
+    /// without bounds checking.
     ///
     /// # Panics
     /// Panics if the index is out of bounds or the type is incorrect.
     #[inline]
-    pub(crate) fn set<C: ComponentValue>(&self, index: usize, elem: C) {
+    pub(crate) fn set<C: Component>(&self, index: usize, elem: C) {
         debug_assert!(self.type_info.is::<C>(), "ErasedVec: type mismatch");
         assert!(self.len > index, "ErasedVec: index out of bounds");
         unsafe { self.set_unchecked(index, elem) }
@@ -100,45 +104,25 @@ impl ErasedVec {
     /// without bounds or type checking.
     ///
     /// # Safety
-    /// Caller must ensure that the index is within bounds and the type is correct.
+    /// Caller must ensure that the index is within bounds.
     #[inline]
-    pub(crate) unsafe fn get_unchecked<C: ComponentValue>(&self, index: usize) -> &C {
-        unsafe { self.data.add(self.type_info.size() * index).cast().as_ref() }
-    }
-
-    /// Returns a reference to the element at the given index.
-    /// Returns `None` if the index is out of bounds.
-    #[inline]
-    pub(crate) fn get<C: ComponentValue>(&self, index: usize) -> Option<&C> {
-        debug_assert!(self.type_info.is::<C>(), "ErasedVec: type mismatch");
-
-        if index < self.len {
-            Some(unsafe { self.get_unchecked(index) })
-        } else {
-            None
+    pub(crate) unsafe fn get_unchecked(&self, index: usize) -> Ptr {
+        unsafe {
+            let ptr = self.data.add(self.type_info.size() * index);
+            Ptr::new(ptr, &self.type_info)
         }
     }
 
     /// Returns a mutable reference to the element at the given index
-    /// without bounds or type checking.
+    /// without bounds checking.
     ///
     /// # Safety
     /// Caller must ensure that the index is within bounds and the type is correct.
     #[inline]
-    pub(crate) unsafe fn get_unchecked_mut<C: ComponentValue>(&mut self, index: usize) -> &mut C {
-        unsafe { self.data.add(self.type_info.size() * index).cast().as_mut() }
-    }
-
-    /// Returns a mutable reference to the element at the given index.
-    /// Returns `None` if the index is out of bounds.
-    #[inline]
-    pub(crate) fn get_mut<C: ComponentValue>(&mut self, index: usize) -> Option<&mut C> {
-        debug_assert!(self.type_info.is::<C>(), "ErasedVec: type mismatch");
-
-        if index < self.len {
-            Some(unsafe { self.get_unchecked_mut(index) })
-        } else {
-            None
+    pub(crate) unsafe fn get_unchecked_mut(&mut self, index: usize) -> PtrMut {
+        unsafe {
+            let ptr = self.data.add(self.type_info.size() * index);
+            PtrMut::new(ptr, &self.type_info)
         }
     }
 
@@ -148,7 +132,7 @@ impl ErasedVec {
     ///
     /// # Panics
     /// Panics if the index is out of bounds.
-    pub(crate) fn swap_remove<C: ComponentValue>(&mut self, index: usize) -> C {
+    pub(crate) fn swap_remove<C: Component>(&mut self, index: usize) -> C {
         debug_assert!(self.type_info.is::<C>(), "ErasedVec: type mismatch");
 
         let len = self.len();

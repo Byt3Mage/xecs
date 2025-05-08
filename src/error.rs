@@ -2,25 +2,24 @@ use crate::entity::Entity;
 use std::fmt::Debug;
 use thiserror::Error;
 
+type Msg = &'static str;
+
 #[derive(Error, Debug)]
 pub enum EcsError {
     #[error("{0}")]
-    EntityIndex(EntityIndexError),
+    EntityIndex(#[from] EntityIndexError),
     #[error("Component {0} has no associated data (it's a tag)")]
-    ComponentHasNoData(Entity),
+    IsTag(Entity),
     #[error("Component {0} has associated data, can't be used as a tag")]
-    ComponentHasData(Entity),
-    #[error("Entity {0} is missing component {1}")]
-    MissingComponent(Entity, Entity),
+    IsNotTag(Entity),
+    #[error("Entity {entity} is missing component {id}")]
+    MissingComponent { entity: Entity, id: Entity },
     #[error("Type {0} is not registered for this world, must register before use")]
-    UnregisteredType(&'static str),
+    UnregisteredType(Msg),
     #[error("Entity {0} is not registered as a component")]
     UnregisteredComponent(Entity),
-    #[error("TypeMismatch: expected {expected}, got {got}")]
-    TypeMismatch {
-        expected: &'static str,
-        got: &'static str,
-    },
+    #[error("TypeMismatch: expected {exp}, got {got}")]
+    TypeMismatch { exp: Msg, got: Msg },
     #[error("User error: {0}")]
     Other(Box<dyn std::error::Error + Send + Sync + 'static>),
 }
@@ -43,13 +42,7 @@ pub enum EntityIndexError {
     NotValid(Entity),
 }
 
-impl From<EntityIndexError> for EcsError {
-    fn from(err: EntityIndexError) -> Self {
-        EcsError::EntityIndex(err)
-    }
-}
-
 #[inline(always)]
-pub fn unregistered_type_err<T, U>() -> EcsResult<U> {
-    Err(EcsError::UnregisteredType(std::any::type_name::<T>()))
+pub fn unregistered_type<T>() -> EcsError {
+    EcsError::UnregisteredType(std::any::type_name::<T>())
 }

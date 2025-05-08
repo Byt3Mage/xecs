@@ -1,4 +1,69 @@
-use std::ptr::NonNull;
+use crate::{component::Component, types::type_info::TypeInfo};
+use std::{any::TypeId, marker::PhantomData, ptr::NonNull};
+
+pub struct Ptr<'a> {
+    pub(crate) ptr: NonNull<u8>,
+    pub(crate) type_id: TypeId,
+    pub(crate) type_name: &'static str,
+    _marker: PhantomData<&'a u8>,
+}
+
+impl<'a> Ptr<'a> {
+    /// # Safety
+    /// Callers must ensure that the type info matches the pointer
+    pub(crate) unsafe fn new(ptr: NonNull<u8>, type_info: &TypeInfo) -> Self {
+        Self {
+            ptr,
+            type_id: type_info.type_id,
+            type_name: type_info.type_name,
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn as_ref<C: Component>(self) -> Result<&'a C, Self> {
+        if self.type_id == TypeId::of::<C>() {
+            // SAFETY:
+            // - ptr is NonNull
+            // - we just checked that the type matches.
+            Ok(unsafe { self.ptr.cast().as_ref() })
+        } else {
+            Err(self)
+        }
+    }
+}
+
+pub struct PtrMut<'a> {
+    pub(crate) ptr: NonNull<u8>,
+    pub(crate) type_id: TypeId,
+    pub(crate) type_name: &'static str,
+    _marker: PhantomData<&'a mut u8>,
+}
+
+impl<'a> PtrMut<'a> {
+    /// # Safety
+    /// Callers must ensure that the type info matches the pointer
+    pub(crate) unsafe fn new(ptr: NonNull<u8>, type_info: &TypeInfo) -> Self {
+        Self {
+            ptr,
+            type_id: type_info.type_id,
+            type_name: type_info.type_name,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Converts this pointer to a reference of the same type C
+    /// Returns `Err(Self)` if there is a type mismatch.
+    pub fn as_mut<C: Component>(self) -> Result<&'a mut C, Self> {
+        if self.type_id == TypeId::of::<C>() {
+            // SAFETY:
+            // - ptr is NonNull
+            // - we just checked that the type matches.
+            Ok(unsafe { self.ptr.cast().as_mut() })
+        } else {
+            Err(self)
+        }
+    }
+}
 
 /// A newtype around [`NonNull`] that only allows conversion to read-only borrows or pointers.
 ///

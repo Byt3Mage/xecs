@@ -1,11 +1,8 @@
 use crate::{
-    component::{
-        self, Component, ComponentDesc, ComponentRecord, ComponentValue, Tag, TypedEntity,
-        UntypedComponentDesc,
-    },
+    component::{Component, ComponentDesc, ComponentRecord, UntypedComponentDesc},
     entity::{Entity, EntityMap},
     entity_index::EntityIndex,
-    error::{EcsError, EcsResult, unregistered_type_err},
+    error::{EcsError, EcsResult, unregistered_type},
     flags::TableFlags,
     graph::GraphNode,
     storage::{
@@ -21,11 +18,7 @@ use crate::{
     },
 };
 use const_assert::const_assert;
-use std::{
-    marker::PhantomData,
-    ops::{Deref, DerefMut},
-    ptr::slice_from_raw_parts,
-};
+use std::ops::{Deref, DerefMut};
 
 pub struct World {
     pub(crate) entity_index: EntityIndex,
@@ -59,98 +52,95 @@ impl World {
     /// Gets the entity id for the type.
     /// Returns `None` if type is not registered with this world.
     #[inline(always)]
-    pub fn id_t<C: ComponentValue>(&self) -> Option<TypedEntity<C>> {
-        TypedEntity::new(self)
+    pub fn id_t<C: Component>(&self) -> Option<Entity> {
+        self.type_map.get::<C>().copied()
     }
 
-    /// Registers the type with the world or returns its id if already registered.
-    #[inline(always)]
-    pub fn component_t<C: ComponentValue>(
-        &mut self,
-        f: impl FnOnce() -> ComponentDesc<C>,
-    ) -> TypedEntity<C> {
+    /// Registers the type with the world if it isn't and returns its id.
+    ///
+    /// This function eagerly evaluates `desc` (see [World::register_with]
+    /// for lazily evaluated descriptor).
+    pub fn register<C: Component>(&mut self, desc: ComponentDesc<C>) -> Entity {
         let id = match self.type_map.get::<C>() {
             Some(&id) => {
                 if self.components.contains(&id) {
                     // early out if component is registered
-                    return TypedEntity {
-                        id,
-                        _marker: PhantomData,
-                    };
+                    return id;
                 }
+
                 id
             }
             // Register type if not registered.
             None => register_type::<C>(self),
         };
-
-        self.components.insert(id, f().build(id));
-
-        TypedEntity {
-            id,
-            _marker: PhantomData,
-        }
+        self.components.insert(id, desc.build(id));
+        id
     }
 
-    /// Gets or creates a component from this id.
-    /// Returns `None` if a component already exists for this id
-    /// and the type is mismatched
+    /// Registers the type with the world or returns its id if already registered.
+    ///
+    /// Lazily evaluates the descriptor and only calls it if the type is not registered.
+    pub fn register_with<C: Component>(&mut self, f: impl Fn() -> ComponentDesc<C>) -> Entity {
+        let id = match self.type_map.get::<C>() {
+            Some(&id) => {
+                if self.components.contains(&id) {
+                    // early out if component is registered
+                    return id;
+                }
+
+                id
+            }
+            // Register type if not registered.
+            None => register_type::<C>(self),
+        };
+        self.components.insert(id, f().build(id));
+        id
+    }
+
+    /// Creates a component from this `id` if one doesn't exist.
+    /// Returns `false` if the component already exists.
     #[inline(always)]
-    pub fn to_component_t<C: ComponentValue>(
-        &mut self,
-        id: Entity,
-        f: impl FnOnce() -> ComponentDesc<C>,
-    ) -> Option<Component<C>> {
-        const_assert!(
-            |C| size_of::<C>() != 0,
-            "can't convert entity to ZST component, use to_component instead"
-        );
+    pub fn to_component_t<C>(&mut self, id: Entity, f: impl FnOnce() -> ComponentDesc<C>) -> bool
+    where
+        C: Component,
+    {
         match self.components.get(&id) {
-            Some(cr) => match &cr.type_info {
-                Some(ti) if ti.is::<C>() => Some(Component {
-                    id,
-                    _marker: PhantomData,
-                }),
-                _ => None,
-            },
+            Some(_) => false,
             None => {
                 self.components.insert(id, f().build(id));
-                Some(Component {
-                    id,
-                    _marker: PhantomData,
-                })
+                true
             }
         }
     }
 
-    /// Gets the registered component or calls f to build one.
+    /// Creates a component from this `id` if one doesn't exist.
+    /// Returns `false` if the component already exists.
+    #[inline(always)]
+    pub fn to_component(&mut self, id: Entity, f: impl FnOnce() -> UntypedComponentDesc) -> bool {
+        match self.components.get(&id) {
+            Some(_) => false,
+            None => {
+                self.components.insert(id, f().build(id));
+                true
+            }
+        }
+    }
+
+    /// Creates a new entity id and assigns a component to it.
     ///
-    /// The builder is lazily evaluated and only called if the id does not already have a component.
-    pub fn to_component(&mut self, id: Entity, f: impl FnOnce() -> UntypedComponentDesc) {
-        if !self.components.contains(&id) {
-            self.components.insert(id, f().build(id))
-        }
+    /// Useful creating "newtype" components.
+    pub fn new_component_t<C: Component>(&mut self, desc: ComponentDesc<C>) -> Entity {
+        let id = self.new_entity();
+        self.components.insert(id, desc.build(id));
+        id
     }
 
-    pub fn new_component_t<C: ComponentValue>(
-        &mut self,
-        builder: ComponentDesc<C>,
-    ) -> Component<C> {
-        const_assert!(
-            |C| size_of::<C>() != 0,
-            "can't create new component from ZST, use new_component instead"
-        );
+    /// Creates a new entity id and assigns a component to it.
+    ///
+    /// Useful creating "newtype" components.
+    pub fn new_component(&mut self, desc: UntypedComponentDesc) -> Entity {
         let id = self.new_entity();
-        self.components.insert(id, builder.build(id));
-        Component {
-            id,
-            _marker: PhantomData,
-        }
-    }
-
-    pub fn new_component(&mut self, builder: UntypedComponentDesc) -> Entity {
-        let id = self.new_entity();
-        self.components.insert(id, builder.build(id));
+        self.components.insert(id, desc.build(id));
         id
     }
 
@@ -164,8 +154,8 @@ impl World {
     ///
     /// No side effect if the entity already contains the tag.
     #[inline(always)]
-    pub fn add(&mut self, entity: Entity, tag: impl Into<Tag>) -> EcsResult<()> {
-        add_tag(self, entity, tag.into().0)
+    pub fn add(&mut self, entity: Entity, id: Entity) -> EcsResult<()> {
+        add_tag(self, entity, id)
     }
 
     /// Add the type as tag to entity.
@@ -174,7 +164,7 @@ impl World {
     /// Component must be registered.
     ///
     /// Compilation fails if component is not ZST.
-    pub fn add_t<C: ComponentValue>(&mut self, entity: Entity) -> EcsResult<()> {
+    pub fn add_t<C: Component>(&mut self, entity: Entity) -> EcsResult<()> {
         const_assert!(
             |C| std::mem::size_of::<C>() == 0,
             "can't use add_t for component, did you want to set?"
@@ -182,15 +172,14 @@ impl World {
 
         let id = match self.type_map.get::<C>() {
             Some(&id) => id,
-            None => return unregistered_type_err::<C, _>(),
+            None => return Err(unregistered_type::<C>()),
         };
 
         add_tag(self, entity, id)
     }
 
     /// Checks if the entity has the component.
-    pub fn has(&self, entity: Entity, id: impl Into<Entity>) -> EcsResult<bool> {
-        let id = id.into();
+    pub fn has(&self, entity: Entity, id: Entity) -> EcsResult<bool> {
         let cr = match self.components.get(&id) {
             Some(cr) => cr,
             None => return Err(EcsError::UnregisteredComponent(id)),
@@ -210,68 +199,55 @@ impl World {
     ///
     /// Returns `false` if the type is not registered
     /// or the entity does not have the type.
-    pub fn has_t<C: ComponentValue>(&self, entity: Entity) -> EcsResult<bool> {
+    pub fn has_t<C: Component>(&self, entity: Entity) -> EcsResult<bool> {
         let id = match self.type_map.get::<C>() {
             Some(&id) => id,
-            None => return unregistered_type_err::<C, _>(),
+            None => return Err(unregistered_type::<C>()),
         };
 
         self.has(entity, id)
     }
 
     #[inline(always)]
-    pub fn set<C: ComponentValue>(
-        &mut self,
-        entity: Entity,
-        component: impl Into<Component<C>>,
-        val: C,
-    ) -> EcsResult<()> {
-        set_component_value(self, entity, component.into().id, val)
+    pub fn set<C: Component>(&mut self, entity: Entity, id: Entity, val: C) -> EcsResult<()> {
+        set_component_value(self, entity, id, val)
     }
 
     #[inline(always)]
-    pub fn set_t<C: ComponentValue>(&mut self, entity: Entity, val: C) -> EcsResult<()> {
+    pub fn set_t<C: Component>(&mut self, entity: Entity, val: C) -> EcsResult<()> {
         let id = match self.type_map.get::<C>() {
             Some(&id) => id,
-            None => return unregistered_type_err::<C, _>(),
+            None => return Err(unregistered_type::<C>()),
         };
 
         set_component_value(self, entity, id, val)
     }
 
     #[inline(always)]
-    pub fn get<C: ComponentValue>(
-        &self,
-        entity: Entity,
-        component: impl Into<Component<C>>,
-    ) -> EcsResult<&C> {
-        get_component_value(self, entity, component.into().id)
+    pub fn get<C: Component>(&self, entity: Entity, id: Entity) -> EcsResult<&C> {
+        get_component_value(self, entity, id)
     }
 
     #[inline(always)]
-    pub fn get_t<C: ComponentValue>(&self, entity: Entity) -> EcsResult<&C> {
+    pub fn get_t<C: Component>(&self, entity: Entity) -> EcsResult<&C> {
         let id = match self.type_map.get::<C>() {
             Some(&id) => id,
-            None => return unregistered_type_err::<C, _>(),
+            None => return Err(unregistered_type::<C>()),
         };
 
         get_component_value(self, entity, id)
     }
 
     #[inline(always)]
-    pub fn get_mut<C: ComponentValue>(
-        &mut self,
-        entity: Entity,
-        component: impl Into<Component<C>>,
-    ) -> EcsResult<&mut C> {
-        get_component_value_mut(self, entity, component.into().id)
+    pub fn get_mut<C: Component>(&mut self, entity: Entity, id: Entity) -> EcsResult<&mut C> {
+        get_component_value_mut(self, entity, id)
     }
 
     #[inline(always)]
-    pub fn get_mut_t<C: ComponentValue>(&mut self, entity: Entity) -> EcsResult<&mut C> {
+    pub fn get_mut_t<C: Component>(&mut self, entity: Entity) -> EcsResult<&mut C> {
         let id = match self.type_map.get::<C>() {
             Some(&id) => id,
-            None => return unregistered_type_err::<C, _>(),
+            None => return Err(unregistered_type::<C>()),
         };
 
         get_component_value_mut(self, entity, id)

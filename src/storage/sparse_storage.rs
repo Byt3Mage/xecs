@@ -1,17 +1,25 @@
 use super::{erased_vec::ErasedVec, sparse_set::SparseIndex};
-use crate::{component::ComponentValue, entity::Entity, types::type_info::TypeInfo};
+use crate::{
+    component::Component,
+    entity::Entity,
+    error::{EcsError, EcsResult},
+    pointer::{Ptr, PtrMut},
+    types::type_info::TypeInfo,
+};
 use std::rc::Rc;
 
 /// Type-erased sparse set for storing component data.
 pub(crate) struct ComponentSparseSet {
+    id: Entity,
     data: ErasedVec,
     dense: Vec<Entity>,
     sparse: Vec<usize>,
 }
 
 impl ComponentSparseSet {
-    pub(crate) fn new(type_info: Rc<TypeInfo>) -> Self {
+    pub(crate) fn new(id: Entity, type_info: Rc<TypeInfo>) -> Self {
         Self {
+            id,
             data: ErasedVec::new(type_info),
             dense: vec![],
             sparse: vec![],
@@ -29,7 +37,7 @@ impl ComponentSparseSet {
 
     /// Inserts a value into the set for the given entity.
     /// Replaces the data if the entity is already in the set.
-    pub(crate) fn insert<C: ComponentValue>(&mut self, entity: Entity, value: C) {
+    pub(crate) fn insert<C: Component>(&mut self, entity: Entity, value: C) {
         let sparse = entity.to_sparse_index();
         let dense = self.ensure_index(sparse);
 
@@ -45,7 +53,7 @@ impl ComponentSparseSet {
 
     /// Removes an entity from the set.
     /// Returns the value associated with the entity if it was present.
-    pub(crate) fn remove<C: ComponentValue>(&mut self, entity: Entity) -> Option<(Entity, C)> {
+    pub(crate) fn remove<C: Component>(&mut self, entity: Entity) -> Option<(Entity, C)> {
         let sparse = entity.to_sparse_index();
         match self.sparse.get(sparse) {
             Some(&dense) if dense < self.data.len() => {
@@ -73,18 +81,28 @@ impl ComponentSparseSet {
     }
 
     #[inline]
-    pub(crate) fn get<C: ComponentValue>(&self, entity: Entity) -> Option<&C> {
+    pub(crate) fn get(&self, entity: Entity) -> EcsResult<Ptr> {
         match self.sparse.get(entity.to_sparse_index()) {
-            Some(dense) => self.data.get(*dense),
-            _ => None,
+            Some(&dense) if dense < self.data.len() => {
+                Ok(unsafe { self.data.get_unchecked(dense) })
+            }
+            _ => Err(EcsError::MissingComponent {
+                entity,
+                id: self.id,
+            }),
         }
     }
 
     #[inline]
-    pub(crate) fn get_mut<C: ComponentValue>(&mut self, entity: Entity) -> Option<&mut C> {
+    pub(crate) fn get_mut(&mut self, entity: Entity) -> EcsResult<PtrMut> {
         match self.sparse.get(entity.to_sparse_index()) {
-            Some(&dense) => self.data.get_mut(dense),
-            _ => None,
+            Some(&dense) if dense < self.data.len() => {
+                Ok(unsafe { self.data.get_unchecked_mut(dense) })
+            }
+            _ => Err(EcsError::MissingComponent {
+                entity,
+                id: self.id,
+            }),
         }
     }
 }
@@ -130,7 +148,7 @@ impl TagSparseSet {
 
     /// Removes an entity from the set.
     /// Returns the value associated with the entity if it was present.
-    pub(crate) fn remove<C: ComponentValue>(&mut self, entity: Entity) -> Option<Entity> {
+    pub(crate) fn remove<C: Component>(&mut self, entity: Entity) -> Option<Entity> {
         let sparse = entity.to_sparse_index();
         match self.sparse.get(sparse) {
             Some(&dense) if dense < self.dense.len() => {

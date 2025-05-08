@@ -1,5 +1,7 @@
+use std::any::TypeId;
+
 use crate::{
-    component::{ComponentValue, UntypedComponentDesc},
+    component::{Component, UntypedComponentDesc},
     entity::Entity,
     error::{EcsError, EcsResult},
     graph::table_traverse_add,
@@ -41,7 +43,7 @@ pub(crate) fn add_tag(world: &mut World, entity: Entity, id: Entity) -> EcsResul
 
     match &mut cr.storage {
         Storage::SparseTag(tag) => Ok(tag.insert(entity)),
-        Storage::SparseData(_) => Err(EcsError::ComponentHasData(id)),
+        Storage::SparseData(_) => Err(EcsError::IsNotTag(id)),
         Storage::Tables(_) => {
             let src_table = r.table;
             let src_row = r.row;
@@ -64,7 +66,7 @@ pub(crate) fn add_tag(world: &mut World, entity: Entity, id: Entity) -> EcsResul
 ///
 /// # Safety
 /// Caller ensures that the type matches the id.
-pub(crate) fn set_component_value<C: ComponentValue>(
+pub(crate) fn set_component_value<C: Component>(
     world: &mut World,
     entity: Entity,
     id: Entity,
@@ -83,7 +85,7 @@ pub(crate) fn set_component_value<C: ComponentValue>(
 
     // SAFETY: Valid entity must have valid table and row.
     match &mut cr.storage {
-        Storage::SparseTag(_) => Err(EcsError::ComponentHasNoData(id)),
+        Storage::SparseTag(_) => Err(EcsError::IsTag(id)),
         Storage::SparseData(set) => Ok(set.insert(entity, value)),
         Storage::Tables(_) => {
             let src_table = r.table;
@@ -115,7 +117,7 @@ pub(crate) fn set_component_value<C: ComponentValue>(
     }
 }
 
-pub(crate) fn get_component_value<C: ComponentValue>(
+pub(crate) fn get_component_value<C: Component>(
     world: &World,
     entity: Entity,
     id: Entity,
@@ -132,16 +134,26 @@ pub(crate) fn get_component_value<C: ComponentValue>(
     let r = world.entity_index.get_record(entity)?;
 
     // SAFETY: Valid entity must have valid table and row.
-    let value = match &cr.storage {
-        Storage::SparseTag(_) => return Err(EcsError::ComponentHasNoData(id)),
+    let ptr = match &cr.storage {
+        Storage::SparseTag(_) => return Err(EcsError::IsTag(id)),
         Storage::SparseData(set) => set.get(entity),
-        Storage::Tables(_) => unsafe { world.table_index[r.table].get(r.row, id) },
-    };
+        Storage::Tables(_) => unsafe { world.table_index[r.table].get(entity, r.row, id) },
+    }?;
 
-    value.ok_or(EcsError::MissingComponent(entity, id))
+    if ptr.type_id == TypeId::of::<C>() {
+        // SAFETY:
+        // - ptr is NonNull
+        // - we just checked that the type matches.
+        Ok(unsafe { ptr.ptr.cast().as_ref() })
+    } else {
+        Err(EcsError::TypeMismatch {
+            exp: ptr.type_name,
+            got: std::any::type_name::<C>(),
+        })
+    }
 }
 
-pub(crate) fn get_component_value_mut<C: ComponentValue>(
+pub(crate) fn get_component_value_mut<C: Component>(
     world: &mut World,
     entity: Entity,
     id: Entity,
@@ -155,15 +167,24 @@ pub(crate) fn get_component_value_mut<C: ComponentValue>(
         Some(cr) => cr,
         None => return Err(EcsError::UnregisteredComponent(id)),
     };
-
     let r = world.entity_index.get_record(entity)?;
 
     // SAFETY: Valid entity must have valid row.
-    let value = match &mut cr.storage {
-        Storage::SparseTag(_) => return Err(EcsError::ComponentHasNoData(id)),
+    let ptr = match &mut cr.storage {
+        Storage::SparseTag(_) => return Err(EcsError::IsTag(id)),
         Storage::SparseData(set) => set.get_mut(entity),
-        Storage::Tables(_) => unsafe { world.table_index[r.table].get_mut(r.row, id) },
-    };
+        Storage::Tables(_) => unsafe { world.table_index[r.table].get_mut(entity, r.row, id) },
+    }?;
 
-    value.ok_or(EcsError::MissingComponent(entity, id))
+    if ptr.type_id == TypeId::of::<C>() {
+        // SAFETY:
+        // - ptr is NonNull
+        // - we just checked that the type matches.
+        Ok(unsafe { ptr.ptr.cast().as_mut() })
+    } else {
+        Err(EcsError::TypeMismatch {
+            exp: ptr.type_name,
+            got: std::any::type_name::<C>(),
+        })
+    }
 }

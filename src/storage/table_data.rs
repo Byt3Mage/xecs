@@ -1,5 +1,7 @@
 use crate::{
-    component::ComponentValue, entity::Entity, entity_index::EntityIndex,
+    component::Component,
+    entity::Entity,
+    pointer::{Ptr, PtrMut},
     types::type_info::TypeInfo,
 };
 use const_assert::const_assert;
@@ -265,12 +267,7 @@ impl TableData {
     /// - The caller ensures that `row` and `column` are valid.
     /// - The caller ensures that the type matches.
     /// - The caller ensures that the row is initialized.
-    pub(crate) unsafe fn set_unchecked<C: ComponentValue>(
-        &self,
-        column: usize,
-        row: usize,
-        val: C,
-    ) {
+    pub(crate) unsafe fn set_unchecked<C: Component>(&self, column: usize, row: usize, val: C) {
         debug_assert!(row < self.len, "row out of bounds");
         debug_assert!(column < self.columns.len(), "column out of bounds");
 
@@ -294,12 +291,7 @@ impl TableData {
     /// - The caller ensures that `row` and `column` are valid.
     /// - The caller ensures that the type matches.
     /// - The caller ensures that the row is uinitialized.
-    pub(crate) unsafe fn set_unitialized<C: ComponentValue>(
-        &self,
-        column: usize,
-        row: usize,
-        val: C,
-    ) {
+    pub(crate) unsafe fn set_unitialized<C: Component>(&self, column: usize, row: usize, val: C) {
         // SAFETY:
         // - The caller ensures that `row` and `column` are valid.
         // - The caller ensures that the type `C` matches the column.
@@ -319,7 +311,7 @@ impl TableData {
     /// # Safety
     /// - The caller ensures that `row` and `column` are valid.
     /// - The caller ensures that the type matches.
-    pub(crate) unsafe fn get_unchecked<C: ComponentValue>(&self, column: usize, row: usize) -> &C {
+    pub(crate) unsafe fn get_unchecked(&self, column: usize, row: usize) -> Ptr {
         debug_assert!(row < self.len, "row out of bounds");
         debug_assert!(column < self.columns.len(), "column out of bounds");
         // SAFETY:
@@ -327,8 +319,7 @@ impl TableData {
         // - The caller ensures that the type `C` matches the column.
         unsafe {
             let col = self.columns.get_unchecked(column);
-            debug_assert!(col.type_info.is::<C>(), "TableData: type mismatch");
-            col.add_ptr(row).cast().as_ref()
+            Ptr::new(col.add_ptr(row), &col.type_info)
         }
     }
 
@@ -338,21 +329,14 @@ impl TableData {
     ///
     /// # Safety
     /// - The caller ensures that `row` and `column` are valid.
-    /// - The caller ensures that the type matches.
-    pub(crate) unsafe fn get_unchecked_mut<C: ComponentValue>(
-        &mut self,
-        column: usize,
-        row: usize,
-    ) -> &mut C {
+    pub(crate) unsafe fn get_unchecked_mut(&mut self, column: usize, row: usize) -> PtrMut {
         debug_assert!(row < self.len, "row out of bounds");
         debug_assert!(column < self.columns.len(), "column out of bounds");
         // SAFETY:
-        // - The caller ensures that `row` and `column` in bounds.
-        // - The caller ensures that the type `C` matches the column.
+        // The caller ensures that `row` and `column` in bounds.
         unsafe {
             let col = self.columns.get_unchecked_mut(column);
-            assert!(col.type_info.is::<C>(), "TableData: type mismatch");
-            col.add_ptr(row).cast().as_mut()
+            PtrMut::new(col.add_ptr(row), &col.type_info)
         }
     }
 

@@ -1,14 +1,19 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use xecs::entity::Entity;
-use xecs::types::TypeMap;
+use xecs::component::ComponentDesc;
+use xecs::storage::StorageType;
+use xecs::world::World;
+
+struct Position(i32);
 
 fn bench_type_map(c: &mut Criterion) {
-    let mut map = TypeMap::new();
-    map.insert::<usize>(Entity::NULL);
-    map.insert::<String>(Entity::NULL);
+    let mut world = World::new();
+    world.register::<Position>(ComponentDesc::new().storage(StorageType::Tables));
 
-    c.bench_function("get_type_map", |b| {
-        b.iter(|| {});
+    let bob = world.new_entity();
+    world.set_t(bob, Position(45)).unwrap();
+
+    c.bench_function("test component get", |b| {
+        b.iter(|| assert!(world.get_t::<Position>(bob).is_ok()));
     });
 }
 
