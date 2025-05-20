@@ -1,7 +1,7 @@
-pub(crate) mod type_info;
+pub mod type_info;
 
-use crate::{entity::Entity, utils::NoOpHash};
-use std::{any::TypeId, collections::HashMap, ops::Deref, rc::Rc};
+use crate::{id::Id, utils::NoOpHash};
+use std::{any::TypeId, collections::HashMap, fmt::Display, ops::Deref, rc::Rc};
 
 pub struct TypeMap<V> {
     types: HashMap<TypeId, V, NoOpHash>,
@@ -34,9 +34,15 @@ impl<V> TypeMap<V> {
     }
 }
 
-/// Sorted list of ids in an [Arcehetype](crate::storage::table::table)
+/// Sorted list of ids in a [Table](crate::storage::table::Table)
 #[derive(Hash, PartialEq, Eq)]
-pub struct IdList(Rc<[Entity]>);
+pub struct IdList(Rc<[Id]>);
+
+impl Display for IdList {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.0)
+    }
+}
 
 impl Clone for IdList {
     fn clone(&self) -> Self {
@@ -44,14 +50,26 @@ impl Clone for IdList {
     }
 }
 
-impl From<Vec<Entity>> for IdList {
-    fn from(value: Vec<Entity>) -> Self {
-        Self(value.into())
+impl From<Vec<Id>> for IdList {
+    fn from(mut value: Vec<Id>) -> Self {
+        Self({
+            value.sort();
+            value.into()
+        })
+    }
+}
+
+impl<const N: usize> From<[Id; N]> for IdList {
+    fn from(mut value: [Id; N]) -> Self {
+        Self({
+            value.sort();
+            value.into()
+        })
     }
 }
 
 impl Deref for IdList {
-    type Target = [Entity];
+    type Target = [Id];
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -60,7 +78,7 @@ impl Deref for IdList {
 
 impl IdList {
     #[inline]
-    pub fn ids(&self) -> &[Entity] {
+    pub fn ids(&self) -> &[Id] {
         &self.0
     }
 
@@ -69,32 +87,19 @@ impl IdList {
         self.0.len()
     }
 
-    /// Creates a new sorted type from [Type] and new id.
+    /// Creates a new sorted list from [Self] and new id.
     ///
     /// Returns [None] if the source type already contains id.
-    pub fn try_extend(&self, with: Entity) -> Option<Self> {
-        /// Find location where to insert id into type
-        fn find_type_insert(ids: &[Entity], to_add: Entity) -> Option<usize> {
-            for (i, &id) in ids.iter().enumerate() {
-                if id == to_add {
-                    return None;
-                }
-                if id > to_add {
-                    return Some(i);
-                }
+    pub fn try_extend(&self, with: Id) -> Option<Self> {
+        match self.binary_search(&with) {
+            Ok(_) => None,
+            Err(pos) => {
+                let mut new_list = Vec::with_capacity(pos);
+                new_list.extend_from_slice(&self[..pos]);
+                new_list.push(with);
+                new_list.extend_from_slice(&self[pos..]);
+                Some(new_list.into())
             }
-
-            Some(ids.len())
         }
-
-        let at = find_type_insert(self, with)?;
-        let src_array = self.ids();
-        let mut dst_array = Vec::with_capacity(src_array.len() + 1);
-
-        dst_array.extend_from_slice(&src_array[..at]);
-        dst_array.push(with);
-        dst_array.extend_from_slice(&src_array[at..]);
-
-        Some(dst_array.into())
     }
 }

@@ -165,61 +165,10 @@ impl_bitflags!(EntityFlags);
 pub struct ComponentFlags(u64);
 
 impl ComponentFlags {
-    // OnDelete Relationship behavior flags
-    pub const ON_DELETE_REMOVE: Self = Self(1 << 0);
-    pub const ON_DELETE_DELETE: Self = Self(1 << 1);
-    pub const ON_DELETE_PANIC: Self = Self(1 << 2);
-    pub(crate) const ON_DELETE_MASK: Self =
-        Self(Self::ON_DELETE_REMOVE.0 | Self::ON_DELETE_DELETE.0 | Self::ON_DELETE_PANIC.0);
-
-    // OnDeleteObject behavior flags
-    pub const ON_DELETE_OBJECT_REMOVE: Self = Self(1 << 3);
-    pub const ON_DELETE_OBJECT_DELETE: Self = Self(1 << 4);
-    pub const ON_DELETE_OBJECT_PANIC: Self = Self(1 << 5);
-    pub const ON_DELETE_OBJECT_MASK: Self = Self(
-        Self::ON_DELETE_OBJECT_REMOVE.0
-            | Self::ON_DELETE_OBJECT_DELETE.0
-            | Self::ON_DELETE_OBJECT_PANIC.0,
-    );
-
-    // OnInstantiate behavior flags
-    pub const ON_INSTANTIATE_OVERRIDE: Self = Self(1 << 6);
-    pub const ON_INSTANTIATE_INHERIT: Self = Self(1 << 7);
-    pub const ON_INSTANTIATE_DONT_INHERIT: Self = Self(1 << 8);
-    pub const ON_INSTANTIATE_MASK: Self = Self(
-        Self::ON_INSTANTIATE_OVERRIDE.0
-            | Self::ON_INSTANTIATE_INHERIT.0
-            | Self::ON_INSTANTIATE_DONT_INHERIT.0,
-    );
-
-    // Miscellaneous ID flags
-    pub const EXCLUSIVE: Self = Self(1 << 9);
-    pub const TRAVERSABLE: Self = Self(1 << 10);
-    pub const TAG: Self = Self(1 << 11);
-    pub const WITH: Self = Self(1 << 12);
-    pub const CAN_TOGGLE: Self = Self(1 << 13);
-    pub const IS_TRANSITIVE: Self = Self(1 << 14);
-    pub const IS_INHERITABLE: Self = Self(1 << 15);
-    pub const IS_RELATIONSHIP: Self = Self(1 << 16);
-
-    // Event flags
-    pub(crate) const HAS_ON_ADD: Self = Self(1 << 16); // Same values as table flags
-    pub(crate) const HAS_ON_REMOVE: Self = Self(1 << 17);
-    pub(crate) const HAS_ON_SET: Self = Self(1 << 18);
-    pub(crate) const HAS_ON_TABLE_CREATE: Self = Self(1 << 21);
-    pub(crate) const HAS_ON_TABLE_DELETE: Self = Self(1 << 22);
-    pub(crate) const IS_SPARSE: Self = Self(1 << 23);
-    pub(crate) const EVENT_MASK: Self = Self(
-        Self::HAS_ON_ADD.0
-            | Self::HAS_ON_REMOVE.0
-            | Self::HAS_ON_SET.0
-            | Self::HAS_ON_TABLE_CREATE.0
-            | Self::HAS_ON_TABLE_DELETE.0
-            | Self::IS_SPARSE.0,
-    );
-
-    // Special flag
-    pub const MARKED_FOR_DELETE: Self = Self(1 << 30);
+    /// Marks the component as a tag
+    pub const IS_TAG: Self = Self(1 << 0);
+    /// Marks the component as exclusive when used as a relationship.
+    pub const EXCLUSIVE: Self = Self(1 << 1);
 }
 
 impl_bitflags!(ComponentFlags);

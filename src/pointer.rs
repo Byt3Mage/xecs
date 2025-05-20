@@ -1,67 +1,93 @@
-use crate::{component::Component, types::type_info::TypeInfo};
-use std::{any::TypeId, marker::PhantomData, ptr::NonNull};
+use std::{marker::PhantomData, mem::ManuallyDrop, ops::DerefMut, ptr::NonNull};
 
-pub struct Ptr<'a> {
-    pub(crate) ptr: NonNull<u8>,
-    pub(crate) type_id: TypeId,
-    pub(crate) type_name: &'static str,
-    _marker: PhantomData<&'a u8>,
-}
+/// Typed-erased pointer with lifetime tracking.
+#[derive(Clone, Copy)]
+#[repr(transparent)]
+pub struct Ptr<'a>(NonNull<u8>, PhantomData<&'a u8>);
 
 impl<'a> Ptr<'a> {
+    pub(crate) fn new(ptr: NonNull<u8>) -> Self {
+        Self(ptr, PhantomData)
+    }
+
+    pub fn as_ptr(self) -> *const u8 {
+        self.0.as_ptr()
+    }
+
+    /// Converts this pointer to a reference of type T
+    ///
     /// # Safety
-    /// Callers must ensure that the type info matches the pointer
-    pub(crate) unsafe fn new(ptr: NonNull<u8>, type_info: &TypeInfo) -> Self {
-        Self {
-            ptr,
-            type_id: type_info.type_id,
-            type_name: type_info.type_name,
-            _marker: PhantomData,
-        }
-    }
-
-    pub fn as_ref<C: Component>(self) -> Result<&'a C, Self> {
-        if self.type_id == TypeId::of::<C>() {
-            // SAFETY:
-            // - ptr is NonNull
-            // - we just checked that the type matches.
-            Ok(unsafe { self.ptr.cast().as_ref() })
-        } else {
-            Err(self)
-        }
+    /// T must be the erased pointee for this [Ptr].
+    pub unsafe fn as_ref<T>(self) -> &'a T {
+        // SAFETY:
+        // Caller ensures that pointer is of type T
+        unsafe { self.0.cast::<T>().as_ref() }
     }
 }
 
-pub struct PtrMut<'a> {
-    pub(crate) ptr: NonNull<u8>,
-    pub(crate) type_id: TypeId,
-    pub(crate) type_name: &'static str,
-    _marker: PhantomData<&'a mut u8>,
-}
+/// Typed-erased mutable pointer with lifetime tracking.
+#[repr(transparent)]
+pub struct PtrMut<'a>(NonNull<u8>, PhantomData<&'a mut u8>);
 
 impl<'a> PtrMut<'a> {
-    /// # Safety
-    /// Callers must ensure that the type info matches the pointer
-    pub(crate) unsafe fn new(ptr: NonNull<u8>, type_info: &TypeInfo) -> Self {
-        Self {
-            ptr,
-            type_id: type_info.type_id,
-            type_name: type_info.type_name,
-            _marker: PhantomData,
-        }
+    pub(crate) fn new(ptr: NonNull<u8>) -> Self {
+        Self(ptr, PhantomData)
     }
 
-    /// Converts this pointer to a reference of the same type C
-    /// Returns `Err(Self)` if there is a type mismatch.
-    pub fn as_mut<C: Component>(self) -> Result<&'a mut C, Self> {
-        if self.type_id == TypeId::of::<C>() {
-            // SAFETY:
-            // - ptr is NonNull
-            // - we just checked that the type matches.
-            Ok(unsafe { self.ptr.cast().as_mut() })
-        } else {
-            Err(self)
-        }
+    /// Acquires the underlying `*mut u8` ptr
+    pub fn as_ptr(self) -> *mut u8 {
+        self.0.as_ptr()
+    }
+
+    /// Converts this pointer to a mutable reference of type T.
+    ///
+    /// # Safety
+    /// T must be the erased pointee for this [PtrMut].
+    pub unsafe fn as_mut<T>(self) -> &'a mut T {
+        // SAFETY:
+        // Caller ensures that pointer is of type T
+        unsafe { self.0.cast::<T>().as_mut() }
+    }
+
+    /// Transforms this [`PtrMut`] into an [`OwningPtr`]
+    ///
+    /// # Safety
+    /// Caller must have right to drop or move out of [`PtrMut`].
+    #[inline]
+    pub unsafe fn to_owning(self) -> OwningPtr<'a> {
+        OwningPtr(self.0, PhantomData)
+    }
+}
+
+impl<'a, T: ?Sized> From<&'a mut T> for PtrMut<'a> {
+    #[inline]
+    fn from(val: &'a mut T) -> Self {
+        Self::new(NonNull::from(val).cast())
+    }
+}
+
+#[repr(transparent)]
+pub struct OwningPtr<'a>(NonNull<u8>, PhantomData<&'a mut u8>);
+
+impl<'a> OwningPtr<'a> {
+    /// This exists mostly to reduce compile times;
+    /// code is only duplicated per type, rather than per function called.
+    ///
+    /// # Safety
+    ///
+    /// Safety constraints of [`PtrMut::promote`] must be upheld.
+    unsafe fn make_internal<T>(temp: &mut ManuallyDrop<T>) -> OwningPtr<'_> {
+        // SAFETY: The constraints of `promote` are upheld by caller.
+        unsafe { PtrMut::from(temp.deref_mut()).to_owning() }
+    }
+
+    /// Consumes a value and creates an [`OwningPtr`] to it while ensuring a double drop does not happen.
+    #[inline]
+    pub fn make<T, F: FnOnce(OwningPtr<'_>) -> R, R>(val: T, f: F) -> R {
+        let mut val = ManuallyDrop::new(val);
+        // SAFETY: The value behind the pointer will not get dropped or observed later,
+        // so it's safe to promote it to an owning pointer.
+        f(unsafe { Self::make_internal(&mut val) })
     }
 }
 

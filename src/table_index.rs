@@ -52,16 +52,6 @@ impl TableIndex {
     }
 
     #[inline]
-    pub(crate) fn get(&self, id: TableId) -> Option<&Table> {
-        self.tables.get(id.0 as usize)
-    }
-
-    #[inline]
-    pub(crate) fn get_mut(&mut self, id: TableId) -> Option<&mut Table> {
-        self.tables.get_mut(id.0 as usize)
-    }
-
-    #[inline]
     pub(crate) fn get_id(&self, ids: &IdList) -> Option<TableId> {
         self.table_ids.get(ids).copied()
     }

@@ -1,7 +1,7 @@
 use std::hash::{BuildHasher, Hasher};
 
 #[derive(Clone, Default)]
-pub(crate) struct NoOpHash;
+pub struct NoOpHash;
 
 impl BuildHasher for NoOpHash {
     type Hasher = NoOpHasher;
@@ -11,7 +11,7 @@ impl BuildHasher for NoOpHash {
     }
 }
 
-pub(crate) struct NoOpHasher(u64);
+pub struct NoOpHasher(u64);
 
 impl Hasher for NoOpHasher {
     fn finish(&self) -> u64 {

@@ -1,4 +1,4 @@
-use crate::{component::Component, entity::Entity, pointer::ConstNonNull};
+use crate::{component::Component, id::Id, pointer::ConstNonNull};
 use const_assert::const_assert;
 use std::{
     alloc::Layout,
@@ -10,8 +10,8 @@ use std::{
 pub type TypeName = String;
 type DefaultHook = Box<dyn Fn(NonNull<u8>)>;
 type CloneHook = Box<dyn Fn(ConstNonNull<u8>, NonNull<u8>)>;
-type SetHook = Box<dyn FnMut(Entity, NonNull<u8>)>;
-type RemoveHook = Box<dyn FnMut(Entity, NonNull<u8>)>;
+type SetHook = Box<dyn FnMut(Id, NonNull<u8>)>;
+type RemoveHook = Box<dyn FnMut(Id, NonNull<u8>)>;
 
 pub struct TypeHooksBuilder<C> {
     default: Option<DefaultHook>,
@@ -23,7 +23,6 @@ pub struct TypeHooksBuilder<C> {
 
 impl<C: Component> TypeHooksBuilder<C> {
     pub const fn new() -> Self {
-        const_assert!(|C| size_of::<C>() != 0, "can't create type hooks for ZST");
         Self {
             default: None,
             clone: None,
@@ -54,7 +53,7 @@ impl<C: Component> TypeHooksBuilder<C> {
         self
     }
 
-    pub fn on_set(mut self, mut f: impl FnMut(Entity, &mut C) + 'static) -> Self {
+    pub fn on_set(mut self, mut f: impl FnMut(Id, &mut C) + 'static) -> Self {
         const_assert!(|C| size_of::<C>() != 0, "can't create set hook for ZST");
         self.on_set = Some(Box::new(move |entity, ptr| {
             f(entity, unsafe { ptr.cast().as_mut() })
@@ -62,7 +61,7 @@ impl<C: Component> TypeHooksBuilder<C> {
         self
     }
 
-    pub fn on_remove(mut self, mut f: impl FnMut(Entity, &mut C) + 'static) -> Self {
+    pub fn on_remove(mut self, mut f: impl FnMut(Id, &mut C) + 'static) -> Self {
         const_assert!(|C| size_of::<C>() != 0, "can't create remove hook for ZST");
         self.on_remove = Some(Box::new(move |entity, ptr| {
             f(entity, unsafe { ptr.cast().as_mut() })
@@ -87,53 +86,42 @@ pub struct TypeHooks {
     pub(crate) on_remove: Option<RemoveHook>,
 }
 
-impl TypeHooks {
-    #[inline]
-    pub(crate) fn empty() -> Self {
-        Self {
-            default: None,
-            clone: None,
-            on_set: None,
-            on_remove: None,
-        }
-    }
-}
-
 pub struct TypeInfo {
-    pub(crate) drop_fn: Option<unsafe fn(ptr: NonNull<u8>)>,
-    pub(crate) dangling: fn() -> NonNull<u8>,
+    pub(crate) drop_fn: Option<unsafe fn(ptr: *mut u8)>,
     pub(crate) layout: Layout,
-    pub(crate) type_name: &'static str,
     pub(crate) type_id: TypeId,
+    pub(crate) type_name: fn() -> &'static str,
     pub(crate) hooks: TypeHooks,
 }
 
 impl TypeInfo {
-    pub(crate) fn new<C: Component>(hooks: TypeHooksBuilder<C>) -> Self {
-        fn drop_impl<T>(ptr: NonNull<u8>) {
-            let ptr = ptr.as_ptr().cast::<T>();
-            unsafe { ptr::drop_in_place(ptr) };
+    pub fn of<T: 'static>(hooks: TypeHooksBuilder<T>) -> Option<Self> {
+        if size_of::<T>() == 0 {
+            return None;
         }
 
-        Self {
+        fn drop_impl<T>(ptr: *mut u8) {
+            unsafe { ptr::drop_in_place(ptr.cast::<T>()) };
+        }
+
+        Some(Self {
             drop_fn: const {
-                if std::mem::needs_drop::<C>() {
-                    Some(drop_impl::<C>)
+                if std::mem::needs_drop::<T>() {
+                    Some(drop_impl::<T>)
                 } else {
                     None
                 }
             },
-            dangling: || NonNull::<C>::dangling().cast(),
-            layout: Layout::new::<C>(),
-            type_name: std::any::type_name::<C>(),
-            type_id: TypeId::of::<C>(),
+            layout: Layout::new::<T>(),
+            type_name: std::any::type_name::<T>,
+            type_id: TypeId::of::<T>(),
             hooks: hooks.build(),
-        }
+        })
     }
 
     #[inline]
-    pub fn is<C: Component>(&self) -> bool {
-        self.type_id == TypeId::of::<C>()
+    pub fn is<T: 'static>(&self) -> bool {
+        self.type_id == TypeId::of::<T>()
     }
 
     #[inline]
@@ -149,5 +137,10 @@ impl TypeInfo {
     #[inline]
     pub const fn size_align(&self) -> (usize, usize) {
         (self.size(), self.align())
+    }
+
+    #[inline]
+    pub fn name(&self) -> &'static str {
+        (self.type_name)()
     }
 }

@@ -5,12 +5,11 @@ edition = "2024"
 description = "eXtended ecs"
 
 [dependencies]
-const-assert = {git = "https://github.com/aquarius2019/const-assert.git"}
-simple-ternary = "0.3.0"
+const-assert = { git = "https://github.com/aquarius2019/const-assert.git" }
 thiserror = "2.0.12"
 
 [dev-dependencies]
-criterion = "0.5.1"
+criterion = "0.6.0"
 
 [[bench]]
 name = "my_benchmark"

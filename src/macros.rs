@@ -42,7 +42,7 @@ macro_rules! chain_methods_impl {
 #[macro_export]
 macro_rules! view {
     (@from($world:expr, $id:expr)) => {{
-        $crate::entity_view::EntityView::new(&mut $world, $id)
+        $crate::id::entity_view::EntityView::new(&mut $world, $id)
     }};
 
     (@use($view:expr)) => { $view };

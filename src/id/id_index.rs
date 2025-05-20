@@ -1,18 +1,21 @@
-use crate::{entity::Entity, error::EntityIndexError, flags::EntityFlags, table_index::TableId};
-use std::{alloc::Layout, usize};
+use crate::{error::IndexError, flags::EntityFlags, id::Id, table_index::TableId};
+use std::{alloc::Layout, sync::LazyLock, usize};
 
 const PAGE_BITS: usize = 12;
 const PAGE_SIZE: usize = 1 << PAGE_BITS;
 const PAGE_MASK: usize = PAGE_SIZE - 1;
 
+static RECORD_LAYOUT: LazyLock<Layout> =
+    LazyLock::new(|| Layout::array::<EntityRecord>(PAGE_SIZE).expect("invalid layout"));
+
 #[inline(always)]
-const fn page_index(e: Entity) -> usize {
-    (e.id() as usize) >> PAGE_BITS
+const fn page_index(e: Id) -> usize {
+    (e.index() as usize) >> PAGE_BITS
 }
 
 #[inline(always)]
-const fn page_offset(e: Entity) -> usize {
-    (e.id() as usize) & PAGE_MASK
+const fn page_offset(e: Id) -> usize {
+    (e.index() as usize) & PAGE_MASK
 }
 
 pub(crate) struct EntityRecord {
@@ -41,7 +44,7 @@ impl Page {
         }
 
         self.records = unsafe {
-            let layout = Layout::array::<EntityRecord>(PAGE_SIZE).expect("invalid layout");
+            let layout = *RECORD_LAYOUT;
             let ptr = std::alloc::alloc_zeroed(layout) as *mut EntityRecord;
 
             if ptr.is_null() {
@@ -50,22 +53,23 @@ impl Page {
 
             Box::from_raw(std::slice::from_raw_parts_mut(ptr, PAGE_SIZE))
         };
+
         self.is_active = true;
         self
     }
 }
 
-pub struct EntityIndex {
-    entities: Vec<Entity>,
+pub struct IdIndex {
+    entities: Vec<Id>,
     pages: Vec<Page>,
     alive_count: usize,
     max_id: u64,
 }
 
-impl EntityIndex {
+impl IdIndex {
     pub(crate) fn new() -> Self {
         Self {
-            entities: vec![Entity::NULL],
+            entities: vec![Id::NULL],
             pages: vec![],
             alive_count: 1,
             max_id: 0,
@@ -85,70 +89,84 @@ impl EntityIndex {
     /// Returns the [EntityRecord] for the [Entity].
     ///
     /// [Entity] must exist and must be alive to have a record.
-    pub(crate) fn get_record(&self, entity: Entity) -> Result<&EntityRecord, EntityIndexError> {
+    pub(crate) fn get_record(&self, entity: Id) -> Result<&EntityRecord, IndexError> {
         match self.pages.get(page_index(entity)) {
             Some(page) if page.is_active => {
                 let record = &page.records[page_offset(entity)];
 
                 if record.dense == 0 {
-                    return Err(EntityIndexError::NonExistent(entity));
+                    return Err(IndexError::NonExistent(entity));
                 }
 
                 if record.dense >= self.alive_count || self.entities[record.dense] != entity {
-                    return Err(EntityIndexError::NotAlive(entity));
+                    return Err(IndexError::NotAlive(entity));
                 }
 
                 Ok(record)
             }
-            _ => Err(EntityIndexError::NonExistent(entity)),
+            _ => Err(IndexError::NonExistent(entity)),
         }
     }
 
     /// Returns the mutable [EntityRecord] for the [Entity].
     ///
     /// [Entity] must exist and must be alive to have a record.
-    pub(crate) fn get_record_mut(
-        &mut self,
-        entity: Entity,
-    ) -> Result<&mut EntityRecord, EntityIndexError> {
+    pub(crate) fn get_record_mut(&mut self, entity: Id) -> Result<&mut EntityRecord, IndexError> {
         match self.pages.get_mut(page_index(entity)) {
             Some(page) if page.is_active => {
                 let record = &mut page.records[page_offset(entity)];
 
                 if record.dense == 0 {
-                    return Err(EntityIndexError::NonExistent(entity));
+                    return Err(IndexError::NonExistent(entity));
                 }
 
                 if record.dense >= self.alive_count || self.entities[record.dense] != entity {
-                    return Err(EntityIndexError::NotAlive(entity));
+                    return Err(IndexError::NotAlive(entity));
                 }
 
                 Ok(record)
             }
-            _ => Err(EntityIndexError::NonExistent(entity)),
+            _ => Err(IndexError::NonExistent(entity)),
         }
     }
 
     /// Checks if the [Entity] is alive
-    pub fn is_alive(&self, entity: Entity) -> bool {
+    pub fn is_alive(&self, entity: Id) -> bool {
         match self.pages.get(page_index(entity)) {
             Some(page) if page.is_active => {
                 let dense = page.records[page_offset(entity)].dense;
-                dense != 0 && dense < self.alive_count && self.entities[dense] == entity
+                dense < self.alive_count && self.entities[dense] == entity
             }
             _ => false,
         }
     }
 
     /// Check if entity id was ever created (whether alive or dead).
-    pub fn exists(&self, entity: Entity) -> bool {
+    pub fn exists(&self, entity: Id) -> bool {
         match self.pages.get(page_index(entity)) {
             Some(page) if page.is_active => page.records[page_offset(entity)].dense != 0,
             _ => false,
         }
     }
 
-    pub(crate) fn remove_id(&mut self, entity: Entity) {
+    /// Get the current version of the entity id
+    /// Returns [Entity::NULL] if the id is not valid.
+    pub fn get_current(&self, entity: Id) -> Id {
+        match self.pages.get(page_index(entity)) {
+            Some(page) if page.is_active => {
+                let dense = page.records[page_offset(entity)].dense;
+
+                if dense < self.alive_count {
+                    self.entities[dense]
+                } else {
+                    Id::NULL
+                }
+            }
+            _ => Id::NULL,
+        }
+    }
+
+    pub(crate) fn remove_id(&mut self, entity: Id) {
         let page = match self.pages.get_mut(page_index(entity)) {
             Some(page) if page.is_active => page,
             _ => return,
@@ -194,7 +212,7 @@ impl EntityIndex {
         );
     }
 
-    pub(crate) fn new_id(&mut self) -> Entity {
+    pub(crate) fn new_id(&mut self) -> Id {
         if self.alive_count < self.entities.len() {
             // Recycle id.
             let entity = self.entities[self.alive_count];
@@ -204,7 +222,7 @@ impl EntityIndex {
 
         // Create new id.
         self.max_id += 1;
-        let new_entity = Entity::from_raw(self.max_id);
+        let new_entity = Id::from_raw(self.max_id);
 
         // Ensure we haven't exceeded allowed number of entities
         assert!(
@@ -215,8 +233,8 @@ impl EntityIndex {
         // Ensure id hasn't been issued before.
         debug_assert!(
             !self.exists(new_entity),
-            "new entity id:({}) already in use (likely due to overlapping ranges)",
-            new_entity.id()
+            "new id:({}) already in use (likely due to overlapping ranges)",
+            new_entity.index()
         );
 
         self.entities.push(new_entity);

@@ -1,21 +1,22 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use xecs::component::ComponentDesc;
-use xecs::storage::StorageType;
-use xecs::world::World;
+use xecs::{component::ComponentDesc, storage::StorageType, world::World};
 
 struct Position(i32);
 
-fn bench_type_map(c: &mut Criterion) {
+fn bench_sparse_set(c: &mut Criterion) {
     let mut world = World::new();
-    world.register::<Position>(ComponentDesc::new().storage(StorageType::Tables));
+    let time = world.register::<f32>(ComponentDesc::new().storage(StorageType::Sparse));
+    let pos = world.register::<Position>(ComponentDesc::new().storage(StorageType::Sparse));
+    let bob = world.new_id();
 
-    let bob = world.new_entity();
-    world.set_t(bob, Position(45)).unwrap();
+    world.set(bob, Position(69)).unwrap();
 
-    c.bench_function("test component get", |b| {
-        b.iter(|| assert!(world.get_t::<Position>(bob).is_ok()));
+    c.bench_function("test sparse", |b| {
+        b.iter(|| {
+            assert!(world.get::<Position>(bob).is_ok());
+        })
     });
 }
 
-criterion_group!(benches, bench_type_map);
+criterion_group!(benches, bench_sparse_set);
 criterion_main!(benches);

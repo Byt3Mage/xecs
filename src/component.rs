@@ -1,47 +1,48 @@
 use crate::{
-    entity::Entity,
     flags::ComponentFlags,
+    id::Id,
     storage::{
         Storage, StorageType,
-        sparse_storage::{ComponentSparseSet, TagSparseSet},
+        sparse_set::{SparseData, SparseTag},
     },
     types::type_info::{TypeHooksBuilder, TypeInfo, TypeName},
+    world::World,
 };
 use std::{collections::HashMap, rc::Rc};
 
 pub trait Component: 'static {}
+// TODO: check if I want blanket implementation.
 impl<T: 'static> Component for T {}
 
-/// Component location info within an [table](crate::storage::table::table).
+/// Component location in a [Table](crate::storage::table::Table).
 pub(crate) struct TableRecord {
-    /// First index of id within the table's [Type](crate::type_info::Type).
-    pub id_index: usize,
+    /// First index of id in the table's [IdList](crate::types::IdList).
+    pub(crate) id_idx: usize,
     /// [Column](crate::storage::Column) index where the id appears.
-    /// Defaults to -1 if the id is a tag.
-    pub column_index: isize,
+    /// Defaults to `None` if the id is a tag.
+    pub(crate) col_idx: Option<usize>,
 }
 
-pub struct ComponentRecord {
-    pub(crate) id: Entity,
+pub(crate) struct ComponentInfo {
+    pub(crate) id: Id,
     pub(crate) flags: ComponentFlags,
     pub(crate) type_info: Option<Rc<TypeInfo>>,
     pub(crate) storage: Storage,
 }
 
-pub struct UntypedComponentDesc {
+pub struct TagDesc {
+    // TODO: component name
     name: Option<TypeName>,
-    type_info: Option<TypeInfo>,
     flags: ComponentFlags,
     storage_type: StorageType,
 }
 
-impl UntypedComponentDesc {
+impl TagDesc {
     pub fn new() -> Self {
         Self {
             name: None,
-            type_info: None,
             flags: ComponentFlags::empty(),
-            storage_type: StorageType::Tables,
+            storage_type: StorageType::default(),
         }
     }
 
@@ -52,11 +53,6 @@ impl UntypedComponentDesc {
 
     pub fn storage(mut self, storage: StorageType) -> Self {
         self.storage_type = storage;
-        self
-    }
-
-    pub fn with_type<C: Component>(mut self, type_hooks: TypeHooksBuilder<C>) -> Self {
-        self.type_info = Some(TypeInfo::new(type_hooks));
         self
     }
 
@@ -75,63 +71,49 @@ impl UntypedComponentDesc {
         self
     }
 
-    pub(crate) fn build(self, id: Entity) -> ComponentRecord {
-        let (type_info, storage) = match self.type_info {
-            Some(type_info) => {
-                let type_info = Rc::new(type_info);
-                let storage = match self.storage_type {
-                    StorageType::Tables => Storage::Tables(HashMap::new()),
-                    StorageType::SparseSet => {
-                        Storage::SparseData(ComponentSparseSet::new(id, Rc::clone(&type_info)))
-                    }
-                    StorageType::PagedSparseSet(_) => todo!(),
-                };
+    pub(crate) fn build(mut self, world: &mut World, id: Id) {
+        debug_assert!(id.is_entity(), "attempted to build pair as entity");
 
-                (Some(type_info), storage)
-            }
-            None => {
-                let storage = match self.storage_type {
-                    StorageType::Tables => Storage::Tables(HashMap::new()),
-                    StorageType::SparseSet => Storage::SparseTag(TagSparseSet::new()),
-                    StorageType::PagedSparseSet(_) => todo!(),
-                };
+        self.flags.remove(ComponentFlags::IS_TAG);
 
-                (None, storage)
-            }
+        let storage = match self.storage_type {
+            StorageType::Tables => Storage::Tables(HashMap::new()),
+            StorageType::Sparse => Storage::SparseTag(SparseTag::new()),
         };
 
-        ComponentRecord {
+        world.components.insert(
             id,
-            flags: self.flags,
-            type_info,
-            storage,
-        }
+            ComponentInfo {
+                id,
+                flags: self.flags,
+                type_info: None,
+                storage,
+            },
+        );
     }
 }
 
 pub struct ComponentDesc<C> {
+    // TODO: component name
     name: Option<TypeName>,
-    hooks: Option<TypeHooksBuilder<C>>,
+    hooks: TypeHooksBuilder<C>,
     flags: ComponentFlags,
     storage_type: StorageType,
 }
 
 impl<C: Component> ComponentDesc<C> {
     pub fn new() -> Self {
-        let hooks = const {
-            if size_of::<C>() != 0 {
-                Some(TypeHooksBuilder::new())
-            } else {
-                None
-            }
-        };
-
         Self {
             name: None,
-            hooks,
+            hooks: TypeHooksBuilder::new(),
             flags: ComponentFlags::empty(),
             storage_type: StorageType::Tables,
         }
+    }
+
+    pub fn name(mut self, name: impl Into<TypeName>) -> Self {
+        self.name = Some(name.into());
+        self
     }
 
     #[inline]
@@ -160,58 +142,121 @@ impl<C: Component> ComponentDesc<C> {
 
     #[inline]
     pub fn default(mut self, f: fn() -> C) -> Self {
-        self.hooks = self.hooks.map(|b| b.with_default(f));
+        self.hooks = self.hooks.with_default(f);
         self
     }
 
     #[inline]
     pub fn clone(mut self, f: fn(&C) -> C) -> Self {
-        self.hooks = self.hooks.map(|b| b.with_clone(f));
+        self.hooks = self.hooks.with_clone(f);
         self
     }
 
     #[inline]
-    pub fn on_set(mut self, f: impl FnMut(Entity, &mut C) + 'static) -> Self {
-        self.hooks = self.hooks.map(|b| b.on_set(f));
+    pub fn on_set(mut self, f: impl FnMut(Id, &mut C) + 'static) -> Self {
+        self.hooks = self.hooks.on_set(f);
         self
     }
 
     #[inline]
-    pub fn on_remove(mut self, f: impl FnMut(Entity, &mut C) + 'static) -> Self {
-        self.hooks = self.hooks.map(|b| b.on_remove(f));
+    pub fn on_remove(mut self, f: impl FnMut(Id, &mut C) + 'static) -> Self {
+        self.hooks = self.hooks.on_remove(f);
         self
     }
 
-    pub(crate) fn build(self, id: Entity) -> ComponentRecord {
-        let (type_info, storage) = match self.hooks {
-            Some(hooks) => {
-                let type_info = Rc::new(TypeInfo::new(hooks));
+    pub(crate) fn build(mut self, world: &mut World, id: Id) {
+        debug_assert!(id.is_entity(), "attempted to build pair as entity");
+
+        let (type_info, storage) = match TypeInfo::of::<C>(self.hooks).map(Rc::new) {
+            Some(ti) => {
                 let storage = match self.storage_type {
                     StorageType::Tables => Storage::Tables(HashMap::new()),
-                    StorageType::SparseSet => {
-                        Storage::SparseData(ComponentSparseSet::new(id, Rc::clone(&type_info)))
-                    }
-                    StorageType::PagedSparseSet(_) => todo!(),
+                    StorageType::Sparse => Storage::SparseData(SparseData::new(id, Rc::clone(&ti))),
                 };
-
-                (Some(type_info), storage)
+                (Some(ti), storage)
             }
             None => {
                 let storage = match self.storage_type {
                     StorageType::Tables => Storage::Tables(HashMap::new()),
-                    StorageType::SparseSet => Storage::SparseTag(TagSparseSet::new()),
-                    StorageType::PagedSparseSet(_) => todo!(),
+                    StorageType::Sparse => Storage::SparseTag(SparseTag::new()),
                 };
-
                 (None, storage)
             }
         };
 
-        ComponentRecord {
+        self.flags.remove(ComponentFlags::IS_TAG);
+
+        world.components.insert(
             id,
-            flags: self.flags,
-            type_info,
-            storage,
+            ComponentInfo {
+                id,
+                flags: self.flags,
+                type_info,
+                storage,
+            },
+        );
+    }
+}
+
+/// Ensures that a component exists for this id.
+///
+/// This function creates the component as a tag if it didn't exist.
+pub(crate) fn ensure_component(world: &mut World, id: Id) {
+    if !world.components.contains(id) {
+        if id.is_pair() {
+            build_pair(world, id);
+        } else {
+            // We build component as tag since we don't have type info.
+            TagDesc::new().build(world, id);
         }
     }
+}
+
+pub(crate) fn build_pair(world: &mut World, id: Id) {
+    debug_assert!(id.is_pair(), "attemped to build entity as pair");
+
+    let rel = world.id_index.get_current(id.pair_rel());
+    let tgt = world.id_index.get_current(id.pair_tgt());
+
+    assert!(!rel.is_null() && !tgt.is_null());
+
+    ensure_component(world, rel);
+
+    let ci_r = world.components.get(rel).unwrap();
+    let flags = ci_r.flags;
+    let storage_type = ci_r.storage.get_type();
+
+    // TODO: pair storages.
+
+    let type_info = {
+        match &ci_r.type_info {
+            Some(ti) => Some(Rc::clone(ti)),
+            None => {
+                ensure_component(world, tgt);
+                let cr_t = world.components.get(tgt).unwrap();
+                match &cr_t.type_info {
+                    Some(ti) => Some(Rc::clone(ti)),
+                    None => None,
+                }
+            }
+        }
+    };
+
+    let storage = match storage_type {
+        StorageType::Tables => Storage::Tables(HashMap::new()),
+        StorageType::Sparse => match &type_info {
+            Some(ti) => Storage::SparseData(SparseData::new(id, Rc::clone(ti))),
+            None => Storage::SparseTag(SparseTag::new()),
+        },
+    };
+
+    world.components.insert(
+        id,
+        ComponentInfo {
+            id,
+            flags,
+            type_info,
+            storage,
+        },
+    );
 }
