@@ -1,4 +1,4 @@
-use crate::{storage::table::Table, types::IdList};
+use crate::{id::IdList, storage::table::Table};
 use std::{
     collections::HashMap,
     fmt::Display,
@@ -14,6 +14,12 @@ pub(crate) struct TableId(u32);
 impl Display for TableId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "TableId({})", self.0)
+    }
+}
+
+impl Default for TableId {
+    fn default() -> Self {
+        Self::NULL
     }
 }
 
@@ -66,6 +72,7 @@ impl TableIndex {
             None
         } else {
             let ptr = self.tables.as_mut_ptr();
+            // SAFETY: a and b are valid and not equal.
             Some(unsafe { (&mut *(ptr.add(a)), &mut *(ptr.add(b))) })
         }
     }

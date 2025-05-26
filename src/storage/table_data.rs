@@ -1,5 +1,6 @@
 use super::column::Column;
 use crate::{
+    component::Component,
     id::Id,
     pointer::{Ptr, PtrMut},
 };
@@ -23,13 +24,6 @@ impl TableData {
         self.entities.len()
     }
 
-    fn reserve(&mut self, additional: usize) {
-        self.entities.reserve(additional);
-        self.columns
-            .iter_mut()
-            .for_each(|col| col.reserve(additional));
-    }
-
     /// Creates a new row without initializing its elements.
     /// This function will grow all columns if necessary.
     ///
@@ -37,10 +31,16 @@ impl TableData {
     /// - The rows for the new entity in all columns will be uninitialized (hence, unsafe).
     /// - The caller must ensure to write to all the columns in the new row.
     pub(crate) unsafe fn new_row(&mut self, entity: Id) -> usize {
-        self.reserve(1);
         let row = self.entities.len();
+        self.entities.reserve(1);
         self.entities.push(entity);
         row
+    }
+
+    // TODO: docs
+    pub(crate) unsafe fn push<C: Component>(&mut self, col: usize, val: C) {
+        debug_assert!(col < self.columns.len(), "column out of bounds");
+        unsafe { self.columns.get_unchecked_mut(col).push(val) }
     }
 
     /// Returns a reference to the element at `row`, in `column`.
@@ -48,11 +48,11 @@ impl TableData {
     /// This function does not perform bounds checking.
     ///
     /// # Safety
-    /// - The caller ensures that `row` and `column` are valid.
-    pub(crate) unsafe fn get_ptr(&self, column: usize, row: usize) -> Ptr {
-        debug_assert!(column < self.columns.len(), "column out of bounds");
+    /// - Caller ensures that `row` and `column` are valid.
+    pub(crate) unsafe fn get_ptr(&self, col: usize, row: usize) -> Ptr {
+        debug_assert!(col < self.columns.len(), "column out of bounds");
         // SAFETY: The caller ensures that `row` and `column` in bounds.
-        unsafe { self.columns.get_unchecked(column).get_ptr(row) }
+        unsafe { self.columns.get_unchecked(col).get_ptr(row) }
     }
 
     /// Returns a mutable reference to the element at `row`, in `column`.
@@ -61,10 +61,10 @@ impl TableData {
     ///
     /// # Safety
     /// - The caller ensures that `row` and `column` are valid.
-    pub(crate) unsafe fn get_ptr_mut(&mut self, column: usize, row: usize) -> PtrMut {
-        debug_assert!(column < self.columns.len(), "column out of bounds");
+    pub(crate) unsafe fn get_ptr_mut(&mut self, col: usize, row: usize) -> PtrMut {
+        debug_assert!(col < self.columns.len(), "TableData: column out of bounds");
         // SAFETY: The caller ensures that `row` and `column` in bounds.
-        unsafe { self.columns.get_unchecked_mut(column).get_ptr_mut(row) }
+        unsafe { self.columns.get_unchecked_mut(col).get_ptr_mut(row) }
     }
 
     /// Returns the entity at the specified `row`.

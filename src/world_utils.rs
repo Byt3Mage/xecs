@@ -1,20 +1,18 @@
 use crate::{
-    component::ensure_component,
+    component::{Component, ensure_component},
     error::{EcsError, EcsResult},
     graph::table_traverse_add,
     id::Id,
-    pointer::{Ptr, PtrMut},
-    storage::{Storage, table::move_entity},
+    storage::{Storage, table::move_id},
     world::World,
 };
-use const_assert::const_assert;
 
 /// Add the id as tag to the entity
 ///
 /// # Safety
 /// Caller ensures that id does not have associated data.
-pub(crate) fn add_tag(world: &mut World, entity: Id, id: Id) -> EcsResult<()> {
-    let r = world.id_index.get_record(entity)?;
+pub(crate) fn add_tag(world: &mut World, id: Id, tag: Id) -> EcsResult<()> {
+    let r = world.id_index.get_record(id)?;
 
     // We cache the table and row here so if get record fails,
     // we don't create a component for id
@@ -24,97 +22,135 @@ pub(crate) fn add_tag(world: &mut World, entity: Id, id: Id) -> EcsResult<()> {
     // Create ComponentRecord for tag if it doesn't exist.
     // Unlike components, tags can be registered on the fly,
     // allowing us to add regular entities as tags without first registering them.
-    ensure_component(world, id);
+    ensure_component(world, tag);
 
-    let ci = world.components.get_mut(id).unwrap();
+    let ci = world.components.get_mut(tag).unwrap();
 
     // SAFETY: we just checked that the id is a tag.
     match &mut ci.storage {
         Storage::SparseTag(set) => Ok(set.insert(id)),
-        Storage::SparseData(_) => Err(EcsError::IsNotTag(id)),
+        Storage::SparseData(_) => Err(EcsError::IsNotTag(tag)),
         Storage::Tables(_) => {
-            if let Some(dst_table) = table_traverse_add(world, src_table, id) {
+            if let Some(dst_table) = table_traverse_add(world, src_table, tag) {
                 // SAFETY
                 // - We ensured that dst_table is not the same as src.
-                // - entity is valid, which means that src_row must be valid.
-                unsafe { move_entity(world, entity, src_table, src_row, dst_table) };
+                // - id is valid, which means that src_row must be valid.
+                unsafe { move_id(world, id, src_table, src_row, dst_table) };
             }
 
             // Does nothing if there's no destination table.
-            // This means that the entity already contains the tag.
+            // This means that the id already contains the tag.
             Ok(())
         }
     }
 }
 
-/// Sets the value of a component for an entity.
-pub(crate) fn set_component<C>(
+/// Sets the value of a component for an id.
+///
+/// # Safety
+/// - Caller must ensure that `val` is the same type and layout of the component.
+pub(crate) unsafe fn set_component<C: Component>(
     world: &mut World,
-    entity: Id,
     id: Id,
+    comp: Id,
     val: C,
-) -> EcsResult<Option<C>> {
-    const_assert!(
-        |C| size_of::<C>() != 0,
-        "can't use set for tag, did you want to add?"
-    );
-
-    let r = world.id_index.get_record(entity)?;
-    let ci = match world.components.get_mut(id) {
-        Some(ci) => ci,
-        None => return Err(EcsError::IdNotComponent(id)),
-    };
-
-    // SAFETY: Valid entity must have valid table and row.
-    match &mut ci.storage {
-        Storage::SparseTag(_) => Err(EcsError::IsTag(id)),
-        Storage::SparseData(set) => Ok(unsafe { set.insert(entity, val) }),
-        Storage::Tables(_) => todo!(),
-    }
-}
-
-pub(crate) fn get_component(world: &World, entity: Id, id: Id) -> EcsResult<Ptr> {
-    let r = world.id_index.get_record(entity)?;
-    let ci = match world.components.get(id) {
-        Some(ci) => ci,
-        None => return Err(EcsError::IdNotComponent(id)),
-    };
-
-    // SAFETY: Valid entity must have valid table and row.
-    match &ci.storage {
-        Storage::SparseTag(_) => Err(EcsError::IsTag(id)),
-        Storage::SparseData(set) => set.get_ptr(entity),
-        Storage::Tables(_) => unsafe { world.table_index[r.table].get_ptr(r.row, id) },
-    }
-}
-
-pub(crate) fn get_component_mut(world: &mut World, entity: Id, id: Id) -> EcsResult<PtrMut> {
-    let r = world.id_index.get_record(entity)?;
-    let ci = match world.components.get_mut(id) {
-        Some(ci) => ci,
-        None => return Err(EcsError::IdNotComponent(id)),
-    };
-
-    // SAFETY: Valid entity must have valid table and row.
-    match &mut ci.storage {
-        Storage::SparseTag(_) => return Err(EcsError::IsTag(id)),
-        Storage::SparseData(set) => set.get_ptr_mut(entity),
-        Storage::Tables(_) => unsafe { world.table_index[r.table].get_ptr_mut(r.row, id) },
-    }
-}
-
-pub(crate) fn has_component(world: &World, entity: Id, id: Id) -> EcsResult<bool> {
-    let r = world.id_index.get_record(entity)?;
-    let cr = match world.components.get(id) {
-        Some(cr) => cr,
-        None => return Err(EcsError::IdNotComponent(id)),
-    };
+) -> Option<C> {
+    let (table_id, row) = world.id_index.get_location(id).unwrap();
+    let ci = world.components.get_mut(comp)?;
 
     // SAFETY:
-    // Valid entity must have valid table and row.
+    // - Valid entity must have valid table and row.
+    // - Caller ensures that the type matches the component.
+    match &mut ci.storage {
+        Storage::SparseTag(_) => None,
+        Storage::SparseData(set) => unsafe { set.insert(id, val) },
+        Storage::Tables(_) => unsafe {
+            let table = &mut world.table_index[table_id];
+
+            match table.component_map.get(comp) {
+                Some(&col) => Some(table.data.get_ptr_mut(row, col).replace(val)),
+                None => {
+                    let dst_table_id = table_traverse_add(world, table_id, comp).unwrap();
+
+                    move_id(world, id, table_id, row, dst_table_id);
+
+                    let table = &mut world.table_index[dst_table_id];
+                    let col = *table.component_map.get(comp).unwrap();
+
+                    table.data.push(col, val);
+                    table.validate_data();
+
+                    None
+                }
+            }
+        },
+    }
+}
+
+/// Sets the value of a component for an entity.
+pub(crate) fn set_component_checked<C: Component>(
+    world: &mut World,
+    id: Id,
+    comp: Id,
+    val: C,
+) -> Option<C> {
+    let (table_id, row) = world.id_index.get_location(id).unwrap();
+
+    ensure_component(world, comp);
+
+    let ci = world.components.get_mut(comp)?;
+
+    // Check that type matches.
+    if let Some(ti) = &ci.type_info {
+        if !ti.is::<C>() {
+            return None;
+        }
+    }
+
+    // SAFETY:
+    // - Valid entity must have valid table and row.
+    // - Caller ensures that the type matches the component.
+    match &mut ci.storage {
+        Storage::SparseTag(_) => None,
+        Storage::SparseData(set) => unsafe { set.insert(id, val) },
+        Storage::Tables(_) => unsafe {
+            let table = &mut world.table_index[table_id];
+
+            match table.component_map.get(comp) {
+                Some(&col) => Some(table.data.get_ptr_mut(row, col).replace(val)),
+                None => {
+                    let dst_table_id = table_traverse_add(world, table_id, comp).unwrap();
+
+                    move_id(world, id, table_id, row, dst_table_id);
+
+                    let table = &mut world.table_index[dst_table_id];
+                    let col = *table.component_map.get(comp).unwrap();
+
+                    table.data.push(col, val);
+                    table.validate_data();
+
+                    None
+                }
+            }
+        },
+    }
+}
+
+pub(crate) fn has_component(world: &World, id: Id, comp: Id) -> bool {
+    let (table, _) = match world.id_index.get_location(id) {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
+
+    let cr = match world.components.get(comp) {
+        Some(cr) => cr,
+        None => return false,
+    };
+
+    // SAFETY: Valid id must have valid table and row.
     match &cr.storage {
-        Storage::SparseTag(_) => return Err(EcsError::IsTag(id)),
-        Storage::SparseData(set) => Ok(set.contains(entity)),
-        Storage::Tables(tables) => Ok(tables.contains_key(&r.table)),
+        Storage::SparseTag(set) => set.contains(id),
+        Storage::SparseData(set) => set.contains(id),
+        Storage::Tables(tables) => tables.contains_key(&table),
     }
 }

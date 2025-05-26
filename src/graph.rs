@@ -1,15 +1,14 @@
-use std::rc::Rc;
-
 use crate::{
     component::TableRecord,
     flags::TableFlags,
-    id::{Id, IdMap},
+    id::{Id, IdList, IdMap},
     storage::{Storage, column::Column, table::Table, table_data::TableData},
     table_index::TableId,
-    types::IdList,
     world::World,
 };
+use std::rc::Rc;
 
+#[derive(Default)]
 pub(crate) struct GraphEdge {
     from: TableId,
     to: TableId,
@@ -65,15 +64,13 @@ fn new_table(world: &mut World, ids: IdList) -> TableId {
     })
 }
 
-/// Traverse the table graph to find the destination table for a component.
+/// Traverse the table graph to find the destination table for an added component.
 ///
 /// Returns `None` if the component is already present.
 pub fn table_traverse_add(world: &mut World, from_id: TableId, with: Id) -> Option<TableId> {
     let from = &world.table_index[from_id];
 
     if let Some(edge) = from.node.add.get(with) {
-        debug_assert_eq!(edge.from, from.id);
-        debug_assert_ne!(edge.to, from.id);
         return Some(edge.to);
     }
 

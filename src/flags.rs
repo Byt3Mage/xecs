@@ -150,16 +150,16 @@ impl TableFlags {
 impl_bitflags!(TableFlags);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EntityFlags(u64);
+pub struct IdFlags(u64);
 
-impl EntityFlags {
-    pub const IS_ID: Self = Self(1 << 0);
+impl IdFlags {
+    pub const IS_COMPONENT: Self = Self(1 << 0);
     pub const IS_TARGET: Self = Self(1 << 1);
     pub const IS_TRAVERSABLE: Self = Self(1 << 2);
     pub const HAS_SPARSE: Self = Self(1 << 3);
 }
 
-impl_bitflags!(EntityFlags);
+impl_bitflags!(IdFlags);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ComponentFlags(u64);

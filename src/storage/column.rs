@@ -1,7 +1,8 @@
 use crate::{
+    component::Component,
     id::Id,
     pointer::{Ptr, PtrMut},
-    types::type_info::TypeInfo,
+    type_info::TypeInfo,
 };
 use std::{
     alloc::Layout,
@@ -13,7 +14,6 @@ use std::{
 ///
 /// This data structure is meant to be managed by other structs.
 pub(crate) struct Column {
-    /// Component id that owns this column.
     id: Id,
     type_info: Rc<TypeInfo>,
     data: NonNull<u8>,
@@ -80,34 +80,18 @@ impl Column {
         self.cap = new_cap;
     }
 
-    pub(super) unsafe fn push_unchecked<C>(&mut self, val: C) {
+    pub(super) unsafe fn push<C: Component>(&mut self, val: C) {
         self.reserve(1);
 
         unsafe {
             self.data
+                .as_ptr()
                 .add(self.len * self.type_info.size())
                 .cast::<C>()
-                .write(val)
-        };
+                .write(val);
+        }
 
         self.len += 1;
-    }
-
-    /// Replaces the value at `row` in this column.
-    ///
-    /// # Safety
-    /// - Assumes `row` is already allocated and initialized
-    /// - Caller ensures that the column holds items of type `C`
-    pub(super) unsafe fn set_unchecked<C>(&mut self, row: usize, val: C) -> C {
-        // SAFETY:
-        // data is non-null
-        // caller guarantees row is valid.
-        unsafe {
-            self.data
-                .add(row * self.type_info.size())
-                .cast::<C>()
-                .replace(val)
-        }
     }
 
     /// # Safety
@@ -134,27 +118,26 @@ impl Column {
 
     /// Removes this row by swapping with the last row and dropping its value.
     ///
-    /// # Safety
-    /// `row` must be in bounds for this column
-    pub(super) unsafe fn swap_remove_drop(&mut self, row: usize) {
-        debug_assert!(row < self.len, "Column: row out of bounds");
+    /// # Panics
+    /// Panics if `row` is out of bounds.
+    pub(super) fn swap_remove_drop(&mut self, row: usize) {
+        assert!(row < self.len, "Column: row out of bounds");
 
         let size = self.type_info.size();
         let last_row = self.len - 1;
 
         unsafe {
             let base = self.data.as_ptr();
-            let row_ptr = base.add(row * size);
-            let lst_ptr = base.add(last_row * size);
+            let last_ptr = base.add(last_row * size);
 
             if row != last_row {
-                std::ptr::swap_nonoverlapping(row_ptr, lst_ptr, size);
+                std::ptr::swap_nonoverlapping(base.add(row * size), last_ptr, size);
             }
 
             self.len = last_row;
 
             if let Some(drop_fn) = self.type_info.drop_fn {
-                drop_fn(lst_ptr)
+                drop_fn(last_ptr)
             }
         }
     }
@@ -170,51 +153,26 @@ impl Column {
         let size = self.type_info.size();
         let last_row = self.len - 1;
 
-        unsafe {
-            let base = self.data.as_ptr();
-            let row_ptr = base.add(row * size);
-            let lst_ptr = base.add(last_row * size);
+        if row != last_row {
+            unsafe {
+                let base = self.data.as_ptr();
+                let row_ptr = base.add(row * size);
+                let lst_ptr = base.add(last_row * size);
 
-            if row != last_row {
                 std::ptr::swap_nonoverlapping(row_ptr, lst_ptr, size);
             }
-
-            self.len = last_row;
         }
+
+        self.len = last_row;
     }
 
-    /// Removes this row by swapping with the last row. DOES NOT DROP the removed row.
-    ///
-    /// # Safety
-    /// - `row` must be in bounds for this column
-    /// - Caller must `C` matches the item type of this column.
-    pub(super) unsafe fn swap_remove_typed<C>(&mut self, row: usize) -> C {
-        debug_assert!(row < self.len, "Column: row out of bounds");
-
-        let size = self.type_info.size();
-        let last_row = self.len - 1;
-
-        unsafe {
-            let base = self.data.as_ptr();
-            let row_ptr = base.add(row * size);
-            let lst_ptr = base.add(last_row * size);
-
-            if row != last_row {
-                std::ptr::swap_nonoverlapping(row_ptr, lst_ptr, size);
-            }
-
-            self.len = last_row;
-            lst_ptr.cast::<C>().read()
-        }
-    }
-
-    /// Moves the data from `src_row` to `dst_row` in the destination column.
+    /// Moves the data from `src_row` and appends to dest [Column].
     /// The data is copied, so callers must ensure not to read from row again.
     ///
     /// # Safety
-    /// Caller must ensure that `src_row` and `dst_row` are valid in their respective columns.
-    /// Caller must ensure that `self`, and `dst` hold the same item type.
-    pub(super) unsafe fn move_row_to(&mut self, src_row: usize, dst: &mut Self, dst_row: usize) {
+    /// Caller must ensure that `src_row` is valid in self.
+    /// Caller must ensure that `self`, and `dest` hold the same item type.
+    pub(super) unsafe fn move_row_to(&mut self, src_row: usize, dest: &mut Self) {
         let size = self.type_info.size();
 
         // SAFETY:
@@ -223,9 +181,13 @@ impl Column {
         // both columns hold the same item type
         // src_row is never read from again unless overwritten.
         unsafe {
+            dest.reserve(1);
+
             let src_data = self.as_mut_ptr().add(src_row * size);
-            let dst_data = dst.as_mut_ptr().add(dst_row * size);
+            let dst_data = dest.as_mut_ptr().add(dest.len * size);
             ptr::copy_nonoverlapping(src_data, dst_data, size);
+
+            dest.len += 1;
         }
     }
 }

@@ -4,8 +4,9 @@ pub mod error;
 pub mod flags;
 pub mod id;
 pub mod macros;
+pub mod query;
 pub mod storage;
-pub mod types;
+pub mod type_info;
 pub mod world;
 
 // Internal modules

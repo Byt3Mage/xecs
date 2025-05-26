@@ -1,17 +1,17 @@
 use crate::{
     component::{Component, ComponentDesc, ComponentInfo, TagDesc},
     error::{EcsResult, unregistered_type},
-    flags::TableFlags,
+    flags::{IdFlags, TableFlags},
     graph::GraphNode,
-    id::{Id, IdMap, id_index::IdIndex},
-    pointer::{Ptr, PtrMut},
-    storage::{
-        table::{Table, move_entity_to_root},
-        table_data::TableData,
+    id::{
+        Id, IdList, IdMap, ToComponentId,
+        id_index::{IdIndex, IdRecord},
     },
+    query::Params,
+    storage::{table::Table, table_data::TableData},
     table_index::{TableId, TableIndex},
-    types::{IdList, TypeMap},
-    world_utils::{add_tag, get_component, get_component_mut, has_component, set_component},
+    type_info::TypeMap,
+    world_utils::{add_tag, has_component, set_component, set_component_checked},
 };
 use const_assert::const_assert;
 use std::ops::{Deref, DerefMut};
@@ -173,85 +173,61 @@ impl World {
         id
     }
 
+    /// Creates a new [Id] for asso
     pub fn new_id(&mut self) -> Id {
-        let id = self.id_index.new_id();
-        move_entity_to_root(self, id);
-        id
+        let root = self.root_table;
+        self.id_index.new_id(|id| IdRecord {
+            table: root,
+            row: unsafe { self.table_index[root].data.new_row(id) },
+            flags: IdFlags::default(),
+        })
     }
 
     /// Add `id` as tag to entity. No side effect if entity already has tag.
     #[inline]
-    pub fn add_id(&mut self, entity: Id, id: impl Into<Id>) -> EcsResult<()> {
-        add_tag(self, entity, id.into())
+    pub fn add_id(&mut self, id: Id, comp: impl ToComponentId) {
+        add_tag(self, id, comp.get_id(self).unwrap()).unwrap()
     }
 
-    /// Add the type as tag to entity. No side effect if entity already has tag.
+    /// Add the type as tag to id. No side effect if id already has tag.
     #[inline]
-    pub fn add<C: Component>(&mut self, entity: Id) -> EcsResult<()> {
+    pub fn add<C: Component>(&mut self, id: Id) -> EcsResult<()> {
         const_assert!(|C| size_of::<C>() == 0, "can't use add for non-ZST");
 
         match self.type_map.get::<C>() {
-            Some(&id) => add_tag(self, entity, id),
+            Some(&comp) => add_tag(self, id, comp),
             None => return Err(unregistered_type::<C>()),
         }
     }
 
-    /// Checks if the entity has the component.
-    pub fn has_id(&self, entity: Id, id: impl Into<Id>) -> EcsResult<bool> {
-        has_component(self, entity, id.into())
+    /// Checks if the id has the component.
+    pub fn has_id(&self, id: Id, comp: impl ToComponentId) -> bool {
+        comp.get_id(self)
+            .map_or(false, |comp| has_component(self, id, comp))
     }
 
-    /// Checks if entity has the component.
-    pub fn has<C: Component>(&self, entity: Id) -> EcsResult<bool> {
-        match self.type_map.get::<C>() {
-            Some(&id) => has_component(self, entity, id),
-            None => return Err(unregistered_type::<C>()),
-        }
+    /// Checks if id has the component.
+    pub fn has<C: Component>(&self, id: Id) -> bool {
+        self.type_map
+            .get::<C>()
+            .map_or(false, |&comp| has_component(self, id, comp))
     }
 
+    /// # Safety
+    /// - Caller must ensure that the `val` is a pointee to the same data type as
     #[inline(always)]
-    pub fn set_id<C>(&mut self, entity: Id, id: impl Into<Id>, val: C) -> EcsResult<Option<C>> {
-        set_component(self, entity, id.into(), val)
+    pub unsafe fn set_id<C: Component>(
+        &mut self,
+        id: Id,
+        comp: impl ToComponentId,
+        val: C,
+    ) -> Option<C> {
+        set_component_checked(self, id, comp.get_id(self)?, val)
     }
 
-    #[inline(always)]
-    pub fn set<C: Component>(&mut self, entity: Id, val: C) -> EcsResult<Option<C>> {
-        match self.type_map.get::<C>() {
-            Some(&id) => set_component(self, entity, id, val),
-            None => return Err(unregistered_type::<C>()),
-        }
-    }
-
-    #[inline(always)]
-    pub fn get_id(&self, entity: Id, id: impl Into<Id>) -> EcsResult<Ptr> {
-        get_component(self, entity, id.into())
-    }
-
-    #[inline(always)]
-    pub fn get<C: Component>(&self, entity: Id) -> EcsResult<&C> {
-        const_assert!(|C| size_of::<C>() != 0, "can't use get for ZST");
-
-        match self.type_map.get::<C>() {
-            // SAFETY: Type matches component id
-            Some(&id) => get_component(self, entity, id).map(|ptr| unsafe { ptr.as_ref() }),
-            None => return Err(unregistered_type::<C>()),
-        }
-    }
-
-    #[inline(always)]
-    pub fn get_id_mut(&mut self, entity: Id, id: impl Into<Id>) -> EcsResult<PtrMut> {
-        get_component_mut(self, entity, id.into())
-    }
-
-    #[inline(always)]
-    pub fn get_mut<C: Component>(&mut self, entity: Id) -> EcsResult<&mut C> {
-        const_assert!(|C| size_of::<C>() != 0, "can't use get_mut for ZST");
-
-        match self.type_map.get::<C>() {
-            // SAFETY: Type matches component id
-            Some(&id) => get_component_mut(self, entity, id).map(|ptr| unsafe { ptr.as_mut() }),
-            None => return Err(unregistered_type::<C>()),
-        }
+    #[inline]
+    pub fn set<C: Component>(&mut self, id: Id, val: C) -> Option<C> {
+        unsafe { set_component(self, id, *self.type_map.get::<C>()?, val) }
     }
 
     #[inline(always)]
@@ -281,5 +257,24 @@ impl DerefMut for WorldRef<'_> {
 impl<'world> From<&'world mut World> for WorldRef<'world> {
     fn from(value: &'world mut World) -> Self {
         Self { world: value }
+    }
+}
+
+pub trait WorldGet<Ret> {
+    fn get<T: Params>(
+        &mut self,
+        id: Id,
+        callback: impl for<'a> FnOnce(T::ParamType<'a>) -> Ret,
+    ) -> EcsResult<Ret>;
+}
+
+impl<Ret> WorldGet<Ret> for World {
+    #[inline]
+    fn get<T: Params>(
+        &mut self,
+        id: Id,
+        f: impl for<'a> FnOnce(T::ParamType<'a>) -> Ret,
+    ) -> EcsResult<Ret> {
+        Ok(f(T::create(self, id)?))
     }
 }

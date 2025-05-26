@@ -618,4 +618,14 @@ dependencies = [
  "const-assert",
  "criterion",
  "thiserror",
+ "xecs_macros",
+]
+
+[[package]]
+name = "xecs_macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]

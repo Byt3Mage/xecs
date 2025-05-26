@@ -5,14 +5,12 @@ use crate::{
         Storage, StorageType,
         sparse_set::{SparseData, SparseTag},
     },
-    types::type_info::{TypeHooksBuilder, TypeInfo, TypeName},
+    type_info::{TypeHooksBuilder, TypeInfo, TypeName},
     world::World,
 };
 use std::{collections::HashMap, rc::Rc};
 
 pub trait Component: 'static {}
-// TODO: check if I want blanket implementation.
-impl<T: 'static> Component for T {}
 
 /// Component location in a [Table](crate::storage::table::Table).
 pub(crate) struct TableRecord {
@@ -72,7 +70,7 @@ impl TagDesc {
     }
 
     pub(crate) fn build(mut self, world: &mut World, id: Id) {
-        debug_assert!(id.is_entity(), "attempted to build pair as entity");
+        debug_assert!(id.is_id(), "attempted to build pair as entity");
 
         self.flags.remove(ComponentFlags::IS_TAG);
 
@@ -93,7 +91,7 @@ impl TagDesc {
     }
 }
 
-pub struct ComponentDesc<C> {
+pub struct ComponentDesc<C: Component> {
     // TODO: component name
     name: Option<TypeName>,
     hooks: TypeHooksBuilder<C>,
@@ -165,7 +163,7 @@ impl<C: Component> ComponentDesc<C> {
     }
 
     pub(crate) fn build(mut self, world: &mut World, id: Id) {
-        debug_assert!(id.is_entity(), "attempted to build pair as entity");
+        debug_assert!(id.is_id(), "attempted to build pair as entity");
 
         let (type_info, storage) = match TypeInfo::of::<C>(self.hooks).map(Rc::new) {
             Some(ti) => {
@@ -201,13 +199,13 @@ impl<C: Component> ComponentDesc<C> {
 /// Ensures that a component exists for this id.
 ///
 /// This function creates the component as a tag if it didn't exist.
-pub(crate) fn ensure_component(world: &mut World, id: Id) {
-    if !world.components.contains(id) {
-        if id.is_pair() {
-            build_pair(world, id);
+pub(crate) fn ensure_component(world: &mut World, comp: Id) {
+    if !world.components.contains(comp) {
+        if comp.is_pair() {
+            build_pair(world, comp);
         } else {
             // We build component as tag since we don't have type info.
-            TagDesc::new().build(world, id);
+            TagDesc::new().build(world, comp);
         }
     }
 }
@@ -215,10 +213,8 @@ pub(crate) fn ensure_component(world: &mut World, id: Id) {
 pub(crate) fn build_pair(world: &mut World, id: Id) {
     debug_assert!(id.is_pair(), "attemped to build entity as pair");
 
-    let rel = world.id_index.get_current(id.pair_rel());
-    let tgt = world.id_index.get_current(id.pair_tgt());
-
-    assert!(!rel.is_null() && !tgt.is_null());
+    let rel = world.id_index.get_current(id.pair_rel()).unwrap();
+    let tgt = world.id_index.get_current(id.pair_tgt()).unwrap();
 
     ensure_component(world, rel);
 

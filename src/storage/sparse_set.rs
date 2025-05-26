@@ -1,8 +1,8 @@
 use crate::{
-    error::{EcsResult, missing_component},
+    component::Component,
     id::Id,
     pointer::{Ptr, PtrMut},
-    types::type_info::TypeInfo,
+    type_info::TypeInfo,
 };
 use std::{rc::Rc, usize};
 
@@ -23,88 +23,82 @@ impl SparseData {
         }
     }
 
-    /// Resizes the sparse array such that
-    /// it can hold at least (`index` + 1) entries.
-    #[inline(always)]
-    fn ensure_index(&mut self, index: usize) -> usize {
-        if index >= self.sparse.len() {
-            self.sparse.resize(index + 1, usize::MAX);
-        }
-
-        self.sparse[index]
-    }
-
     /// Inserts a value into the set for the given entity.
     /// Replaces the data if the entity is already in the set.
     ///
     /// # Safety
-    /// `val` must match the type of the sparse set items.
-    pub unsafe fn insert<C>(&mut self, id: Id, val: C) -> Option<C> {
-        let sparse = id.as_usize();
-        let dense = self.ensure_index(sparse);
+    /// `val` must point to data that is the same type as the set items.
+    pub unsafe fn insert<C: Component>(&mut self, id: Id, val: C) -> Option<C> {
+        let sparse = id.to_sparse_index();
+
+        if sparse >= self.sparse.len() {
+            self.sparse.resize(sparse + 1, usize::MAX);
+        }
+
+        // SAFETY: we just resized self.sparse to accomodate sparse index.
+        let dense = *unsafe { self.sparse.get_unchecked(sparse) };
 
         // SAFETY: Caller ensures that val matches the type of column items.
-        if dense < self.dense.len() {
-            // SAFETY: We just checked that dense is in bounds
-            Some(unsafe { self.dense.set_unchecked(dense, val) })
-        } else {
-            self.sparse[sparse] = self.dense.len();
-            unsafe { self.dense.push_unchecked(val) };
-            self.ids.push(id);
-            None
+        unsafe {
+            if dense < self.dense.len() {
+                // SAFETY: We just checked that dense is in bounds
+                Some(self.dense.get_ptr_mut(dense).replace(val))
+            } else {
+                self.sparse[sparse] = self.dense.len();
+                self.dense.push(val);
+                self.ids.push(id);
+                None
+            }
         }
     }
 
     /// Removes an entity from the set.
-    /// Returns the value associated with the entity if it was present.
+    /// Returns the value associated with the id if it was present.
     ///
     /// # Safety
     /// Caller ensures that `C` matches the item type of the column.
-    pub fn remove<C>(&mut self, id: Id) -> Option<C> {
-        let dense = match self.sparse.get_mut(id.as_usize()) {
+    pub fn remove(&mut self, id: Id) {
+        let dense = match self.sparse.get_mut(id.to_sparse_index()) {
             Some(dense) if *dense < self.dense.len() => dense,
-            _ => return None, // entity not in set.
+            _ => return, // id not in set.
         };
 
         let dense = std::mem::replace(dense, usize::MAX);
-        // SAFETY: caller ensures that C matches the item type of the column.
+        self.dense.swap_remove_drop(dense);
         self.ids.swap_remove(dense);
-        let removed = unsafe { self.dense.swap_remove_typed(dense) };
 
         if dense != self.dense.len() {
-            self.sparse[self.ids[dense].as_usize()] = dense;
+            self.sparse[self.ids[dense].to_sparse_index()] = dense;
         }
-
-        Some(removed)
     }
 
     #[inline]
     pub fn contains(&self, id: Id) -> bool {
-        match self.sparse.get(id.as_usize()) {
+        match self.sparse.get(id.to_sparse_index()) {
             Some(&dense) => dense < self.dense.len(),
             None => false,
         }
     }
 
     #[inline]
-    pub fn get_ptr(&self, id: Id) -> EcsResult<Ptr> {
-        match self.sparse.get(id.as_usize()) {
+    pub fn get_ptr(&self, id: Id) -> Option<Ptr> {
+        match self.sparse.get(id.to_sparse_index()) {
             Some(&dense) if dense < self.dense.len() => {
                 // SAFETY: We just checked dense is in bounds.
-                Ok(unsafe { self.dense.get_ptr(dense) })
+                Some(unsafe { self.dense.get_ptr(dense) })
             }
-            _ => Err(missing_component(id, self.dense.id())),
+            _ => None,
         }
     }
 
     #[inline]
-    pub fn get_ptr_mut(&mut self, id: Id) -> EcsResult<PtrMut> {
-        match self.sparse.get(id.as_usize()) {
+    pub fn get_ptr_mut(&mut self, id: Id) -> Option<PtrMut> {
+        match self.sparse.get(id.to_sparse_index()) {
             Some(&dense) if dense < self.dense.len() => {
                 // SAFETY: We just checked dense is in bounds.
-                Ok(unsafe { self.dense.get_ptr_mut(dense) })
+                Some(unsafe { self.dense.get_ptr_mut(dense) })
             }
-            _ => Err(missing_component(id, self.dense.id())),
+            _ => None,
         }
     }
 }
@@ -134,7 +128,7 @@ impl SparseTag {
 
     /// Inserts a the id into the sparse set.
     pub fn insert(&mut self, id: Id) {
-        let sparse = id.as_usize();
+        let sparse = id.to_sparse_index();
         let dense = self.ensure_index(sparse);
 
         if dense > self.ids.len() {
@@ -149,7 +143,7 @@ impl SparseTag {
     /// # Safety
     /// Caller ensures that `C` matches the item type of the column.
     pub fn remove(&mut self, id: Id) {
-        let dense = match self.sparse.get_mut(id.as_usize()) {
+        let dense = match self.sparse.get_mut(id.to_sparse_index()) {
             Some(dense) if *dense < self.ids.len() => dense,
             _ => return, // entity not in set.
         };
@@ -158,13 +152,13 @@ impl SparseTag {
         let _ = self.ids.swap_remove(dense);
 
         if dense != self.ids.len() {
-            self.sparse[self.ids[dense].as_usize()] = dense;
+            self.sparse[self.ids[dense].to_sparse_index()] = dense;
         }
     }
 
     #[inline]
     pub fn contains(&self, id: Id) -> bool {
-        match self.sparse.get(id.as_usize()) {
+        match self.sparse.get(id.to_sparse_index()) {
             Some(&dense) => dense < self.ids.len(),
             None => false,
         }
@@ -183,15 +177,8 @@ impl SparseIndex for usize {
 }
 
 pub(crate) struct Entry<K: SparseIndex, V = K> {
-    key: K,
+    pub(crate) key: K,
     pub(crate) value: V,
-}
-
-impl<K: SparseIndex, V> Entry<K, V> {
-    #[inline]
-    pub fn key(&self) -> &K {
-        &self.key
-    }
 }
 
 pub struct SparseSet<K: SparseIndex + PartialEq, V> {
