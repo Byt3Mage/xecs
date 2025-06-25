@@ -2,11 +2,15 @@ use crate::{
     error::InvalidId, flags::IdFlags, id::Id, storage::sparse_set::SparseIndex,
     table_index::TableId,
 };
-use std::usize;
 
-pub(crate) struct IdRecord {
+#[derive(Clone, Copy)]
+pub struct IdLocation {
     pub(crate) table: TableId,
     pub(crate) row: usize,
+}
+
+pub(crate) struct IdRecord {
+    pub(crate) location: IdLocation,
     pub(crate) flags: IdFlags,
 }
 
@@ -35,7 +39,7 @@ impl IdIndex {
     /// Returns the `table` and `row` for the [Id].
     ///
     /// [Id] must exist and must be alive to have a record.
-    pub(crate) fn get_location(&self, id: Id) -> Result<(TableId, usize), InvalidId> {
+    pub(crate) fn get_location(&self, id: Id) -> Result<IdLocation, InvalidId> {
         match self.sparse.get(id.to_sparse_index()) {
             Some(&dense) if dense < self.alive_count => {
                 // SAFETY: we just checked that dense is in bounds,
@@ -46,9 +50,24 @@ impl IdIndex {
                     return Err(InvalidId(id));
                 }
 
-                Ok((entry.record.table, entry.record.row))
+                Ok(entry.record.location)
             }
             _ => Err(InvalidId(id)),
+        }
+    }
+
+    pub(crate) fn set_location(&mut self, id: Id, location: IdLocation) {
+        match self.sparse.get(id.to_sparse_index()) {
+            Some(&dense) if dense < self.alive_count => {
+                // SAFETY: we just checked that dense is in bounds,
+                // and we guarantee that alive_count is always <= entities.len().
+                let entry = unsafe { self.dense.get_unchecked_mut(dense) };
+
+                if entry.id == id {
+                    entry.record.location = location;
+                }
+            }
+            _ => {}
         }
     }
 

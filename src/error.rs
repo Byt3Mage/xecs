@@ -1,8 +1,6 @@
 use crate::id::Id;
-use std::fmt::Debug;
+use std::fmt::{Debug, Display};
 use thiserror::Error;
-
-type TypeName = &'static str;
 
 #[derive(Error, Debug)]
 pub enum EcsError {
@@ -17,11 +15,9 @@ pub enum EcsError {
     #[error("{0}")]
     MissingComponent(#[from] MissingComponent),
     #[error("Type {0} is not registered for this world, must register before use")]
-    UnregisteredType(TypeName),
+    UnregisteredType(#[from] UnregisteredTypeErr),
     #[error("Entity {0} is not registered as a component")]
     IdNotComponent(Id),
-    #[error("TypeMismatch: expected {exp}, got {got}")]
-    TypeMismatch { exp: TypeName, got: TypeName },
     #[error("User error: {0}")]
     Other(Box<dyn std::error::Error + Send + Sync + 'static>),
 }
@@ -43,9 +39,32 @@ pub enum InvalidPair {
 
 #[derive(Error, Debug)]
 #[error("Id {0} is does not have component {1}")]
-pub struct MissingComponent(Id, Id);
+pub struct MissingComponent(pub Id, pub Id);
 
-#[inline(always)]
-pub fn unregistered_type<T>() -> EcsError {
-    EcsError::UnregisteredType(std::any::type_name::<T>())
+#[derive(Error, Debug)]
+pub struct UnregisteredTypeErr(fn() -> &'static str);
+
+impl Display for UnregisteredTypeErr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Type: {} is not registered", (self.0)())
+    }
+}
+
+#[derive(Error, Debug)]
+pub enum GetError {
+    #[error("{0}")]
+    InvalidId(#[from] InvalidId),
+    #[error("Id: {0} is not a component")]
+    IdNotComponent(Id),
+    #[error("Id does not have component {0}")]
+    MissingComponent(Id),
+    #[error("Type {0} is not registered for this world, must register before use")]
+    UnregisteredType(#[from] UnregisteredTypeErr),
+}
+
+pub type GetResult<T> = Result<T, GetError>;
+
+/// Unregistered type error.
+pub(crate) const fn unreg_type_err<T>() -> UnregisteredTypeErr {
+    UnregisteredTypeErr(std::any::type_name::<T>)
 }

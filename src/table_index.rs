@@ -1,4 +1,5 @@
-use crate::{id::IdList, storage::table::Table};
+use crate::{id::Signature, storage::table::Table};
+use std::collections::hash_map::Values;
 use std::{
     collections::HashMap,
     fmt::Display,
@@ -25,15 +26,11 @@ impl Default for TableId {
 
 impl TableId {
     pub(crate) const NULL: Self = Self(u32::MAX);
-
-    pub(crate) const fn is_null(&self) -> bool {
-        self.0 == Self::NULL.0
-    }
 }
 
 pub(crate) struct TableIndex {
     tables: Vec<Table>,
-    table_ids: HashMap<IdList, TableId>,
+    table_ids: HashMap<Signature, TableId>,
 }
 
 impl TableIndex {
@@ -52,13 +49,13 @@ impl TableIndex {
 
         let id = TableId(self.tables.len() as u32);
         let table = f(id);
-        self.table_ids.insert(table.ids.clone(), id);
+        self.table_ids.insert(table.signature.clone(), id);
         self.tables.push(table);
         id
     }
 
     #[inline]
-    pub(crate) fn get_id(&self, ids: &IdList) -> Option<TableId> {
+    pub(crate) fn get_id(&self, ids: &Signature) -> Option<TableId> {
         self.table_ids.get(ids).copied()
     }
 
@@ -75,6 +72,14 @@ impl TableIndex {
             // SAFETY: a and b are valid and not equal.
             Some(unsafe { (&mut *(ptr.add(a)), &mut *(ptr.add(b))) })
         }
+    }
+
+    pub(crate) fn all_tables(&self) -> &[Table] {
+        self.tables.as_slice()
+    }
+
+    pub(crate) fn all_table_ids(&self) -> Values<Signature, TableId> {
+        self.table_ids.values()
     }
 }
 

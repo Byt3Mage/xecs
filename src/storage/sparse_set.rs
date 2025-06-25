@@ -1,24 +1,18 @@
-use crate::{
-    component::Component,
-    id::Id,
-    pointer::{Ptr, PtrMut},
-    type_info::TypeInfo,
-};
-use std::{rc::Rc, usize};
+use super::column::ColumnVec;
+use crate::{id::Id, type_info::TypeInfo, type_traits::DataComponent};
+use std::{ptr::NonNull, rc::Rc};
 
-use super::column::Column;
-
-pub struct SparseData {
+pub(crate) struct SparseData {
     ids: Vec<Id>,
-    dense: Column,
+    dense: ColumnVec,
     sparse: Vec<usize>,
 }
 
 impl SparseData {
-    pub fn new(id: Id, type_info: Rc<TypeInfo>) -> Self {
+    pub(crate) fn new(id: Id, type_info: Rc<TypeInfo>) -> Self {
         Self {
             ids: vec![],
-            dense: Column::new(id, type_info),
+            dense: ColumnVec::new(id, type_info),
             sparse: vec![],
         }
     }
@@ -28,7 +22,7 @@ impl SparseData {
     ///
     /// # Safety
     /// `val` must point to data that is the same type as the set items.
-    pub unsafe fn insert<C: Component>(&mut self, id: Id, val: C) -> Option<C> {
+    pub(crate) unsafe fn insert<T: DataComponent>(&mut self, id: Id, val: T) -> Option<T> {
         let sparse = id.to_sparse_index();
 
         if sparse >= self.sparse.len() {
@@ -42,7 +36,7 @@ impl SparseData {
         unsafe {
             if dense < self.dense.len() {
                 // SAFETY: We just checked that dense is in bounds
-                Some(self.dense.get_ptr_mut(dense).replace(val))
+                Some(self.dense.get_ptr_mut(dense).cast::<T>().replace(val))
             } else {
                 self.sparse[sparse] = self.dense.len();
                 self.dense.push(val);
@@ -57,7 +51,7 @@ impl SparseData {
     ///
     /// # Safety
     /// Caller ensures that `C` matches the item type of the column.
-    pub fn remove(&mut self, id: Id) {
+    pub(crate) fn remove(&mut self, id: Id) {
         let dense = match self.sparse.get_mut(id.to_sparse_index()) {
             Some(dense) if *dense < self.dense.len() => dense,
             _ => return, // id not in set.
@@ -73,7 +67,7 @@ impl SparseData {
     }
 
     #[inline]
-    pub fn contains(&self, id: Id) -> bool {
+    pub(crate) fn contains(&self, id: Id) -> bool {
         match self.sparse.get(id.to_sparse_index()) {
             Some(&dense) => dense < self.dense.len(),
             None => false,
@@ -81,7 +75,33 @@ impl SparseData {
     }
 
     #[inline]
-    pub fn get_ptr(&self, id: Id) -> Option<Ptr> {
+    pub(crate) unsafe fn get<T: DataComponent>(&self, id: Id) -> Option<&T> {
+        match self.sparse.get(id.to_sparse_index()) {
+            Some(&dense) if dense < self.dense.len() => {
+                // SAFETY:
+                // - We just checked dense is in bounds.
+                // - Caller ensures T is dense item type
+                Some(unsafe { self.dense.get(dense) })
+            }
+            _ => None,
+        }
+    }
+
+    #[inline]
+    pub(crate) unsafe fn get_mut<T: DataComponent>(&mut self, id: Id) -> Option<&mut T> {
+        match self.sparse.get(id.to_sparse_index()) {
+            Some(&dense_idx) if dense_idx < self.dense.len() => {
+                // SAFETY:
+                // - We just checked dense is in bounds.
+                // - Caller ensures T is dense item type
+                Some(unsafe { self.dense.get_mut(dense_idx) })
+            }
+            _ => None,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn get_ptr(&self, id: Id) -> Option<NonNull<u8>> {
         match self.sparse.get(id.to_sparse_index()) {
             Some(&dense) if dense < self.dense.len() => {
                 // SAFETY: We just checked dense is in bounds.
@@ -92,7 +112,7 @@ impl SparseData {
     }
 
     #[inline]
-    pub fn get_ptr_mut(&mut self, id: Id) -> Option<PtrMut> {
+    pub(crate) fn get_ptr_mut(&mut self, id: Id) -> Option<NonNull<u8>> {
         match self.sparse.get(id.to_sparse_index()) {
             Some(&dense) if dense < self.dense.len() => {
                 // SAFETY: We just checked dense is in bounds.
@@ -103,13 +123,13 @@ impl SparseData {
     }
 }
 
-pub struct SparseTag {
+pub(crate) struct SparseTag {
     ids: Vec<Id>,
     sparse: Vec<usize>,
 }
 
 impl SparseTag {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             ids: vec![],
             sparse: vec![],
@@ -127,7 +147,7 @@ impl SparseTag {
     }
 
     /// Inserts a the id into the sparse set.
-    pub fn insert(&mut self, id: Id) {
+    pub(crate) fn insert(&mut self, id: Id) {
         let sparse = id.to_sparse_index();
         let dense = self.ensure_index(sparse);
 
@@ -142,7 +162,7 @@ impl SparseTag {
     ///
     /// # Safety
     /// Caller ensures that `C` matches the item type of the column.
-    pub fn remove(&mut self, id: Id) {
+    pub(crate) fn remove(&mut self, id: Id) {
         let dense = match self.sparse.get_mut(id.to_sparse_index()) {
             Some(dense) if *dense < self.ids.len() => dense,
             _ => return, // entity not in set.

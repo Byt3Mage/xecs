@@ -19,6 +19,6 @@ fn compute_c_layout(fields: &[Layout]) -> (usize, usize, Vec<usize>) {
     }
 
     // Round up to `max_align`.
-    let total_size = (current_offset + max_align - 1) / max_align * max_align;
+    let total_size = current_offset.div_ceil(max_align) * max_align;
     (total_size, max_align, offsets)
 }

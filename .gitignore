@@ -1,2 +1,6 @@
 /target
-/.vscode
+/.vscode/
+/.zed/
+/.idea/
+/xecs_macros/target/
+rustfmt.toml

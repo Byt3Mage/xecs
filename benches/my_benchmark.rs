@@ -1,41 +1,60 @@
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use xecs::{
-    component::{Component, ComponentDesc, TagDesc},
+use criterion::{Criterion, criterion_group, criterion_main};
+use std::marker::PhantomData;
+use xecs::query::{Context, QueryPlan, SelectStmt, WithStmt};
+pub use xecs::{
+    component::{ComponentDesc, TagDesc},
     storage::StorageType,
+    type_traits::DataComponent,
     world::{World, WorldGet},
 };
-use xecs_macros::params;
+use xecs_macros::Component;
 
-#[derive(Default)]
-pub struct Position(pub i32);
+#[derive(Component)]
+enum MyEnum {
+    A(String),
+    B(usize),
+}
 
-impl Component for Position {}
+#[derive(Component)]
+struct Test;
 
-#[derive(Default)]
-pub struct Velocity(pub i32);
+#[derive(Component)]
+struct Likes;
 
-impl Component for Velocity {}
+#[derive(Component)]
+struct Position(u8);
+
+#[derive(Component)]
+struct Velocity(u8);
+
+#[derive(Component)]
+struct Generic<T: DataComponent>(PhantomData<T>);
 
 fn bench_sparse_set(c: &mut Criterion) {
     let mut world = World::new();
-    let pos = world.register::<Position>(ComponentDesc::new().storage(StorageType::Sparse));
-    let vel = world.register::<Velocity>(ComponentDesc::new().storage(StorageType::Sparse));
-    let likes = world.new_tag(TagDesc::new().storage(StorageType::Sparse));
-    let alice = world.new_id();
+    let test = world.register::<Test>(TagDesc::new().storage(StorageType::Tables));
+    let likes = world.register::<Likes>(TagDesc::new().storage(StorageType::Tables));
+    let pos = world.register::<Position>(ComponentDesc::new().storage(StorageType::Tables));
+    let vel = world.register::<Velocity>(ComponentDesc::new().storage(StorageType::Tables));
+    let my_enum = world.register::<MyEnum>(ComponentDesc::new().storage(StorageType::Tables));
+
     let bob = world.new_id();
 
-    world.set::<Position>(bob, Position(42));
+    world.add::<Test>(bob).unwrap();
+    world.set::<Position>(bob, Position(69));
 
-    use xecs_macros::params as p;
+    let select_stmt = SelectStmt::new().write(pos);
+    let with_stmt = WithStmt::new().with(test);
+    let mut plan = QueryPlan::new(select_stmt, with_stmt);
+    plan.init_table_list(&world);
+
+    let mut ctx = Context::new(&world);
 
     c.bench_function("test sparse", |b| {
         b.iter(|| {
-            assert!(
-                world
-                    .get::<p!(Position?, mut Velocity?)>(bob, |(p, v)| assert!(p.is_some()))
-                    .is_ok()
-            );
-        })
+            let view = plan.next_table(&mut ctx);
+            assert!(view.is_some());
+        });
     });
 }
 

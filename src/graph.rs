@@ -1,8 +1,12 @@
 use crate::{
     component::TableRecord,
     flags::TableFlags,
-    id::{Id, IdList, IdMap},
-    storage::{Storage, column::Column, table::Table, table_data::TableData},
+    id::{Id, IdMap, Signature},
+    storage::{
+        Storage,
+        column::ColumnVec,
+        table::{Table, TableData},
+    },
     table_index::TableId,
     world::World,
 };
@@ -28,7 +32,7 @@ impl GraphNode {
     }
 }
 
-fn new_table(world: &mut World, ids: IdList) -> TableId {
+fn new_table(world: &mut World, ids: Signature) -> TableId {
     world.table_index.add_with_id(|table_id| {
         let mut columns = Vec::new();
         let mut component_map = IdMap::new();
@@ -44,7 +48,7 @@ fn new_table(world: &mut World, ids: IdList) -> TableId {
                 let col_idx = columns.len();
                 tr.col_idx = Some(col_idx);
                 component_map.insert(id, col_idx);
-                columns.push(Column::new(id, Rc::clone(ti)));
+                columns.push(ColumnVec::new(id, Rc::clone(ti)));
             }
 
             match &mut cr.storage {
@@ -56,9 +60,9 @@ fn new_table(world: &mut World, ids: IdList) -> TableId {
         Table {
             id: table_id,
             _flags: TableFlags::empty(),
-            ids,
+            signature: ids,
             data: TableData::new(columns.into()),
-            component_map,
+            column_map: component_map,
             node: GraphNode::new(),
         }
     })
@@ -74,7 +78,7 @@ pub fn table_traverse_add(world: &mut World, from_id: TableId, with: Id) -> Opti
         return Some(edge.to);
     }
 
-    let ids = from.ids.try_extend(with)?;
+    let ids = from.signature.try_extend(with)?;
     let to_id = match world.table_index.get_id(&ids) {
         Some(id) => id,
         None => new_table(world, ids),
@@ -90,5 +94,5 @@ pub fn table_traverse_add(world: &mut World, from_id: TableId, with: Id) -> Opti
         },
     );
 
-    return Some(to_id);
+    Some(to_id)
 }

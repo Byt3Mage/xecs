@@ -32,6 +32,7 @@ impl Id {
     pub const MAX_TGT_ID: u64 = 0x7FFF_FFFF;
 
     /// Built-in entities
+    pub const NULL: Id = Id(u64::MAX);
     pub const WILDCARD: Id = Id(1);
 
     /// Creates a new `Entity` from raw bits.
@@ -57,7 +58,7 @@ impl Id {
 
     /// Increments the generation counter (wraps on overflow).
     pub(crate) const fn inc_gen(&self) -> Self {
-        Self((((self.0 >> 32).wrapping_add(1) as u64) << 32) | (self.index() as u64))
+        Self((((self.0 >> 32).wrapping_add(1)) << 32) | (self.index() as u64))
     }
 
     pub const fn is_wildcard(&self) -> bool {
@@ -98,7 +99,7 @@ impl Id {
 }
 
 #[inline(always)]
-pub(crate) fn pair(rel: Id, tgt: Id) -> Id {
+pub(crate) const fn pair(rel: Id, tgt: Id) -> Id {
     Id((tgt.index() as u64) | ((rel.index() as u64) << 32) | Id::PAIR_FLAG)
 }
 
@@ -168,49 +169,49 @@ impl<V> IdMap<V> {
 
 /// This trait should never be implemented by users.
 /// There is no safe way to implement this trait.
-pub unsafe trait ToComponentId {
-    fn get_id(&self, world: &World) -> Option<Id>;
+pub unsafe trait IntoId {
+    fn validate(&self, world: &World) -> bool;
+    fn into_id(self) -> Id;
 }
 
-unsafe impl ToComponentId for Id {
-    fn get_id(&self, _: &World) -> Option<Id> {
-        Some(*self)
+unsafe impl IntoId for Id {
+    fn validate(&self, world: &World) -> bool {
+        world.is_alive(*self)
+    }
+
+    fn into_id(self) -> Id {
+        self
     }
 }
 
-unsafe impl ToComponentId for (Id, Id) {
-    fn get_id(&self, world: &World) -> Option<Id> {
+unsafe impl IntoId for (Id, Id) {
+    fn validate(&self, world: &World) -> bool {
         let (rel, tgt) = *self;
+        world.is_alive(rel) && world.is_alive(tgt)
+    }
 
-        if !world.is_alive(rel) {
-            return None;
-        }
-
-        if !world.is_alive(tgt) {
-            return None;
-        }
-
-        Some(pair(rel, tgt))
+    fn into_id(self) -> Id {
+        pair(self.0, self.1)
     }
 }
 
 /// Sorted list of ids in a [Table](crate::storage::table::Table)
 #[derive(Hash, PartialEq, Eq)]
-pub struct IdList(Rc<[Id]>);
+pub struct Signature(Rc<[Id]>);
 
-impl Display for IdList {
+impl Display for Signature {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:?}", self.0)
     }
 }
 
-impl Clone for IdList {
+impl Clone for Signature {
     fn clone(&self) -> Self {
         Self(Rc::clone(&self.0))
     }
 }
 
-impl From<Vec<Id>> for IdList {
+impl From<Vec<Id>> for Signature {
     fn from(mut value: Vec<Id>) -> Self {
         Self({
             value.sort();
@@ -220,7 +221,7 @@ impl From<Vec<Id>> for IdList {
     }
 }
 
-impl<const N: usize> From<[Id; N]> for IdList {
+impl<const N: usize> From<[Id; N]> for Signature {
     fn from(value: [Id; N]) -> Self {
         Self({
             let mut vec = Vec::from(value);
@@ -231,7 +232,7 @@ impl<const N: usize> From<[Id; N]> for IdList {
     }
 }
 
-impl Deref for IdList {
+impl Deref for Signature {
     type Target = [Id];
 
     fn deref(&self) -> &Self::Target {
@@ -239,15 +240,15 @@ impl Deref for IdList {
     }
 }
 
-impl IdList {
+impl Signature {
     #[inline]
     pub fn ids(&self) -> &[Id] {
         &self.0
     }
 
     #[inline]
-    pub fn id_count(&self) -> usize {
-        self.0.len()
+    pub fn has_id(&self, id: Id) -> bool {
+        self.binary_search(&id).is_ok()
     }
 
     /// Creates a new sorted list from [Self](IdList) and `with`

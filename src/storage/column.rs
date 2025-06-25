@@ -1,35 +1,29 @@
-use crate::{
-    component::Component,
-    id::Id,
-    pointer::{Ptr, PtrMut},
-    type_info::TypeInfo,
-};
+use crate::{id::Id, type_info::TypeInfo};
 use std::{
-    alloc::Layout,
+    marker::PhantomData,
     ptr::{self, NonNull},
     rc::Rc,
 };
 
 /// Type-erased vector of component values
 ///
-/// This data structure is meant to be managed by other structs.
-pub(crate) struct Column {
+/// This data structure is designed to be managed by other structs.
+pub(crate) struct ColumnVec {
     id: Id,
-    type_info: Rc<TypeInfo>,
     data: NonNull<u8>,
     len: usize,
     cap: usize,
+    type_info: Rc<TypeInfo>,
 }
 
-impl Column {
+impl ColumnVec {
     pub fn new(id: Id, type_info: Rc<TypeInfo>) -> Self {
-        assert!(type_info.size() != 0, "can't create column for ZST");
         Self {
             id,
-            type_info,
-            data: NonNull::dangling(),
+            data: (type_info.dangling)(),
             len: 0,
-            cap: 0,
+            cap: if type_info.size == 0 { usize::MAX } else { 0 },
+            type_info,
         }
     }
 
@@ -43,8 +37,14 @@ impl Column {
         self.len
     }
 
-    pub(crate) fn as_mut_ptr(&mut self) -> *mut u8 {
-        self.data.as_ptr()
+    pub fn view<T: 'static>(&self) -> View<T> {
+        assert!(self.type_info.is::<T>(), "type mismatch");
+
+        View {
+            ptr: self.data.cast::<T>(),
+            len: self.len,
+            _marker: PhantomData,
+        }
     }
 
     pub(crate) fn reserve(&mut self, additional: usize) {
@@ -54,76 +54,95 @@ impl Column {
             return;
         }
 
+        // since we set the capacity to usize::MAX when the type has size 0,
+        // getting here means the Vec is overfull.
+        assert_ne!(self.type_info.size, 0, "capacity overflow");
+
         let new_cap = new_cap.next_power_of_two();
 
         assert_ne!(new_cap, 0);
 
-        let size = self.type_info.size();
-        let align = self.type_info.align();
-        let new_layout = Layout::from_size_align(new_cap * size, align).unwrap();
+        let new_layout = (self.type_info.arr_layout)(new_cap).unwrap();
 
         let ptr = unsafe {
             if self.cap == 0 {
                 std::alloc::alloc(new_layout)
             } else {
-                let old_layout = Layout::from_size_align(self.cap * size, align).unwrap();
+                let old_layout = (self.type_info.arr_layout)(self.cap).unwrap();
                 std::alloc::realloc(self.data.as_ptr(), old_layout, new_layout.size())
             }
         };
 
-        let data = match NonNull::new(ptr) {
+        self.data = match NonNull::new(ptr) {
             Some(ptr) => ptr,
             None => std::alloc::handle_alloc_error(new_layout),
         };
 
-        self.data = data;
         self.cap = new_cap;
     }
 
-    pub(super) unsafe fn push<C: Component>(&mut self, val: C) {
+    pub(super) unsafe fn push<T>(&mut self, val: T) {
         self.reserve(1);
-
-        unsafe {
-            self.data
-                .as_ptr()
-                .add(self.len * self.type_info.size())
-                .cast::<C>()
-                .write(val);
-        }
-
+        unsafe { self.data.as_ptr().cast::<T>().add(self.len).write(val) };
         self.len += 1;
     }
 
     /// # Safety
     /// - Caller must ensure that `row` is valid for this column.
+    /// - Caller must ensure that `T` is the value type of this column.
     #[inline]
-    pub(super) unsafe fn get_ptr(&self, row: usize) -> Ptr {
+    pub(super) unsafe fn get<T>(&self, row: usize) -> &T {
         debug_assert!(row < self.len, "Column: row out of bounds");
+
+        // SAFETY:
+        // - self.data is non-null and aligned for T
+        // - caller guarantees row is valid.
+        unsafe { self.data.cast::<T>().add(row).as_ref() }
+    }
+
+    /// # Safety
+    /// - Caller must ensure that `row` is valid for this column.
+    /// - Caller must ensure that `T` is the value type of this column.
+    #[inline]
+    pub(super) unsafe fn get_mut<T>(&mut self, row: usize) -> &mut T {
+        debug_assert!(row < self.len, "Column: row out of bounds");
+
         // SAFETY:
         // data is non-null
         // caller guarantees row is valid.
-        unsafe { Ptr::new(self.data.add(row * self.type_info.size())) }
+        unsafe { self.data.cast::<T>().add(row).as_mut() }
     }
 
     /// # Safety
     /// - Caller must ensure that `row` is valid for this column.
     #[inline]
-    pub(super) unsafe fn get_ptr_mut(&mut self, row: usize) -> PtrMut {
+    pub(super) unsafe fn get_ptr(&self, row: usize) -> NonNull<u8> {
         debug_assert!(row < self.len, "Column: row out of bounds");
         // SAFETY:
         // data is non-null
         // caller guarantees row is valid.
-        unsafe { PtrMut::new(self.data.add(row * self.type_info.size())) }
+        unsafe { self.data.add(row * self.type_info.size) }
+    }
+
+    /// # Safety
+    /// - Caller must ensure that `row` is valid for this column.
+    #[inline]
+    pub(super) unsafe fn get_ptr_mut(&mut self, row: usize) -> NonNull<u8> {
+        debug_assert!(row < self.len, "Column: row out of bounds");
+        // SAFETY:
+        // data is non-null
+        // caller guarantees row is valid.
+        unsafe { self.data.add(row * self.type_info.size) }
     }
 
     /// Removes this row by swapping with the last row and dropping its value.
     ///
     /// # Panics
-    /// Panics if `row` is out of bounds.
+    /// if `row` is out of bounds.
     pub(super) fn swap_remove_drop(&mut self, row: usize) {
         assert!(row < self.len, "Column: row out of bounds");
 
-        let size = self.type_info.size();
+        let size = self.type_info.size;
         let last_row = self.len - 1;
 
         unsafe {
@@ -131,7 +150,7 @@ impl Column {
             let last_ptr = base.add(last_row * size);
 
             if row != last_row {
-                std::ptr::swap_nonoverlapping(base.add(row * size), last_ptr, size);
+                ptr::swap_nonoverlapping(base.add(row * size), last_ptr, size);
             }
 
             self.len = last_row;
@@ -150,7 +169,7 @@ impl Column {
     pub(super) unsafe fn swap_remove(&mut self, row: usize) {
         debug_assert!(row < self.len, "Column: row out of bounds");
 
-        let size = self.type_info.size();
+        let size = self.type_info.size;
         let last_row = self.len - 1;
 
         if row != last_row {
@@ -159,7 +178,7 @@ impl Column {
                 let row_ptr = base.add(row * size);
                 let lst_ptr = base.add(last_row * size);
 
-                std::ptr::swap_nonoverlapping(row_ptr, lst_ptr, size);
+                ptr::swap_nonoverlapping(row_ptr, lst_ptr, size);
             }
         }
 
@@ -173,7 +192,7 @@ impl Column {
     /// Caller must ensure that `src_row` is valid in self.
     /// Caller must ensure that `self`, and `dest` hold the same item type.
     pub(super) unsafe fn move_row_to(&mut self, src_row: usize, dest: &mut Self) {
-        let size = self.type_info.size();
+        let size = self.type_info.size;
 
         // SAFETY:
         // Callers uphold the following guarantees:
@@ -183,8 +202,8 @@ impl Column {
         unsafe {
             dest.reserve(1);
 
-            let src_data = self.as_mut_ptr().add(src_row * size);
-            let dst_data = dest.as_mut_ptr().add(dest.len * size);
+            let src_data = self.data.as_ptr().add(src_row * size);
+            let dst_data = dest.data.as_ptr().add(dest.len * size);
             ptr::copy_nonoverlapping(src_data, dst_data, size);
 
             dest.len += 1;
@@ -192,16 +211,15 @@ impl Column {
     }
 }
 
-impl Drop for Column {
+impl Drop for ColumnVec {
     fn drop(&mut self) {
-        if self.cap == 0 {
+        if self.cap == 0 || self.type_info.size == 0 {
             return;
         }
 
         unsafe {
-            let size = self.type_info.size();
-            let align = self.type_info.align();
-            let layout = Layout::from_size_align(size * self.cap, align).unwrap();
+            let size = self.type_info.size;
+            let layout = (self.type_info.arr_layout)(self.cap).unwrap();
 
             if let Some(drop_fn) = self.type_info.drop_fn {
                 let mut ptr = self.data.as_ptr();
@@ -214,4 +232,10 @@ impl Drop for Column {
             std::alloc::dealloc(self.data.as_ptr(), layout);
         }
     }
+}
+
+pub struct View<'a, T> {
+    ptr: NonNull<T>,
+    len: usize,
+    _marker: PhantomData<&'a T>,
 }

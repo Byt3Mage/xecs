@@ -1,27 +1,148 @@
-use super::table_data::TableData;
+use super::column::ColumnVec;
+use crate::type_traits::{Component, Data};
 use crate::{
-    component::Component,
-    error::{EcsError, EcsResult, MissingComponent},
     flags::TableFlags,
     graph::GraphNode,
-    id::{Id, IdList, IdMap},
-    pointer::{Ptr, PtrMut},
+    id::{Id, IdMap, Signature, id_index::IdLocation},
     table_index::TableId,
+    type_traits::DataComponent,
     world::World,
 };
+use std::ptr::NonNull;
+
+pub(crate) struct TableData {
+    ids: Vec<Id>,
+    columns: Box<[ColumnVec]>,
+}
+
+impl TableData {
+    pub(crate) fn new(columns: Box<[ColumnVec]>) -> Self {
+        Self {
+            ids: vec![],
+            columns,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn ids(&self) -> &[Id] {
+        &self.ids
+    }
+
+    #[inline]
+    pub(crate) fn column(&self, index: usize) -> &ColumnVec {
+        &self.columns[index]
+    }
+
+    /// Returns number of rows in this table.
+    #[inline]
+    pub(crate) fn row_count(&self) -> usize {
+        self.ids.len()
+    }
+
+    /// Creates a new row without initializing its elements.
+    /// This function will grow all columns if necessary.
+    ///
+    /// # Safety
+    /// - The rows for the new id in all columns will be uninitialized (hence, unsafe).
+    /// - The caller must ensure to write to all the columns in the new row.
+    pub(crate) unsafe fn new_row(&mut self, id: Id) -> usize {
+        let row = self.ids.len();
+        self.ids.push(id);
+        row
+    }
+
+    // TODO: docs
+    pub(crate) unsafe fn push<T>(&mut self, col: usize, val: T) {
+        debug_assert!(col < self.columns.len(), "column out of bounds");
+        unsafe { self.columns.get_unchecked_mut(col).push(val) }
+    }
+
+    /// Returns a reference to the element at `row`, in `column`.
+    ///
+    /// This function does not perform bounds checking.
+    ///
+    /// # Safety
+    /// - Caller ensures that `row` and `column` are valid.
+    /// - Caller ensures that `T` is the value type of the column.
+    pub(crate) unsafe fn get<T>(&self, col: usize, row: usize) -> &T {
+        debug_assert!(col < self.columns.len(), "column out of bounds");
+        unsafe { self.columns.get_unchecked(col).get(row) }
+    }
+
+    /// Returns a reference to the element at `row`, in `column`.
+    ///
+    /// This function does not perform bounds checking.
+    ///
+    /// # Safety
+    /// - Caller ensures that `row` and `column` are valid.
+    /// - Caller ensures that `T` is the value type of the column.
+    pub(crate) unsafe fn get_mut<T: DataComponent>(&mut self, col: usize, row: usize) -> &mut T {
+        debug_assert!(col < self.columns.len(), "column out of bounds");
+        unsafe { self.columns.get_unchecked_mut(col).get_mut(row) }
+    }
+
+    /// Returns a pointer to the element at `row`, in `column`.
+    ///
+    /// This function does not perform bounds checking.
+    ///
+    /// # Safety
+    /// - Caller ensures that `row` and `column` are valid.
+    pub(crate) unsafe fn get_ptr(&self, col: usize, row: usize) -> NonNull<u8> {
+        debug_assert!(col < self.columns.len(), "column out of bounds");
+        // SAFETY: The caller ensures that `row` and `column` in bounds.
+        unsafe { self.columns.get_unchecked(col).get_ptr(row) }
+    }
+
+    /// Returns a mutable reference to the element at `row`, in `column`.
+    ///
+    /// This function does not perform bounds checking.
+    ///
+    /// # Safety
+    /// - The caller ensures that `row` and `column` are valid.
+    pub(crate) unsafe fn get_ptr_mut(&mut self, col: usize, row: usize) -> NonNull<u8> {
+        debug_assert!(col < self.columns.len(), "TableData: column out of bounds");
+        // SAFETY: The caller ensures that `row` and `column` in bounds.
+        unsafe { self.columns.get_unchecked_mut(col).get_ptr_mut(row) }
+    }
+
+    /// # Safety
+    /// - `row` must be in bounds
+    /// - `drop_check` must have the same length as `self.columns`
+    pub(super) unsafe fn delete_row(&mut self, row: usize, drop_check: &[bool]) -> Option<Id> {
+        debug_assert!(row < self.ids.len(), "TableData: row out of bounds");
+        debug_assert!(drop_check.len() == self.columns.len());
+
+        for (col, &should_drop) in self.columns.iter_mut().zip(drop_check) {
+            unsafe {
+                if should_drop {
+                    col.swap_remove_drop(row);
+                } else {
+                    col.swap_remove(row);
+                }
+            }
+        }
+
+        let removed = self.ids.swap_remove(row);
+
+        if row == self.ids.len() {
+            None
+        } else {
+            Some(removed)
+        }
+    }
+}
 
 pub(crate) struct Table {
-    /// Handle to self in [tableIndex](super::table_index::tableIndex).
+    /// Handle to self in [TableIndex](super::table_index::TableIndex).
     pub(crate) id: TableId,
     /// Flags describing the capabilites of this table
     pub(crate) _flags: TableFlags,
-    /// Vector of component [Entity] ids
-    pub(crate) ids: IdList,
-    /// Storage for entities and components.
+    /// Vector of component [Id] ids
+    pub(crate) signature: Signature,
+    /// Storage for ids and components.
     pub(crate) data: TableData,
-    /// Maps component ids to columns.
-    /// Uses specialized no-op hashing for faster operations.
-    pub(crate) component_map: IdMap<usize>,
+    /// Maps column ids to columns indices.
+    pub(crate) column_map: IdMap<usize>,
     /// Node representation for traversals.
     pub(crate) node: GraphNode,
 }
@@ -30,7 +151,8 @@ impl Table {
     pub(crate) fn validate_data(&self) {
         #[cfg(debug_assertions)]
         {
-            let len = self.data.entity_count();
+            let len = self.data.row_count();
+
             self.data
                 .columns
                 .iter()
@@ -38,29 +160,32 @@ impl Table {
         }
     }
 
-    /// Sets the value of the component.
-    /// Returns `Err(val)` if the table does not contain the component.
+    /// Gets a reference to the component of an entity.
     ///
     /// # Safety
-    /// - `row` must be a valid in this table.
-    /// - `C` must be the same type as component.
+    /// - `row` must be valid in this table.
+    /// - `T` must be the value type of the column.
     #[inline]
-    pub(crate) unsafe fn try_replace<C: Component>(
+    pub(crate) unsafe fn get<T: DataComponent>(&self, column_id: Id, row: usize) -> Option<&T> {
+        self.column_map
+            .get(column_id)
+            .map(|&column| unsafe { self.data.get(column, row) })
+    }
+
+    /// Gets a reference to the component of an entity.
+    ///
+    /// # Safety
+    /// - `row` must be valid in this table.
+    /// - `T` must be the value type of the column.
+    #[inline]
+    pub(crate) unsafe fn get_mut<T: DataComponent>(
         &mut self,
         row: usize,
-        comp: Id,
-        val: C,
-    ) -> Result<C, C> {
-        // SAFETY:
-        // - Column index index is valid and immutable when we create the table.
-        // - Caller ensures row is valid, which it must be if the entity we're getting for is valid.
-        match self.component_map.get(comp) {
-            Some(&col) => unsafe {
-                let ptr = self.data.get_ptr_mut(row, col);
-                Ok(std::mem::replace(ptr.as_mut::<C>(), val))
-            },
-            None => Err(val),
-        }
+        column_id: Id,
+    ) -> Option<&mut T> {
+        self.column_map
+            .get(column_id)
+            .map(|&col| unsafe { self.data.get_mut(col, row) })
     }
 
     /// Gets a ptr to the component of an entity.
@@ -68,11 +193,11 @@ impl Table {
     /// # Safety
     /// - `row` must be valid in this table.
     #[inline]
-    pub(crate) unsafe fn get_ptr(&self, row: usize, comp: Id) -> Option<Ptr> {
+    pub(crate) unsafe fn get_ptr(&self, row: usize, comp: Id) -> Option<NonNull<u8>> {
         // SAFETY:
-        // - Column index index is valid and immutable when we create the table.
+        // - Column index is valid and immutable when we create the table.
         // - Caller ensures row is valid, which it must be if the entity we're getting for is valid.
-        self.component_map
+        self.column_map
             .get(comp)
             .map(|&col| unsafe { self.data.get_ptr(col, row) })
     }
@@ -82,11 +207,11 @@ impl Table {
     /// # Safety
     /// - `row` must be valid in this table.
     #[inline]
-    pub(crate) unsafe fn get_ptr_mut(&mut self, row: usize, comp: Id) -> Option<PtrMut> {
+    pub(crate) unsafe fn get_ptr_mut(&mut self, row: usize, comp: Id) -> Option<NonNull<u8>> {
         // SAFETY:
-        // - Column index index is valid and immutable when we create the table.
+        // - Column index is valid and immutable when we create the table.
         // - Caller ensures row is valid, which it must be if the entity we're getting for is valid.
-        self.component_map
+        self.column_map
             .get(comp)
             .map(|&col| unsafe { self.data.get_ptr_mut(col, row) })
     }
@@ -107,7 +232,7 @@ pub(crate) unsafe fn move_id(
 ) {
     let (src, dst) = world.table_index.get_2_mut(src, dst).unwrap();
 
-    debug_assert!(src_row < src.data.entity_count(), "row out of bounds");
+    debug_assert!(src_row < src.data.row_count(), "row out of bounds");
 
     // Append a new row to the destination table, but don't initialize columns.
     let dst_row = unsafe { dst.data.new_row(id) };
@@ -116,7 +241,7 @@ pub(crate) unsafe fn move_id(
     let mut drop_check = vec![true; src_columns.len()];
 
     for (i_src, src_col) in src_columns.iter_mut().enumerate() {
-        if let Some(&i_dst) = dst.component_map.get(src_col.id()) {
+        if let Some(&i_dst) = dst.column_map.get(src_col.id()) {
             // SAFETY:
             // - We guarantee that src_row and dst_row are valid.
             // - We ensure that src_col and dst_col contain the same item type.
@@ -130,14 +255,21 @@ pub(crate) unsafe fn move_id(
 
     // update the record of the id swapped into src_row.
     if let Some(i) = unsafe { src.data.delete_row(src_row, &drop_check) } {
-        // unwrap should never fail, we don't keep invalid ids in tables.
-        let r = world.id_index.get_record_mut(i).unwrap();
-        r.table = src.id; // set table just to be pendatic, not really necessary.
-        r.row = src_row;
+        world.id_index.set_location(
+            i,
+            IdLocation {
+                table: src.id, // set table just to be pendatic, not really necessary.
+                row: src_row,
+            },
+        );
     }
 
     // update record of moved entity.
-    let r = world.id_index.get_record_mut(id).unwrap();
-    r.table = dst.id;
-    r.row = dst_row;
+    world.id_index.set_location(
+        id,
+        IdLocation {
+            table: dst.id,
+            row: dst_row,
+        },
+    );
 }

@@ -5,7 +5,6 @@ use std::collections::HashMap;
 pub(crate) mod column;
 pub(crate) mod sparse_set;
 pub(crate) mod table;
-pub(crate) mod table_data;
 
 /// The type of storage used for components
 #[derive(Default, Clone, Copy, PartialEq, Hash)]

@@ -1,7 +1,8 @@
+use proc_macro::TokenStream;
 use quote::{ToTokens, format_ident, quote};
 use syn::{
-    Ident, LitInt, Result, Token, Type,
-    parse::{self, Parse, ParseStream},
+    DeriveInput, Ident, LitInt, Result, Token, Type,
+    parse::{Parse, ParseStream},
     parse_macro_input,
     punctuated::Punctuated,
     token::Comma,
@@ -30,7 +31,7 @@ impl Parse for AllTuples {
 }
 
 #[proc_macro]
-pub fn all_tuples(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+pub fn all_tuples(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as AllTuples);
     let len = 1 + input.end - input.start;
     let mut items = Vec::with_capacity(len);
@@ -123,18 +124,84 @@ impl Parse for Params {
 
 impl ToTokens for Params {
     fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
-        if self.items.len() > 1 {
-            let items = &self.items;
-            tokens.extend(quote! {(#items)});
+        let items = &self.items;
+
+        tokens.extend(if items.len() > 1 {
+            quote! {(#items)}
         } else {
-            let item = &self.items[0];
-            tokens.extend(quote! { #item });
-        }
+            quote! { #items }
+        });
     }
 }
 
 #[proc_macro]
-pub fn params(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+pub fn params(input: TokenStream) -> TokenStream {
     let params = parse_macro_input!(input as Params);
     quote! { #params }.into()
+}
+
+#[proc_macro_derive(Component)]
+pub fn component(input: TokenStream) -> TokenStream {
+    let item = parse_macro_input!(input as DeriveInput);
+    impl_component(&item)
+}
+
+fn impl_component(ast: &DeriveInput) -> TokenStream {
+    let name = &ast.ident;
+    let (impl_generics, ty_generics, where_clause) = ast.generics.split_for_impl();
+    let has_generics = !ast.generics.params.is_empty();
+
+    let (is_generic, type_index) = if has_generics {
+        (
+            quote! { const IS_GENERIC: bool = true; },
+            quote! { xecs::registration::TypeIndex::INVALID },
+        )
+    } else {
+        (
+            quote! { const IS_GENERIC: bool = false; },
+            quote! {
+                static INDEX: std::sync::LazyLock<xecs::registration::TypeIndex> =
+                std::sync::LazyLock::new(|| xecs::registration::allocate_type_index());
+                *INDEX
+            },
+        )
+    };
+
+    let is_tag = match &ast.data {
+        syn::Data::Struct(data_struct) => data_struct.fields.is_empty(),
+        syn::Data::Enum(data_enum) => data_enum.variants.is_empty(),
+        syn::Data::Union(_) => {
+            return quote! { compile_error!("Union type not supported for components."); }.into();
+        }
+    };
+
+    let data_type = if is_tag {
+        quote! {
+            type DataType = xecs::type_traits::Tag;
+            type DescType = xecs::component::TagDesc;
+        }
+    } else {
+        quote! {
+            type DataType = xecs::type_traits::Data;
+            type DescType = xecs::component::ComponentDesc<Self>;
+        }
+    };
+
+    quote! {
+        unsafe impl #impl_generics xecs::type_traits::Component for #name #ty_generics
+        #where_clause
+        {
+            #data_type
+            #is_generic
+        }
+
+        unsafe impl #impl_generics xecs::registration::ComponentId for #name #ty_generics
+        #where_clause
+        {
+            fn type_index() -> xecs::registration::TypeIndex {
+                #type_index
+            }
+        }
+    }
+    .into()
 }

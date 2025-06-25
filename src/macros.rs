@@ -62,3 +62,10 @@ macro_rules! view {
         || -> Result<_, $crate::error::EcsError> { Ok($crate::chain_methods_impl!(receiver, $($methods)*))}()
     }};
 }
+
+#[macro_export]
+macro_rules! tuple_count {
+    () => { 0 };
+    ($head:ident) => { 1 };
+    ($head:ident, $($tail:ident),*) => { 1 + tuple_count!($($tail),*) };
+}

@@ -6,11 +6,10 @@ use crate::{
         sparse_set::{SparseData, SparseTag},
     },
     type_info::{TypeHooksBuilder, TypeInfo, TypeName},
+    type_traits::{Component, DataComponent},
     world::World,
 };
 use std::{collections::HashMap, rc::Rc};
-
-pub trait Component: 'static {}
 
 /// Component location in a [Table](crate::storage::table::Table).
 pub(crate) struct TableRecord {
@@ -29,7 +28,6 @@ pub(crate) struct ComponentInfo {
 }
 
 pub struct TagDesc {
-    // TODO: component name
     name: Option<TypeName>,
     flags: ComponentFlags,
     storage_type: StorageType,
@@ -54,7 +52,7 @@ impl TagDesc {
         self
     }
 
-    pub fn with_flag(mut self, flag: ComponentFlags) -> Self {
+    pub fn with_flags(mut self, flag: ComponentFlags) -> Self {
         self.flags.insert(flag);
         self
     }
@@ -69,10 +67,10 @@ impl TagDesc {
         self
     }
 
-    pub(crate) fn build(mut self, world: &mut World, id: Id) {
+    fn build(mut self, world: &mut World, id: Id) {
         debug_assert!(id.is_id(), "attempted to build pair as entity");
 
-        self.flags.remove(ComponentFlags::IS_TAG);
+        self.flags.insert(ComponentFlags::IS_TAG);
 
         let storage = match self.storage_type {
             StorageType::Tables => Storage::Tables(HashMap::new()),
@@ -91,21 +89,20 @@ impl TagDesc {
     }
 }
 
-pub struct ComponentDesc<C: Component> {
-    // TODO: component name
+pub struct ComponentDesc<T: DataComponent> {
     name: Option<TypeName>,
-    hooks: TypeHooksBuilder<C>,
+    hooks: TypeHooksBuilder<T>,
     flags: ComponentFlags,
     storage_type: StorageType,
 }
 
-impl<C: Component> ComponentDesc<C> {
+impl<T: Component + DataComponent> ComponentDesc<T> {
     pub fn new() -> Self {
         Self {
             name: None,
             hooks: TypeHooksBuilder::new(),
             flags: ComponentFlags::empty(),
-            storage_type: StorageType::Tables,
+            storage_type: T::STORAGE,
         }
     }
 
@@ -139,25 +136,25 @@ impl<C: Component> ComponentDesc<C> {
     }
 
     #[inline]
-    pub fn default(mut self, f: fn() -> C) -> Self {
+    pub fn default(mut self, f: fn() -> T) -> Self {
         self.hooks = self.hooks.with_default(f);
         self
     }
 
     #[inline]
-    pub fn clone(mut self, f: fn(&C) -> C) -> Self {
+    pub fn clone(mut self, f: fn(&T) -> T) -> Self {
         self.hooks = self.hooks.with_clone(f);
         self
     }
 
     #[inline]
-    pub fn on_set(mut self, f: impl FnMut(Id, &mut C) + 'static) -> Self {
+    pub fn on_set(mut self, f: impl FnMut(Id, &mut T) + 'static) -> Self {
         self.hooks = self.hooks.on_set(f);
         self
     }
 
     #[inline]
-    pub fn on_remove(mut self, f: impl FnMut(Id, &mut C) + 'static) -> Self {
+    pub fn on_remove(mut self, f: impl FnMut(Id, &mut T) + 'static) -> Self {
         self.hooks = self.hooks.on_remove(f);
         self
     }
@@ -165,21 +162,11 @@ impl<C: Component> ComponentDesc<C> {
     pub(crate) fn build(mut self, world: &mut World, id: Id) {
         debug_assert!(id.is_id(), "attempted to build pair as entity");
 
-        let (type_info, storage) = match TypeInfo::of::<C>(self.hooks).map(Rc::new) {
-            Some(ti) => {
-                let storage = match self.storage_type {
-                    StorageType::Tables => Storage::Tables(HashMap::new()),
-                    StorageType::Sparse => Storage::SparseData(SparseData::new(id, Rc::clone(&ti))),
-                };
-                (Some(ti), storage)
-            }
-            None => {
-                let storage = match self.storage_type {
-                    StorageType::Tables => Storage::Tables(HashMap::new()),
-                    StorageType::Sparse => Storage::SparseTag(SparseTag::new()),
-                };
-                (None, storage)
-            }
+        let type_info = Rc::new(TypeInfo::of::<T>(self.hooks));
+
+        let storage = match self.storage_type {
+            StorageType::Tables => Storage::Tables(HashMap::new()),
+            StorageType::Sparse => Storage::SparseData(SparseData::new(id, Rc::clone(&type_info))),
         };
 
         self.flags.remove(ComponentFlags::IS_TAG);
@@ -189,7 +176,7 @@ impl<C: Component> ComponentDesc<C> {
             ComponentInfo {
                 id,
                 flags: self.flags,
-                type_info,
+                type_info: Some(type_info),
                 storage,
             },
         );
@@ -230,10 +217,7 @@ pub(crate) fn build_pair(world: &mut World, id: Id) {
             None => {
                 ensure_component(world, tgt);
                 let cr_t = world.components.get(tgt).unwrap();
-                match &cr_t.type_info {
-                    Some(ti) => Some(Rc::clone(ti)),
-                    None => None,
-                }
+                cr_t.type_info.as_ref().map(Rc::clone)
             }
         }
     };
@@ -255,4 +239,26 @@ pub(crate) fn build_pair(world: &mut World, id: Id) {
             storage,
         },
     );
+}
+
+pub(crate) mod private {
+    pub struct Passkey;
+}
+
+#[doc(hidden)]
+pub trait ComponentDescriptor {
+    fn build(self, world: &mut World, id: Id, _: private::Passkey);
+}
+
+impl ComponentDescriptor for TagDesc {
+    #[inline(always)]
+    fn build(self, world: &mut World, id: Id, _: private::Passkey) {
+        self.build(world, id);
+    }
+}
+
+impl<T: Component + DataComponent> ComponentDescriptor for ComponentDesc<T> {
+    fn build(self, world: &mut World, id: Id, _: private::Passkey) {
+        self.build(world, id);
+    }
 }

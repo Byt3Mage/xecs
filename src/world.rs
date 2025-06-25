@@ -1,23 +1,24 @@
 use crate::{
-    component::{Component, ComponentDesc, ComponentInfo, TagDesc},
-    error::{EcsResult, unregistered_type},
+    component::{ComponentDescriptor, ComponentInfo, private::Passkey},
+    error::{EcsResult, GetResult, UnregisteredTypeErr},
     flags::{IdFlags, TableFlags},
+    get_params::Params,
     graph::GraphNode,
     id::{
-        Id, IdList, IdMap, ToComponentId,
-        id_index::{IdIndex, IdRecord},
+        Id, IdMap, IntoId, Signature,
+        id_index::{IdIndex, IdLocation, IdRecord},
     },
-    query::Params,
-    storage::{table::Table, table_data::TableData},
+    registration::ComponentId,
+    storage::table::{self, Table},
     table_index::{TableId, TableIndex},
     type_info::TypeMap,
+    type_traits::{DataComponent, TagComponent, TypedId},
     world_utils::{add_tag, has_component, set_component, set_component_checked},
 };
-use const_assert::const_assert;
-use std::ops::{Deref, DerefMut};
 
 pub struct World {
     pub(crate) id_index: IdIndex,
+    pub(crate) type_arr: Vec<Option<Id>>,
     pub(crate) type_map: TypeMap<Id>,
     pub(crate) components: IdMap<ComponentInfo>,
     pub(crate) table_index: TableIndex,
@@ -30,14 +31,15 @@ impl World {
         let root_table = table_index.add_with_id(|id| Table {
             id,
             _flags: TableFlags::empty(),
-            ids: IdList::from(vec![]),
-            data: TableData::new(Box::from([])),
-            component_map: IdMap::new(),
+            signature: Signature::from(vec![]),
+            data: table::TableData::new(Box::from([])),
+            column_map: IdMap::new(),
             node: GraphNode::new(),
         });
 
         Self {
             id_index: IdIndex::new(),
+            type_arr: Vec::new(),
             type_map: TypeMap::new(),
             components: IdMap::new(),
             table_index,
@@ -48,57 +50,37 @@ impl World {
     /// Gets the entity id for the type.
     /// Returns `None` if type is not registered with this world.
     #[inline(always)]
-    pub fn id_t<C: Component>(&self) -> Option<Id> {
-        self.type_map.get::<C>().copied()
+    pub fn id<T: TypedId>(&self) -> Result<Id, UnregisteredTypeErr> {
+        T::id(self)
     }
 
-    /// Registers the type with the world if it isn't and returns its id.
+    /// Registers the type with the world if not registered and returns its id.
     ///
     /// This function eagerly evaluates `desc` (see [World::register_with]
     /// for lazily evaluated descriptor).
-    pub fn register<C: Component>(&mut self, desc: ComponentDesc<C>) -> Id {
-        let id = match self.type_map.get::<C>() {
-            Some(&id) => {
-                if self.components.contains(id) {
-                    // early out if component is registered
-                    return id;
-                }
-                id
-            }
-            // Register type if not registered.
-            None => {
-                let new_id = self.new_id();
-                self.type_map.insert::<C>(new_id);
-                new_id
-            }
-        };
+    pub fn register<T: ComponentId>(&mut self, desc: T::DescType) -> Id {
+        let id = T::get_or_register_type(self);
 
-        desc.build(self, id);
+        if !self.components.contains(id) {
+            desc.build(self, id, Passkey);
+        }
+
         id
     }
 
     /// Registers the type with the world or returns its id if already registered.
     ///
     /// Lazily evaluates the descriptor and only calls it if the type is not registered.
-    pub fn register_with<C: Component>(&mut self, f: impl Fn() -> ComponentDesc<C>) -> Id {
-        let id = match self.type_map.get::<C>() {
-            Some(&id) => {
-                if self.components.contains(id) {
-                    // early out if component is registered
-                    return id;
-                }
+    pub fn register_with<T>(&mut self, f: impl Fn() -> T::DescType) -> Id
+    where
+        T: ComponentId,
+    {
+        let id = T::get_or_register_type(self);
 
-                id
-            }
-            // Register type if not registered.
-            None => {
-                let new_id = self.new_id();
-                self.type_map.insert::<C>(new_id);
-                new_id
-            }
-        };
+        if !self.components.contains(id) {
+            f().build(self, id, Passkey);
+        }
 
-        f().build(self, id);
         id
     }
 
@@ -109,125 +91,83 @@ impl World {
     /// - `id` is a pair.
     /// - `id` is not valid.
     #[inline(always)]
-    pub fn to_component<C>(&mut self, id: Id, f: impl FnOnce() -> ComponentDesc<C>) -> bool
+    pub fn to_component<T>(&mut self, id: Id, f: impl FnOnce() -> T) -> bool
     where
-        C: Component,
+        T: ComponentDescriptor,
     {
-        if !self.id_index.is_alive(id) {
-            return false;
-        }
-
-        match self.components.get(id) {
-            Some(_) => false,
-            None => {
-                if id.is_pair() {
-                    false
-                } else {
-                    f().build(self, id);
-                    true
-                }
-            }
+        if id.is_pair() || !self.is_alive(id) || self.components.contains(id) {
+            false
+        } else {
+            f().build(self, id, Passkey);
+            true
         }
     }
 
-    /// Creates a tag from this `id` if one doesn't exist.
-    ///
-    /// Returns `false` if:
-    /// - `id` is already a component/tag.
-    /// - `id` is a pair.
-    /// - `id` is not valid.
-    #[inline(always)]
-    pub fn to_tag(&mut self, id: Id, f: impl FnOnce() -> TagDesc) -> bool {
-        if !self.id_index.is_alive(id) {
-            return false;
-        }
-
-        match self.components.get(id) {
-            Some(_) => false,
-            None => {
-                if id.is_pair() {
-                    false
-                } else {
-                    f().build(self, id);
-                    true
-                }
-            }
-        }
-    }
-
-    /// Creates a new entity id and assigns a component to it.
+    /// Creates a new component and returns its [Id].
     ///
     /// Useful for creating "newtype" components.
-    pub fn new_component<C: Component>(&mut self, desc: ComponentDesc<C>) -> Id {
-        const_assert!(|C| size_of::<C>() != 0, "can't use new_component for ZST");
-
+    pub fn new_component<T>(&mut self, desc: T) -> Id
+    where
+        T: ComponentDescriptor,
+    {
         let id = self.new_id();
-        desc.build(self, id);
+        desc.build(self, id, Passkey);
         id
     }
 
-    /// Creates a new entity id and assigns a component to it.
-    pub fn new_tag(&mut self, desc: TagDesc) -> Id {
-        let id = self.new_id();
-        desc.build(self, id);
-        id
-    }
-
-    /// Creates a new [Id] for asso
+    /// Creates a new [Id].
     pub fn new_id(&mut self) -> Id {
         let root = self.root_table;
         self.id_index.new_id(|id| IdRecord {
-            table: root,
-            row: unsafe { self.table_index[root].data.new_row(id) },
+            location: IdLocation {
+                table: root,
+                row: unsafe { self.table_index[root].data.new_row(id) },
+            },
             flags: IdFlags::default(),
         })
     }
 
-    /// Add `id` as tag to entity. No side effect if entity already has tag.
+    /// Add `comp` as tag to `id`. No side effect if `id` already has tag.
     #[inline]
-    pub fn add_id(&mut self, id: Id, comp: impl ToComponentId) {
-        add_tag(self, id, comp.get_id(self).unwrap()).unwrap()
+    pub fn add_id(&mut self, id: Id, comp: impl IntoId) -> EcsResult<()> {
+        debug_assert!(comp.validate(self), "id or pair is not valid");
+        add_tag(self, id, comp.into_id())
     }
 
-    /// Add the type as tag to id. No side effect if id already has tag.
+    /// Add the type as tag to `id`. No side effect if `id` already has tag.
     #[inline]
-    pub fn add<C: Component>(&mut self, id: Id) -> EcsResult<()> {
-        const_assert!(|C| size_of::<C>() == 0, "can't use add for non-ZST");
-
-        match self.type_map.get::<C>() {
-            Some(&comp) => add_tag(self, id, comp),
-            None => return Err(unregistered_type::<C>()),
-        }
+    pub fn add<T: TypedId + TagComponent>(&mut self, id: Id) -> EcsResult<()> {
+        add_tag(self, id, T::id(self)?)
     }
 
-    /// Checks if the id has the component.
-    pub fn has_id(&self, id: Id, comp: impl ToComponentId) -> bool {
-        comp.get_id(self)
-            .map_or(false, |comp| has_component(self, id, comp))
+    /// Checks if the `id` has the component.
+    pub fn has_id(&self, id: Id, comp: impl IntoId) -> bool {
+        debug_assert!(comp.validate(self), "id or pair is not valid");
+        has_component(self, id, comp.into_id())
     }
 
-    /// Checks if id has the component.
-    pub fn has<C: Component>(&self, id: Id) -> bool {
-        self.type_map
-            .get::<C>()
-            .map_or(false, |&comp| has_component(self, id, comp))
+    /// Checks if `id` has the component.
+    pub fn has<T: TypedId>(&self, id: Id) -> bool {
+        T::id(self).is_ok_and(|comp| has_component(self, id, comp))
     }
 
-    /// # Safety
-    /// - Caller must ensure that the `val` is a pointee to the same data type as
     #[inline(always)]
-    pub unsafe fn set_id<C: Component>(
-        &mut self,
-        id: Id,
-        comp: impl ToComponentId,
-        val: C,
-    ) -> Option<C> {
-        set_component_checked(self, id, comp.get_id(self)?, val)
+    pub fn set_id<T>(&mut self, id: Id, comp: impl IntoId, val: T) -> Option<T>
+    where
+        T: DataComponent,
+    {
+        debug_assert!(comp.validate(self), "id or pair is not valid");
+        set_component_checked(self, id, comp.into_id(), val)
     }
 
     #[inline]
-    pub fn set<C: Component>(&mut self, id: Id, val: C) -> Option<C> {
-        unsafe { set_component(self, id, *self.type_map.get::<C>()?, val) }
+    pub fn set<T: TypedId>(&mut self, id: Id, val: T::Data) -> Option<T::Data>
+    where
+        T::Data: DataComponent,
+    {
+        // SAFETY:
+        // The component id is obtained from the type, so the data type matches.
+        unsafe { set_component(self, id, T::id(self).ok()?, val) }
     }
 
     #[inline(always)]
@@ -236,45 +176,47 @@ impl World {
     }
 }
 
-pub struct WorldRef<'world> {
-    world: &'world mut World,
+const fn assert_immutable<T: Params>() {
+    assert!(
+        T::ALL_IMMUTABLE,
+        "immutable World ref requires all Params to be immutable"
+    )
 }
 
-impl Deref for WorldRef<'_> {
-    type Target = World;
-
-    fn deref(&self) -> &Self::Target {
-        self.world
-    }
+pub trait WorldGet<'a> {
+    fn get<T: Params>(self, id: Id) -> GetResult<T::ParamsType<'a>>;
 }
 
-impl DerefMut for WorldRef<'_> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.world
-    }
+pub trait WorldMap<'a, Ret> {
+    fn map<T: Params>(self, id: Id, f: impl FnOnce(T::ParamsType<'a>) -> Ret) -> GetResult<Ret>;
 }
 
-impl<'world> From<&'world mut World> for WorldRef<'world> {
-    fn from(value: &'world mut World) -> Self {
-        Self { world: value }
-    }
-}
-
-pub trait WorldGet<Ret> {
-    fn get<T: Params>(
-        &mut self,
-        id: Id,
-        callback: impl for<'a> FnOnce(T::ParamType<'a>) -> Ret,
-    ) -> EcsResult<Ret>;
-}
-
-impl<Ret> WorldGet<Ret> for World {
+impl<'a> WorldGet<'a> for &'a World {
     #[inline]
-    fn get<T: Params>(
-        &mut self,
-        id: Id,
-        f: impl for<'a> FnOnce(T::ParamType<'a>) -> Ret,
-    ) -> EcsResult<Ret> {
-        Ok(f(T::create(self, id)?))
+    fn get<T: Params>(self, id: Id) -> GetResult<T::ParamsType<'a>> {
+        const { assert_immutable::<T>() };
+        T::create(self.into(), id)
+    }
+}
+
+impl<'a, Ret> WorldMap<'a, Ret> for &'a World {
+    #[inline]
+    fn map<T: Params>(self, id: Id, f: impl FnOnce(T::ParamsType<'a>) -> Ret) -> GetResult<Ret> {
+        const { assert_immutable::<T>() };
+        T::create(self.into(), id).map(f)
+    }
+}
+
+impl<'a> WorldGet<'a> for &'a mut World {
+    #[inline]
+    fn get<T: Params>(self, id: Id) -> GetResult<T::ParamsType<'a>> {
+        T::create(self.into(), id)
+    }
+}
+
+impl<'a, Ret> WorldMap<'a, Ret> for &'a mut World {
+    #[inline]
+    fn map<T: Params>(self, id: Id, f: impl FnOnce(T::ParamsType<'a>) -> Ret) -> GetResult<Ret> {
+        T::create(self.into(), id).map(f)
     }
 }
