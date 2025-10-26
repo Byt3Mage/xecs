@@ -35,7 +35,6 @@ impl<T: DataComponent> TypeHooksBuilder<T> {
     }
 
     pub fn with_default(mut self, f: fn() -> T) -> Self {
-        const_assert!(|T| size_of::<T>() != 0, "can't create default for ZST");
         self.default = Some(Box::new(move |ptr| unsafe {
             ptr.as_ptr().cast::<T>().write(f());
         }));
@@ -43,7 +42,6 @@ impl<T: DataComponent> TypeHooksBuilder<T> {
     }
 
     pub fn with_clone(mut self, f: fn(&T) -> T) -> Self {
-        const_assert!(|T| size_of::<T>() != 0, "can't create clone for ZST");
         self.clone = Some(Box::new(move |src, dst| {
             let src = src.cast::<T>();
             let dst = dst.cast::<T>();
@@ -56,7 +54,6 @@ impl<T: DataComponent> TypeHooksBuilder<T> {
     }
 
     pub fn on_set(mut self, mut f: impl FnMut(Id, &mut T) + 'static) -> Self {
-        const_assert!(|T| size_of::<T>() != 0, "can't create set hook for ZST");
         self.on_set = Some(Box::new(move |entity, ptr| {
             f(entity, unsafe { ptr.cast::<T>().as_mut() });
         }));
@@ -64,7 +61,6 @@ impl<T: DataComponent> TypeHooksBuilder<T> {
     }
 
     pub fn on_remove(mut self, mut f: impl FnMut(Id, &mut T) + 'static) -> Self {
-        const_assert!(|T| size_of::<T>() != 0, "can't create remove hook for ZST");
         self.on_remove = Some(Box::new(move |entity, ptr| {
             f(entity, unsafe { ptr.cast::<T>().as_mut() })
         }));

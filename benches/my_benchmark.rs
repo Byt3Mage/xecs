@@ -2,7 +2,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use std::marker::PhantomData;
 use xecs::query::{Context, QueryPlan, SelectStmt, WithStmt};
 pub use xecs::{
-    component::{ComponentDesc, TagDesc},
+    component::{ComponentBuilder, TagBuilder},
     storage::StorageType,
     type_traits::DataComponent,
     world::{World, WorldGet},
@@ -32,11 +32,11 @@ struct Generic<T: DataComponent>(PhantomData<T>);
 
 fn bench_sparse_set(c: &mut Criterion) {
     let mut world = World::new();
-    let test = world.register::<Test>(TagDesc::new().storage(StorageType::Tables));
-    let likes = world.register::<Likes>(TagDesc::new().storage(StorageType::Tables));
-    let pos = world.register::<Position>(ComponentDesc::new().storage(StorageType::Tables));
-    let vel = world.register::<Velocity>(ComponentDesc::new().storage(StorageType::Tables));
-    let my_enum = world.register::<MyEnum>(ComponentDesc::new().storage(StorageType::Tables));
+    let test = world.register::<Test>(TagBuilder::new().storage(StorageType::Tables));
+    let likes = world.register::<Likes>(TagBuilder::new().storage(StorageType::Tables));
+    let pos = world.register::<Position>(ComponentBuilder::new().storage(StorageType::Tables));
+    let vel = world.register::<Velocity>(ComponentBuilder::new().storage(StorageType::Tables));
+    let my_enum = world.register::<MyEnum>(ComponentBuilder::new().storage(StorageType::Tables));
 
     let bob = world.new_id();
 
@@ -46,7 +46,7 @@ fn bench_sparse_set(c: &mut Criterion) {
     let select_stmt = SelectStmt::new().write(pos);
     let with_stmt = WithStmt::new().with(test);
     let mut plan = QueryPlan::new(select_stmt, with_stmt);
-    plan.init_table_list(&world);
+    plan.init_tables(&world);
 
     let mut ctx = Context::new(&world);
 

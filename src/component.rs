@@ -3,7 +3,7 @@ use crate::{
     id::Id,
     storage::{
         Storage, StorageType,
-        sparse_set::{SparseData, SparseTag},
+        sparse::{SparseData, SparseTag},
     },
     type_info::{TypeHooksBuilder, TypeInfo, TypeName},
     type_traits::{Component, DataComponent},
@@ -12,8 +12,8 @@ use crate::{
 use std::{collections::HashMap, rc::Rc};
 
 /// Component location in a [Table](crate::storage::table::Table).
-pub(crate) struct TableRecord {
-    /// First index of id in the table's [IdList](crate::types::IdList).
+pub(crate) struct ComponentLocation {
+    /// Index of id in the table's [IdList](crate::types::IdList).
     pub(crate) id_idx: usize,
     /// [Column](crate::storage::Column) index where the id appears.
     /// Defaults to `None` if the id is a tag.
@@ -27,13 +27,13 @@ pub(crate) struct ComponentInfo {
     pub(crate) storage: Storage,
 }
 
-pub struct TagDesc {
+pub struct TagBuilder {
     name: Option<TypeName>,
     flags: ComponentFlags,
     storage_type: StorageType,
 }
 
-impl TagDesc {
+impl TagBuilder {
     pub fn new() -> Self {
         Self {
             name: None,
@@ -89,14 +89,14 @@ impl TagDesc {
     }
 }
 
-pub struct ComponentDesc<T: DataComponent> {
+pub struct ComponentBuilder<T: DataComponent> {
     name: Option<TypeName>,
     hooks: TypeHooksBuilder<T>,
     flags: ComponentFlags,
     storage_type: StorageType,
 }
 
-impl<T: Component + DataComponent> ComponentDesc<T> {
+impl<T: Component + DataComponent> ComponentBuilder<T> {
     pub fn new() -> Self {
         Self {
             name: None,
@@ -192,7 +192,7 @@ pub(crate) fn ensure_component(world: &mut World, comp: Id) {
             build_pair(world, comp);
         } else {
             // We build component as tag since we don't have type info.
-            TagDesc::new().build(world, comp);
+            TagBuilder::new().build(world, comp);
         }
     }
 }
@@ -200,8 +200,8 @@ pub(crate) fn ensure_component(world: &mut World, comp: Id) {
 pub(crate) fn build_pair(world: &mut World, id: Id) {
     debug_assert!(id.is_pair(), "attemped to build entity as pair");
 
-    let rel = world.id_index.get_current(id.pair_rel()).unwrap();
-    let tgt = world.id_index.get_current(id.pair_tgt()).unwrap();
+    let rel = world.id_manager.get_current(id.pair_rel()).unwrap();
+    let tgt = world.id_manager.get_current(id.pair_tgt()).unwrap();
 
     ensure_component(world, rel);
 
@@ -250,14 +250,14 @@ pub trait ComponentDescriptor {
     fn build(self, world: &mut World, id: Id, _: private::Passkey);
 }
 
-impl ComponentDescriptor for TagDesc {
+impl ComponentDescriptor for TagBuilder {
     #[inline(always)]
     fn build(self, world: &mut World, id: Id, _: private::Passkey) {
         self.build(world, id);
     }
 }
 
-impl<T: Component + DataComponent> ComponentDescriptor for ComponentDesc<T> {
+impl<T: Component + DataComponent> ComponentDescriptor for ComponentBuilder<T> {
     fn build(self, world: &mut World, id: Id, _: private::Passkey) {
         self.build(world, id);
     }

@@ -1,8 +1,7 @@
-pub(crate) mod id_index;
+pub(crate) mod manager;
 
 use crate::{
-    storage::sparse_set::{SparseIndex, SparseSet},
-    utils::NoOpHash,
+    data_structures::{SparseIndex, SparseSet},
     world::World,
 };
 use std::{collections::HashMap, fmt::Display, ops::Deref, rc::Rc};
@@ -14,15 +13,9 @@ pub struct Id(u64);
 
 impl Display for Id {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.is_id() {
-            let idx = self.index();
-            let ver = self.generation();
-            write!(f, "Entity({idx}, v{ver})")
-        } else {
-            let rel = self.pair_rel();
-            let tgt = self.pair_tgt();
-            write!(f, "Pair(rel: {rel}, tgt: {tgt})")
-        }
+        let idx = self.index();
+        let ver = self.generation();
+        write!(f, "Entity({idx}, v{ver})")
     }
 }
 
@@ -36,6 +29,7 @@ impl Id {
     pub const WILDCARD: Id = Id(1);
 
     /// Creates a new `Entity` from raw bits.
+    #[inline(always)]
     pub const fn from_raw(raw: u64) -> Self {
         Self(raw)
     }
@@ -56,45 +50,17 @@ impl Id {
         (self.0 >> 32) as u32
     }
 
-    /// Increments the generation counter (wraps on overflow).
+    /// Increments the generation counter.
     pub(crate) const fn inc_gen(&self) -> Self {
-        Self((((self.0 >> 32).wrapping_add(1)) << 32) | (self.index() as u64))
+        Self((((self.0 >> 32) + 1) << 32) | (self.index() as u64))
     }
 
     pub const fn is_wildcard(&self) -> bool {
-        if self.0 == Id::WILDCARD.0 {
-            return true;
-        }
-
-        if self.is_pair() {
-            let rel = self.pair_rel();
-            let tgt = self.pair_tgt();
-            rel.0 == Id::WILDCARD.0 || tgt.0 == Id::WILDCARD.0
-        } else {
-            false
-        }
+        self.0 == Self::WILDCARD.0
     }
 
-    /// Checks if the id is an entity.
-    pub const fn is_id(&self) -> bool {
-        (self.0 >> 63) & 1 == 0
-    }
-
-    /// Checks if the id is a pair.
-    pub const fn is_pair(&self) -> bool {
-        (self.0 >> 63) & 1 == 1
-    }
-
-    pub const fn pair_rel(&self) -> Self {
-        Self((self.0 >> 32) & Self::MAX_TGT_ID)
-    }
-
-    pub const fn pair_tgt(&self) -> Self {
-        Self((self.0 as u32) as u64)
-    }
-
-    pub const fn from_parts(lo: u32, hi: u32) -> Self {
-        Self::from_raw(((hi as u64) << 32) | lo as u64)
+    pub const fn from_parts(index: u32, generation: u32) -> Self {
+        Self(((generation as u64) << 32) | index as u64)
     }
 }
 
@@ -106,64 +72,6 @@ pub(crate) const fn pair(rel: Id, tgt: Id) -> Id {
 impl SparseIndex for Id {
     fn to_sparse_index(&self) -> usize {
         self.index() as usize
-    }
-}
-
-pub struct IdMap<V> {
-    ids: SparseSet<Id, V>,
-    pairs: HashMap<Id, V, NoOpHash>,
-}
-
-impl<V> IdMap<V> {
-    pub fn new() -> Self {
-        Self {
-            ids: SparseSet::new(),
-            pairs: HashMap::default(),
-        }
-    }
-
-    pub fn insert(&mut self, id: Id, val: V) -> Option<V> {
-        if id.is_id() {
-            self.ids.insert(id, val)
-        } else {
-            self.pairs.insert(id, val)
-        }
-    }
-
-    #[inline]
-    pub fn contains(&mut self, id: Id) -> bool {
-        if id.is_id() {
-            self.ids.contains_key(&id)
-        } else {
-            self.pairs.contains_key(&id)
-        }
-    }
-
-    #[inline]
-    pub fn get(&self, id: Id) -> Option<&V> {
-        if id.is_id() {
-            self.ids.get(&id)
-        } else {
-            self.pairs.get(&id)
-        }
-    }
-
-    #[inline]
-    pub fn get_mut(&mut self, id: Id) -> Option<&mut V> {
-        if id.is_id() {
-            self.ids.get_mut(&id)
-        } else {
-            self.pairs.get_mut(&id)
-        }
-    }
-
-    #[inline]
-    pub fn remove(&mut self, id: Id) -> Option<V> {
-        if id.is_id() {
-            self.ids.remove(&id)
-        } else {
-            self.pairs.remove(&id)
-        }
     }
 }
 
@@ -279,5 +187,60 @@ impl Signature {
             }),
             Err(_) => None,
         }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(C)]
+pub struct Relation {
+    rel: Id,
+    tgt: Id,
+}
+
+pub trait Key {
+    fn map_get<'a, V>(&self, map: &'a KeyMap<V>) -> Option<&'a V>;
+    fn map_get_mut<'a, V>(&self, map: &'a mut KeyMap<V>) -> Option<&'a mut V>;
+}
+
+impl Key for Id {
+    fn map_get<'a, V>(&self, map: &'a KeyMap<V>) -> Option<&'a V> {
+        map.ids.get(&self)
+    }
+
+    fn map_get_mut<'a, V>(&self, map: &'a mut KeyMap<V>) -> Option<&'a mut V> {
+        map.ids.get_mut(&self)
+    }
+}
+impl Key for Relation {
+    fn map_get<'a, V>(&self, map: &'a KeyMap<V>) -> Option<&'a V> {
+        map.rels.get(self)
+    }
+
+    fn map_get_mut<'a, V>(&self, map: &'a mut KeyMap<V>) -> Option<&'a mut V> {
+        map.rels.get_mut(&self)
+    }
+}
+
+pub struct KeyMap<V> {
+    ids: SparseSet<Id, V>,
+    rels: HashMap<Relation, V>,
+}
+
+impl<V> KeyMap<V> {
+    pub fn new() -> Self {
+        Self {
+            ids: SparseSet::new(),
+            rels: HashMap::new(),
+        }
+    }
+
+    #[inline(always)]
+    pub fn get<'a, K: Key>(&'a self, key: &K) -> Option<&'a V> {
+        key.map_get(self)
+    }
+
+    #[inline(always)]
+    pub fn get_mut<'a, K: Key>(&'a mut self, key: &K) -> Option<&'a mut V> {
+        key.map_get_mut(self)
     }
 }

@@ -143,7 +143,7 @@ impl<T: ?Sized> AtomicRefCell<T> {
 // Core synchronization logic. Keep this section small and easy to audit.
 //
 
-const HIGH_BIT: usize = !(::core::usize::MAX >> 1);
+const HIGH_BIT: usize = !(usize::MAX >> 1);
 const MAX_FAILED_BORROWS: usize = HIGH_BIT + (HIGH_BIT >> 1);
 
 struct AtomicBorrowRef<'b> {
@@ -244,15 +244,14 @@ impl<'b> AtomicBorrowRefMut<'b> {
     fn try_new(borrow: &'b AtomicUsize) -> Result<AtomicBorrowRefMut<'b>, &'static str> {
         // Use compare-and-swap to avoid corrupting the immutable borrow count
         // on illegal mutable borrows.
-        let old = match borrow.compare_exchange(
-            0,
-            HIGH_BIT,
-            atomic::Ordering::Acquire,
-            atomic::Ordering::Relaxed,
-        ) {
-            Ok(x) => x,
-            Err(x) => x,
-        };
+        let old = borrow
+            .compare_exchange(
+                0,
+                HIGH_BIT,
+                atomic::Ordering::Acquire,
+                atomic::Ordering::Relaxed,
+            )
+            .unwrap_or_else(|x| x);
 
         if old == 0 {
             Ok(AtomicBorrowRefMut { borrow })

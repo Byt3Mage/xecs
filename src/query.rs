@@ -34,6 +34,7 @@ use std::vec;
 //
 //  IDENTIFIER     ::= /[A-Za-z_][A-Za-z0-9_]*/
 #[derive(Debug, Clone, Copy)]
+#[repr(u8)]
 enum SelectAccess {
     Read,
     Write,
@@ -187,7 +188,7 @@ impl QueryPlan {
         }
     }
 
-    pub fn init_table_list(&mut self, world: &World) {
+    pub fn init_tables(&mut self, world: &World) {
         let mut candidates = vec![];
         let mut has_mandatory = false;
 
@@ -255,10 +256,10 @@ impl QueryPlan {
         }
 
         // Final candidate list
-        self.table_ids = if !anyof_candidates.is_empty() {
-            anyof_candidates.into_iter().collect()
-        } else {
+        self.table_ids = if anyof_candidates.is_empty() {
             world.table_index.all_table_ids().copied().collect()
+        } else {
+            anyof_candidates.into_iter().collect()
         };
     }
 
@@ -294,24 +295,31 @@ impl QueryPlan {
 
         while let Some(arch_id) = self.table_ids.pop() {
             let table = &ctx.world.table_index[arch_id];
-            let fields = &mut ctx.fields;
-            let select = &self.select_stmt;
-            let with = &self.with_stmt;
-
-            fields.clear();
+            ctx.fields.clear();
 
             // Check with
-            if !with.with.iter().all(|&cid| table.signature.has_id(cid)) {
+            if !self
+                .with_stmt
+                .with
+                .iter()
+                .all(|&cid| table.signature.has_id(cid))
+            {
                 continue;
             }
 
             // Check without
-            if with.without.iter().any(|&cid| table.signature.has_id(cid)) {
+            if self
+                .with_stmt
+                .without
+                .iter()
+                .any(|&cid| table.signature.has_id(cid))
+            {
                 continue;
             }
 
             // Check with anyof
-            if !with
+            if !self
+                .with_stmt
                 .anyofs
                 .iter()
                 .all(|group| group.iter().any(|&cid| table.signature.has_id(cid)))
@@ -320,28 +328,29 @@ impl QueryPlan {
             }
 
             // Check select
-            if !select
+            if !self
+                .select_stmt
                 .select
                 .iter()
-                .all(|comp| try_select(comp, table, fields))
+                .all(|comp| try_select(comp, table, &mut ctx.fields))
             {
                 continue;
             }
 
             // Check select anyof
-            if !select
-                .anyofs
-                .iter()
-                .all(|anyof| anyof.iter().any(|comp| try_anyof(comp, table, fields)))
-            {
+            if !self.select_stmt.anyofs.iter().all(|anyof| {
+                anyof
+                    .iter()
+                    .any(|comp| try_anyof(comp, table, &mut ctx.fields))
+            }) {
                 continue;
             }
 
             // Collect optionals
-            select
+            self.select_stmt
                 .optionals
                 .iter()
-                .for_each(|comp| select_optional(comp, table, fields));
+                .for_each(|comp| select_optional(comp, table, &mut ctx.fields));
 
             return Some(TableView { table });
         }

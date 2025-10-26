@@ -1,6 +1,7 @@
 // Public modules
 pub mod atomic_refcell;
 pub mod component;
+pub mod data_structures;
 pub mod error;
 pub mod flags;
 pub mod get_params;

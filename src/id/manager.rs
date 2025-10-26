@@ -1,6 +1,5 @@
 use crate::{
-    error::InvalidId, flags::IdFlags, id::Id, storage::sparse_set::SparseIndex,
-    table_index::TableId,
+    data_structures::SparseIndex, error::InvalidId, flags::IdFlags, id::Id, table_index::TableId,
 };
 
 #[derive(Clone, Copy)]
@@ -19,14 +18,14 @@ struct Entry {
     record: IdRecord,
 }
 
-pub struct IdIndex {
+pub struct IdManager {
     dense: Vec<Entry>,
     sparse: Vec<usize>,
     alive_count: usize,
     max_id: u64,
 }
 
-impl IdIndex {
+impl IdManager {
     pub(crate) fn new() -> Self {
         Self {
             dense: vec![],

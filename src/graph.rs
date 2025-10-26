@@ -1,12 +1,8 @@
 use crate::{
-    component::TableRecord,
+    component::ComponentLocation,
     flags::TableFlags,
-    id::{Id, IdMap, Signature},
-    storage::{
-        Storage,
-        column::ColumnVec,
-        table::{Table, TableData},
-    },
+    id::{Id, Signature},
+    storage::{Storage, column::ColumnVec, table::Table},
     table_index::TableId,
     world::World,
 };
@@ -39,20 +35,20 @@ fn new_table(world: &mut World, ids: Signature) -> TableId {
 
         for (index, &id) in ids.iter().enumerate() {
             let cr = world.components.get_mut(id).unwrap();
-            let mut tr = TableRecord {
+            let mut cl = ComponentLocation {
                 id_idx: index,
                 col_idx: None,
             };
 
             if let Some(ti) = &cr.type_info {
                 let col_idx = columns.len();
-                tr.col_idx = Some(col_idx);
+                cl.col_idx = Some(col_idx);
                 component_map.insert(id, col_idx);
                 columns.push(ColumnVec::new(id, Rc::clone(ti)));
             }
 
             match &mut cr.storage {
-                Storage::Tables(tables) => tables.insert(table_id, tr),
+                Storage::Tables(tables) => tables.insert(table_id, cl),
                 _ => panic!("INTERNAL ERROR: unexpected storage type"),
             };
         }
@@ -61,7 +57,7 @@ fn new_table(world: &mut World, ids: Signature) -> TableId {
             id: table_id,
             _flags: TableFlags::empty(),
             signature: ids,
-            data: TableData::new(columns.into()),
+            id_data: ComponentData::new(columns.into()),
             column_map: component_map,
             node: GraphNode::new(),
         }

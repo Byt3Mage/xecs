@@ -1,6 +1,6 @@
 use crate::{
     error::InvalidId,
-    id::{Id, id_index::IdLocation},
+    id::{Id, manager::IdLocation},
     world::World,
 };
 use std::{cell::UnsafeCell, marker::PhantomData};
@@ -60,6 +60,6 @@ impl<'w> UnsafeWorldPtr<'w> {
 
     #[inline]
     pub(crate) fn get_id_location(self, id: Id) -> Result<IdLocation, InvalidId> {
-        unsafe { self.get_world().id_index.get_location(id) }
+        unsafe { self.get_world().id_manager.get_location(id) }
     }
 }

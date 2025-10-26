@@ -1,8 +1,8 @@
 use crate::{
     error::{GetError, GetResult},
-    id::{Id, id_index::IdLocation},
+    id::{Id, manager::IdLocation},
     type_traits::{DataComponent, TypedId},
-    unsafe_world_ptr::UnsafeWorldPtr,
+    world::World,
 };
 use private::Sealed;
 use xecs_macros::all_tuples;
@@ -11,16 +11,16 @@ mod private {
     pub trait Sealed {}
 }
 
-pub trait Param: Sealed {
+pub trait GetParam: Sealed {
     type Data: DataComponent;
     type Output<'a>;
     const IS_IMMUTABLE: bool;
-    fn make(world: UnsafeWorldPtr<'_>, id: Id, loc: IdLocation) -> GetResult<Self::Output<'_>>;
+    fn make(world: &World, id: Id, loc: IdLocation) -> GetResult<Self::Output<'_>>;
 }
 
-impl<T: Param> private::Sealed for T {}
+impl<T: GetParam> private::Sealed for T {}
 
-impl<T> Param for &T
+impl<T> GetParam for &T
 where
     T: TypedId + DataComponent,
     <T as TypedId>::Data: DataComponent,
@@ -29,9 +29,7 @@ where
     type Output<'a> = &'a Self::Data;
     const IS_IMMUTABLE: bool = true;
 
-    fn make(world: UnsafeWorldPtr<'_>, id: Id, loc: IdLocation) -> GetResult<Self::Output<'_>> {
-        // SAFETY: We have checked component ids to prevent aliasing.
-        let world = unsafe { world.world() };
+    fn make(world: &World, id: Id, loc: IdLocation) -> GetResult<Self::Output<'_>> {
         let comp = T::id(world)?;
         let comp_info = match world.components.get(comp) {
             Some(ci) => ci,
@@ -49,7 +47,7 @@ where
     }
 }
 
-impl<T> Param for &mut T
+impl<T> GetParam for &mut T
 where
     T: TypedId + DataComponent,
     <T as TypedId>::Data: DataComponent,
@@ -58,9 +56,9 @@ where
     type Output<'a> = &'a mut Self::Data;
     const IS_IMMUTABLE: bool = false;
 
-    fn make(world: UnsafeWorldPtr<'_>, id: Id, loc: IdLocation) -> GetResult<Self::Output<'_>> {
+    fn make(world: &World, id: Id, loc: IdLocation) -> GetResult<Self::Output<'_>> {
         // SAFETY: We have checked component ids to prevent aliasing.
-        let world = unsafe { world.world_mut() };
+        let world = todo!();
         let comp = T::id(world)?;
         let comp_info = match world.components.get_mut(comp) {
             Some(ci) => ci,
@@ -78,7 +76,7 @@ where
     }
 }
 
-impl<T> Param for Option<&T>
+impl<T> GetParam for Option<&T>
 where
     T: TypedId + DataComponent,
     <T as TypedId>::Data: DataComponent,
@@ -87,9 +85,9 @@ where
     type Output<'a> = Option<&'a Self::Data>;
     const IS_IMMUTABLE: bool = true;
 
-    fn make(world: UnsafeWorldPtr<'_>, id: Id, loc: IdLocation) -> GetResult<Self::Output<'_>> {
+    fn make(world: &World, id: Id, loc: IdLocation) -> GetResult<Self::Output<'_>> {
         // SAFETY: We have checked component ids to prevent aliasing.
-        let world = unsafe { world.world() };
+        let world = todo!();
         let Ok(comp) = T::id(world) else {
             return Ok(None);
         };
@@ -107,7 +105,7 @@ where
     }
 }
 
-impl<T: TypedId + DataComponent> Param for Option<&mut T>
+impl<T: TypedId + DataComponent> GetParam for Option<&mut T>
 where
     T: TypedId + DataComponent,
     <T as TypedId>::Data: DataComponent,
@@ -116,9 +114,9 @@ where
     type Output<'a> = Option<&'a mut Self::Data>;
     const IS_IMMUTABLE: bool = false;
 
-    fn make(world: UnsafeWorldPtr<'_>, id: Id, loc: IdLocation) -> GetResult<Self::Output<'_>> {
+    fn make(world: &World, id: Id, loc: IdLocation) -> GetResult<Self::Output<'_>> {
         // SAFETY: We have checked component ids to prevent aliasing.
-        let world = unsafe { world.world_mut() };
+        let world = todo!();
         let Ok(comp) = T::id(world) else {
             return Ok(None);
         };
@@ -139,28 +137,28 @@ where
 pub trait Params: Sized + private::Sealed {
     type ParamsType<'a>;
     const ALL_IMMUTABLE: bool;
-    fn create(world: UnsafeWorldPtr<'_>, id: Id) -> GetResult<Self::ParamsType<'_>>;
+    fn create(world: &World, id: Id) -> GetResult<Self::ParamsType<'_>>;
 }
 
-impl<T: Param> Params for T {
+impl<T: GetParam> Params for T {
     type ParamsType<'a> = T::Output<'a>;
     const ALL_IMMUTABLE: bool = T::IS_IMMUTABLE;
 
-    fn create(world: UnsafeWorldPtr<'_>, id: Id) -> GetResult<Self::ParamsType<'_>> {
-        let id_loc = world.get_id_location(id)?;
+    fn create(world: &World, id: Id) -> GetResult<Self::ParamsType<'_>> {
+        let id_loc = world.id_manager.get_location(id)?;
         T::make(world, id, id_loc)
     }
 }
 
 macro_rules! impl_tuple_params {
     ($($t:ident),*) => {
-        impl<$($t: Param),*> private::Sealed for ($($t,)*) {}
-        impl<$($t: Param),*> Params for ($($t,)*) {
+        impl<$($t: GetParam),*> private::Sealed for ($($t,)*) {}
+        impl<$($t: GetParam),*> Params for ($($t,)*) {
             type ParamsType<'a> = ($($t::Output<'a>,)*);
             const ALL_IMMUTABLE: bool = { $($t::IS_IMMUTABLE &&)* true };
 
-            fn create(world: UnsafeWorldPtr<'_>, id: Id) -> GetResult<Self::ParamsType<'_>> {
-                let id_loc = world.get_id_location(id)?;
+            fn create(world: &World, id: Id) -> GetResult<Self::ParamsType<'_>> {
+                let id_loc = world.id_manager.get_location(id)?;
 
                 if !Self::ALL_IMMUTABLE {
                     panic!("mutable access not yet supported")

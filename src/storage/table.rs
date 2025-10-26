@@ -1,22 +1,22 @@
 use super::column::ColumnVec;
-use crate::type_traits::{Component, Data};
 use crate::{
+    data_structures::SparseSet,
     flags::TableFlags,
     graph::GraphNode,
-    id::{Id, IdMap, Signature, id_index::IdLocation},
+    id::{Id, Key, KeyMap, Relation, Signature, manager::IdLocation},
     table_index::TableId,
     type_traits::DataComponent,
     world::World,
 };
-use std::ptr::NonNull;
+use std::{collections::HashMap, ptr::NonNull};
 
-pub(crate) struct TableData {
+pub(crate) struct TableData<K: Key> {
     ids: Vec<Id>,
-    columns: Box<[ColumnVec]>,
+    columns: Box<[ColumnVec<K>]>,
 }
 
-impl TableData {
-    pub(crate) fn new(columns: Box<[ColumnVec]>) -> Self {
+impl<K: Key> TableData<K> {
+    pub(crate) fn new(columns: Box<[ColumnVec<K>]>) -> Self {
         Self {
             ids: vec![],
             columns,
@@ -29,7 +29,7 @@ impl TableData {
     }
 
     #[inline]
-    pub(crate) fn column(&self, index: usize) -> &ColumnVec {
+    pub(crate) fn column(&self, index: usize) -> &ColumnVec<K> {
         &self.columns[index]
     }
 
@@ -139,10 +139,12 @@ pub(crate) struct Table {
     pub(crate) _flags: TableFlags,
     /// Vector of component [Id] ids
     pub(crate) signature: Signature,
-    /// Storage for ids and components.
-    pub(crate) data: TableData,
-    /// Maps column ids to columns indices.
-    pub(crate) column_map: IdMap<usize>,
+    /// Storage for id component data.
+    pub(crate) id_data: TableData<Id>,
+    /// Storage for pair component data.
+    pub(crate) pair_data: TableData<Relation>,
+    /// Maps keys to columns indices.
+    pub(crate) column_map: KeyMap<usize>,
     /// Node representation for traversals.
     pub(crate) node: GraphNode,
 }
@@ -151,9 +153,9 @@ impl Table {
     pub(crate) fn validate_data(&self) {
         #[cfg(debug_assertions)]
         {
-            let len = self.data.row_count();
+            let len = self.id_data.row_count();
 
-            self.data
+            self.id_data
                 .columns
                 .iter()
                 .for_each(|col| assert_eq!(len, col.len()));
@@ -168,8 +170,8 @@ impl Table {
     #[inline]
     pub(crate) unsafe fn get<T: DataComponent>(&self, column_id: Id, row: usize) -> Option<&T> {
         self.column_map
-            .get(column_id)
-            .map(|&column| unsafe { self.data.get(column, row) })
+            .get(&column_id)
+            .map(|&column| unsafe { self.id_data.get(column, row) })
     }
 
     /// Gets a reference to the component of an entity.
@@ -184,36 +186,8 @@ impl Table {
         column_id: Id,
     ) -> Option<&mut T> {
         self.column_map
-            .get(column_id)
-            .map(|&col| unsafe { self.data.get_mut(col, row) })
-    }
-
-    /// Gets a ptr to the component of an entity.
-    ///
-    /// # Safety
-    /// - `row` must be valid in this table.
-    #[inline]
-    pub(crate) unsafe fn get_ptr(&self, row: usize, comp: Id) -> Option<NonNull<u8>> {
-        // SAFETY:
-        // - Column index is valid and immutable when we create the table.
-        // - Caller ensures row is valid, which it must be if the entity we're getting for is valid.
-        self.column_map
-            .get(comp)
-            .map(|&col| unsafe { self.data.get_ptr(col, row) })
-    }
-
-    /// Gets a mutable ptr to the component of an entity.
-    ///
-    /// # Safety
-    /// - `row` must be valid in this table.
-    #[inline]
-    pub(crate) unsafe fn get_ptr_mut(&mut self, row: usize, comp: Id) -> Option<NonNull<u8>> {
-        // SAFETY:
-        // - Column index is valid and immutable when we create the table.
-        // - Caller ensures row is valid, which it must be if the entity we're getting for is valid.
-        self.column_map
-            .get(comp)
-            .map(|&col| unsafe { self.data.get_ptr_mut(col, row) })
+            .get(&column_id)
+            .map(|&col| unsafe { self.id_data.get_mut(col, row) })
     }
 }
 
@@ -232,12 +206,12 @@ pub(crate) unsafe fn move_id(
 ) {
     let (src, dst) = world.table_index.get_2_mut(src, dst).unwrap();
 
-    debug_assert!(src_row < src.data.row_count(), "row out of bounds");
+    debug_assert!(src_row < src.id_data.row_count(), "row out of bounds");
 
     // Append a new row to the destination table, but don't initialize columns.
-    let dst_row = unsafe { dst.data.new_row(id) };
-    let src_columns = &mut src.data.columns;
-    let dst_columns = &mut dst.data.columns;
+    let dst_row = unsafe { dst.id_data.new_row(id) };
+    let src_columns = &mut src.id_data.columns;
+    let dst_columns = &mut dst.id_data.columns;
     let mut drop_check = vec![true; src_columns.len()];
 
     for (i_src, src_col) in src_columns.iter_mut().enumerate() {
@@ -254,8 +228,8 @@ pub(crate) unsafe fn move_id(
     }
 
     // update the record of the id swapped into src_row.
-    if let Some(i) = unsafe { src.data.delete_row(src_row, &drop_check) } {
-        world.id_index.set_location(
+    if let Some(i) = unsafe { src.id_data.delete_row(src_row, &drop_check) } {
+        world.id_manager.set_location(
             i,
             IdLocation {
                 table: src.id, // set table just to be pendatic, not really necessary.
@@ -265,7 +239,7 @@ pub(crate) unsafe fn move_id(
     }
 
     // update record of moved entity.
-    world.id_index.set_location(
+    world.id_manager.set_location(
         id,
         IdLocation {
             table: dst.id,

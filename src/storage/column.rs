@@ -1,6 +1,5 @@
-use crate::{id::Id, type_info::TypeInfo};
+use crate::{id::Key, type_info::TypeInfo};
 use std::{
-    marker::PhantomData,
     ptr::{self, NonNull},
     rc::Rc,
 };
@@ -8,16 +7,16 @@ use std::{
 /// Type-erased vector of component values
 ///
 /// This data structure is designed to be managed by other structs.
-pub(crate) struct ColumnVec {
-    id: Id,
+pub(crate) struct ColumnVec<K: Key> {
+    id: K,
     data: NonNull<u8>,
     len: usize,
     cap: usize,
     type_info: Rc<TypeInfo>,
 }
 
-impl ColumnVec {
-    pub fn new(id: Id, type_info: Rc<TypeInfo>) -> Self {
+impl<K: Key> ColumnVec<K> {
+    pub fn new(id: K, type_info: Rc<TypeInfo>) -> Self {
         Self {
             id,
             data: (type_info.dangling)(),
@@ -28,23 +27,13 @@ impl ColumnVec {
     }
 
     #[inline]
-    pub(crate) fn id(&self) -> Id {
-        self.id
+    pub(crate) fn id(&self) -> &K {
+        &self.id
     }
 
     #[inline]
     pub(crate) fn len(&self) -> usize {
         self.len
-    }
-
-    pub fn view<T: 'static>(&self) -> View<T> {
-        assert!(self.type_info.is::<T>(), "type mismatch");
-
-        View {
-            ptr: self.data.cast::<T>(),
-            len: self.len,
-            _marker: PhantomData,
-        }
     }
 
     pub(crate) fn reserve(&mut self, additional: usize) {
@@ -211,7 +200,7 @@ impl ColumnVec {
     }
 }
 
-impl Drop for ColumnVec {
+impl<K: Key> Drop for ColumnVec<K> {
     fn drop(&mut self) {
         if self.cap == 0 || self.type_info.size == 0 {
             return;
@@ -232,10 +221,4 @@ impl Drop for ColumnVec {
             std::alloc::dealloc(self.data.as_ptr(), layout);
         }
     }
-}
-
-pub struct View<'a, T> {
-    ptr: NonNull<T>,
-    len: usize,
-    _marker: PhantomData<&'a T>,
 }

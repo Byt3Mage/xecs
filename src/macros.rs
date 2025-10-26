@@ -56,11 +56,6 @@ macro_rules! view {
         let receiver = view!(@use($view));
         || -> Result<_, $crate::error::EcsError> { Ok($crate::chain_methods_impl!(receiver, $($methods)*))}()
     }};
-
-    (@use($view:expr) $($methods:tt)*) => {{
-        let receiver = view!(@use($view));
-        || -> Result<_, $crate::error::EcsError> { Ok($crate::chain_methods_impl!(receiver, $($methods)*))}()
-    }};
 }
 
 #[macro_export]

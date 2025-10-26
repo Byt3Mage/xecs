@@ -1,4 +1,3 @@
-use crate::type_traits::{Component, Data};
 use crate::{
     component::ensure_component,
     error::{EcsError, EcsResult},
@@ -15,7 +14,7 @@ use const_assert::const_assert;
 /// # Safety
 /// Caller ensures that id does not have associated data.
 pub(crate) fn add_tag(world: &mut World, id: Id, tag: Id) -> EcsResult<()> {
-    let id_loc = world.id_index.get_location(id)?;
+    let id_loc = world.id_manager.get_location(id)?;
 
     // Create ComponentRecord for tag if it doesn't exist.
     // Unlike components, tags can be registered on the fly,
@@ -57,7 +56,7 @@ pub(crate) unsafe fn set_component<T: DataComponent>(
     comp: Id,
     val: T,
 ) -> Option<T> {
-    let id_loc = world.id_index.get_location(id).unwrap();
+    let id_loc = world.id_manager.get_location(id).unwrap();
 
     ensure_component(world, comp);
 
@@ -74,7 +73,7 @@ pub(crate) unsafe fn set_component<T: DataComponent>(
 
             match table.column_map.get(comp) {
                 Some(&col) => {
-                    let ptr = table.data.get_mut::<T>(col, id_loc.row);
+                    let ptr = table.id_data.get_mut::<T>(col, id_loc.row);
                     Some(std::mem::replace(ptr, val))
                 }
                 None => {
@@ -85,7 +84,7 @@ pub(crate) unsafe fn set_component<T: DataComponent>(
                     let table = &mut world.table_index[dst_table_id];
                     let col = *table.column_map.get(comp).unwrap();
 
-                    table.data.push(col, val);
+                    table.id_data.push(col, val);
                     table.validate_data();
                     None
                 }
@@ -103,7 +102,7 @@ pub(crate) fn set_component_checked<T: DataComponent>(
 ) -> Option<T> {
     const_assert!(|T| size_of::<T>() != 0);
 
-    let id_loc = world.id_index.get_location(id).unwrap();
+    let id_loc = world.id_manager.get_location(id).unwrap();
 
     ensure_component(world, comp);
 
@@ -127,7 +126,7 @@ pub(crate) fn set_component_checked<T: DataComponent>(
 
             match table.column_map.get(comp) {
                 Some(&col) => {
-                    let ptr = table.data.get_ptr_mut(col, id_loc.row);
+                    let ptr = table.id_data.get_ptr_mut(col, id_loc.row);
                     Some(ptr.cast::<T>().replace(val))
                 }
                 None => {
@@ -138,7 +137,7 @@ pub(crate) fn set_component_checked<T: DataComponent>(
                     let table = &mut world.table_index[dst_table_id];
                     let col = *table.column_map.get(comp).unwrap();
 
-                    table.data.push(col, val);
+                    table.id_data.push(col, val);
                     table.validate_data();
                     None
                 }
@@ -148,7 +147,7 @@ pub(crate) fn set_component_checked<T: DataComponent>(
 }
 
 pub(crate) fn has_component(world: &World, id: Id, comp: Id) -> bool {
-    let id_loc = match world.id_index.get_location(id) {
+    let id_loc = match world.id_manager.get_location(id) {
         Ok(location) => location,
         Err(_) => return false,
     };

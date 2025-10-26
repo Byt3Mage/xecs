@@ -6,7 +6,7 @@ use crate::{
     graph::GraphNode,
     id::{
         Id, IdMap, IntoId, Signature,
-        id_index::{IdIndex, IdLocation, IdRecord},
+        manager::{IdLocation, IdManager, IdRecord},
     },
     registration::ComponentId,
     storage::table::{self, Table},
@@ -17,7 +17,7 @@ use crate::{
 };
 
 pub struct World {
-    pub(crate) id_index: IdIndex,
+    pub(crate) id_manager: IdManager,
     pub(crate) type_arr: Vec<Option<Id>>,
     pub(crate) type_map: TypeMap<Id>,
     pub(crate) components: IdMap<ComponentInfo>,
@@ -32,13 +32,13 @@ impl World {
             id,
             _flags: TableFlags::empty(),
             signature: Signature::from(vec![]),
-            data: table::TableData::new(Box::from([])),
+            id_data: table::ComponentData::new(Box::from([])),
             column_map: IdMap::new(),
             node: GraphNode::new(),
         });
 
         Self {
-            id_index: IdIndex::new(),
+            id_manager: IdManager::new(),
             type_arr: Vec::new(),
             type_map: TypeMap::new(),
             components: IdMap::new(),
@@ -118,10 +118,10 @@ impl World {
     /// Creates a new [Id].
     pub fn new_id(&mut self) -> Id {
         let root = self.root_table;
-        self.id_index.new_id(|id| IdRecord {
+        self.id_manager.new_id(|id| IdRecord {
             location: IdLocation {
                 table: root,
-                row: unsafe { self.table_index[root].data.new_row(id) },
+                row: unsafe { self.table_index[root].id_data.new_row(id) },
             },
             flags: IdFlags::default(),
         })
@@ -172,7 +172,7 @@ impl World {
 
     #[inline(always)]
     pub fn is_alive(&self, entity: Id) -> bool {
-        self.id_index.is_alive(entity)
+        self.id_manager.is_alive(entity)
     }
 }
 
@@ -210,13 +210,13 @@ impl<'a, Ret> WorldMap<'a, Ret> for &'a World {
 impl<'a> WorldGet<'a> for &'a mut World {
     #[inline]
     fn get<T: Params>(self, id: Id) -> GetResult<T::ParamsType<'a>> {
-        T::create(self.into(), id)
+        T::create(self, id)
     }
 }
 
 impl<'a, Ret> WorldMap<'a, Ret> for &'a mut World {
     #[inline]
     fn map<T: Params>(self, id: Id, f: impl FnOnce(T::ParamsType<'a>) -> Ret) -> GetResult<Ret> {
-        T::create(self.into(), id).map(f)
+        T::create(self, id).map(f)
     }
 }

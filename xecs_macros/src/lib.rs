@@ -178,12 +178,12 @@ fn impl_component(ast: &DeriveInput) -> TokenStream {
     let data_type = if is_tag {
         quote! {
             type DataType = xecs::type_traits::Tag;
-            type DescType = xecs::component::TagDesc;
+            type DescType = xecs::component::TagBuilder;
         }
     } else {
         quote! {
             type DataType = xecs::type_traits::Data;
-            type DescType = xecs::component::ComponentDesc<Self>;
+            type DescType = xecs::component::ComponentBuilder<Self>;
         }
     };
 
