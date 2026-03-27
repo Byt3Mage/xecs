@@ -1,8 +1,11 @@
 use crate::{
     component::ComponentLocation,
     flags::TableFlags,
-    id::{Id, Signature},
-    storage::{Storage, column::ColumnVec, table::Table},
+    id::{Entity, Id, IdMap, Signature},
+    storage::{
+        Storage,
+        table::{Column, Table, TableData},
+    },
     table_index::TableId,
     world::World,
 };
@@ -22,19 +25,19 @@ pub(crate) struct GraphNode {
 impl GraphNode {
     pub(crate) fn new() -> Self {
         Self {
-            add: IdMap::new(),
-            remove: IdMap::new(),
+            add: IdMap::new(256),
+            remove: IdMap::new(256),
         }
     }
 }
 
 fn new_table(world: &mut World, ids: Signature) -> TableId {
-    world.table_index.add_with_id(|table_id| {
+    world.tables.add_with_id(|table_id| {
         let mut columns = Vec::new();
-        let mut component_map = IdMap::new();
+        let mut component_map = IdMap::new(256);
 
         for (index, &id) in ids.iter().enumerate() {
-            let cr = world.components.get_mut(id).unwrap();
+            let cr = id.map_get_mut(&mut world.components).unwrap();
             let mut cl = ComponentLocation {
                 id_idx: index,
                 col_idx: None,
@@ -43,8 +46,8 @@ fn new_table(world: &mut World, ids: Signature) -> TableId {
             if let Some(ti) = &cr.type_info {
                 let col_idx = columns.len();
                 cl.col_idx = Some(col_idx);
-                component_map.insert(id, col_idx);
-                columns.push(ColumnVec::new(id, Rc::clone(ti)));
+                id.map_insert(&mut component_map, col_idx);
+                columns.push(Column::new(id, Rc::clone(ti)));
             }
 
             match &mut cr.storage {
@@ -57,7 +60,7 @@ fn new_table(world: &mut World, ids: Signature) -> TableId {
             id: table_id,
             _flags: TableFlags::empty(),
             signature: ids,
-            id_data: ComponentData::new(columns.into()),
+            data: TableData::new(columns.into()),
             column_map: component_map,
             node: GraphNode::new(),
         }
@@ -67,23 +70,23 @@ fn new_table(world: &mut World, ids: Signature) -> TableId {
 /// Traverse the table graph to find the destination table for an added component.
 ///
 /// Returns `None` if the component is already present.
-pub fn table_traverse_add(world: &mut World, from_id: TableId, with: Id) -> Option<TableId> {
-    let from = &world.table_index[from_id];
+pub fn table_traverse_add(world: &mut World, from_id: TableId, with: Entity) -> Option<TableId> {
+    let from = &world.tables[from_id];
 
-    if let Some(edge) = from.node.add.get(with) {
+    if let Some(edge) = with.map_get(&from.node.add) {
         return Some(edge.to);
     }
 
     let ids = from.signature.try_extend(with)?;
-    let to_id = match world.table_index.get_id(&ids) {
+    let to_id = match world.tables.get_id(&ids) {
         Some(id) => id,
         None => new_table(world, ids),
     };
 
-    let from = &mut world.table_index[from_id];
+    let from = &mut world.tables[from_id];
 
-    from.node.add.insert(
-        with,
+    with.map_insert(
+        &mut from.node.add,
         GraphEdge {
             from: from_id,
             to: to_id,

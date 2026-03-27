@@ -1,19 +1,69 @@
+use ahash::AHashMap;
+
 use crate::{
     flags::ComponentFlags,
-    id::Id,
+    id::{Entity, Id, IdMap, pair::Pair},
     storage::{
         Storage, StorageType,
         sparse::{SparseData, SparseTag},
     },
-    type_info::{TypeHooksBuilder, TypeInfo, TypeName},
-    type_traits::{Component, DataComponent},
+    type_info::{TypeHooksBuilder, TypeIndex, TypeInfo, TypeName},
+    type_traits::{ComponentType, Data},
     world::World,
 };
-use std::{collections::HashMap, rc::Rc};
+
+use std::rc::Rc;
+
+/// # Safety
+/// DO NOT implement this trait directly, use #\[derive(Component)\] instead.
+pub unsafe trait Component: Sized + 'static {
+    type DataType: ComponentType;
+    type DescType: ComponentDescriptor;
+    const IS_GENERIC: bool;
+    const DEFAULT_STORAGE: StorageType = StorageType::Tables;
+
+    #[doc(hidden)]
+    fn type_index() -> TypeIndex;
+
+    #[doc(hidden)]
+    fn id(world: &World) -> Option<Entity> {
+        if Self::IS_GENERIC {
+            world.type_map.get::<Self>().copied()
+        } else {
+            let idx = Self::type_index().get();
+            world.type_arr.get(idx).copied().flatten()
+        }
+    }
+
+    fn get_or_register_type(world: &mut World) -> Entity {
+        if Self::IS_GENERIC {
+            if let Some(&id) = world.type_map.get::<Self>() {
+                return id;
+            }
+            let new_id = world.new_entity();
+            world.type_map.insert::<Self>(new_id);
+            new_id
+        } else {
+            let idx = Self::type_index().get();
+
+            if idx >= world.type_arr.len() {
+                world.type_arr.resize(idx + 1, None);
+            }
+
+            if let Some(id) = world.type_arr[idx] {
+                return id;
+            }
+
+            let new_id = world.new_entity();
+            world.type_arr[idx] = Some(new_id);
+            new_id
+        }
+    }
+}
 
 /// Component location in a [Table](crate::storage::table::Table).
 pub(crate) struct ComponentLocation {
-    /// Index of id in the table's [IdList](crate::types::IdList).
+    /// Index of id in the table's [Signature](crate::entity::Signature).
     pub(crate) id_idx: usize,
     /// [Column](crate::storage::Column) index where the id appears.
     /// Defaults to `None` if the id is a tag.
@@ -21,7 +71,6 @@ pub(crate) struct ComponentLocation {
 }
 
 pub(crate) struct ComponentInfo {
-    pub(crate) id: Id,
     pub(crate) flags: ComponentFlags,
     pub(crate) type_info: Option<Rc<TypeInfo>>,
     pub(crate) storage: Storage,
@@ -67,20 +116,17 @@ impl TagBuilder {
         self
     }
 
-    fn build(mut self, world: &mut World, id: Id) {
-        debug_assert!(id.is_id(), "attempted to build pair as entity");
-
+    fn build<T: Id>(mut self, world: &mut World, id: T) {
         self.flags.insert(ComponentFlags::IS_TAG);
 
         let storage = match self.storage_type {
-            StorageType::Tables => Storage::Tables(HashMap::new()),
+            StorageType::Tables => Storage::Tables(AHashMap::new()),
             StorageType::Sparse => Storage::SparseTag(SparseTag::new()),
         };
 
-        world.components.insert(
-            id,
+        id.map_insert(
+            &mut world.components,
             ComponentInfo {
-                id,
                 flags: self.flags,
                 type_info: None,
                 storage,
@@ -89,20 +135,20 @@ impl TagBuilder {
     }
 }
 
-pub struct ComponentBuilder<T: DataComponent> {
+pub struct ComponentBuilder<T: Component<DataType = Data>> {
     name: Option<TypeName>,
-    hooks: TypeHooksBuilder<T>,
     flags: ComponentFlags,
     storage_type: StorageType,
+    hooks: TypeHooksBuilder<T>,
 }
 
-impl<T: Component + DataComponent> ComponentBuilder<T> {
+impl<T: Component<DataType = Data>> ComponentBuilder<T> {
     pub fn new() -> Self {
         Self {
             name: None,
             hooks: TypeHooksBuilder::new(),
             flags: ComponentFlags::empty(),
-            storage_type: T::STORAGE,
+            storage_type: T::DEFAULT_STORAGE,
         }
     }
 
@@ -148,36 +194,31 @@ impl<T: Component + DataComponent> ComponentBuilder<T> {
     }
 
     #[inline]
-    pub fn on_set(mut self, f: impl FnMut(Id, &mut T) + 'static) -> Self {
+    pub fn on_set(mut self, f: impl FnMut(Entity, &mut T) + 'static) -> Self {
         self.hooks = self.hooks.on_set(f);
         self
     }
 
     #[inline]
-    pub fn on_remove(mut self, f: impl FnMut(Id, &mut T) + 'static) -> Self {
+    pub fn on_remove(mut self, f: impl FnMut(Entity, &mut T) + 'static) -> Self {
         self.hooks = self.hooks.on_remove(f);
         self
     }
 
-    pub(crate) fn build(mut self, world: &mut World, id: Id) {
-        debug_assert!(id.is_id(), "attempted to build pair as entity");
-
-        let type_info = Rc::new(TypeInfo::of::<T>(self.hooks));
-
-        let storage = match self.storage_type {
-            StorageType::Tables => Storage::Tables(HashMap::new()),
-            StorageType::Sparse => Storage::SparseData(SparseData::new(id, Rc::clone(&type_info))),
-        };
+    pub(crate) fn build(mut self, components: &mut IdMap<ComponentInfo>, id: Entity) {
+        let type_info = Rc::new(TypeInfo::of::<T>(self.hooks.build()));
 
         self.flags.remove(ComponentFlags::IS_TAG);
 
-        world.components.insert(
-            id,
+        id.map_insert(
+            components,
             ComponentInfo {
-                id,
                 flags: self.flags,
-                type_info: Some(type_info),
-                storage,
+                type_info: Some(type_info.clone()),
+                storage: match self.storage_type {
+                    StorageType::Tables => Storage::Tables(AHashMap::new()),
+                    StorageType::Sparse => Storage::SparseData(SparseData::new(type_info)),
+                },
             },
         );
     }
@@ -186,54 +227,50 @@ impl<T: Component + DataComponent> ComponentBuilder<T> {
 /// Ensures that a component exists for this id.
 ///
 /// This function creates the component as a tag if it didn't exist.
-pub(crate) fn ensure_component(world: &mut World, comp: Id) {
-    if !world.components.contains(comp) {
-        if comp.is_pair() {
-            build_pair(world, comp);
-        } else {
-            // We build component as tag since we don't have type info.
-            TagBuilder::new().build(world, comp);
-        }
+pub(crate) fn ensure_entity_comp(map: &mut IdMap<ComponentInfo>, comp: Entity) -> &ComponentInfo {
+    if !comp.map_contains_key(map) {
+        comp.map_insert(
+            map,
+            ComponentInfo {
+                flags: ComponentFlags::IS_TAG,
+                type_info: None,
+                storage: Storage::Tables(AHashMap::new()),
+            },
+        );
     }
+
+    comp.map_get(map).unwrap()
 }
 
-pub(crate) fn build_pair(world: &mut World, id: Id) {
-    debug_assert!(id.is_pair(), "attemped to build entity as pair");
+pub(crate) fn build_pair(world: &mut World, pair: Pair) {
+    // ensure both relation and target are valid, alive entities.
+    assert!(world.is_alive(pair.rel) && world.is_alive(pair.tgt));
 
-    let rel = world.id_manager.get_current(id.pair_rel()).unwrap();
-    let tgt = world.id_manager.get_current(id.pair_tgt()).unwrap();
+    let map = &mut world.components;
 
-    ensure_component(world, rel);
-
-    let ci_r = world.components.get(rel).unwrap();
+    // TODO: use world default storage type
+    let ci_r = ensure_entity_comp(map, pair.rel);
     let flags = ci_r.flags;
     let storage_type = ci_r.storage.get_type();
 
     // TODO: pair storages.
 
-    let type_info = {
-        match &ci_r.type_info {
-            Some(ti) => Some(Rc::clone(ti)),
-            None => {
-                ensure_component(world, tgt);
-                let cr_t = world.components.get(tgt).unwrap();
-                cr_t.type_info.as_ref().map(Rc::clone)
-            }
-        }
-    };
+    let type_info = ci_r
+        .type_info
+        .clone()
+        .or_else(|| pair.tgt.map_get(map)?.type_info.clone());
 
     let storage = match storage_type {
-        StorageType::Tables => Storage::Tables(HashMap::new()),
+        StorageType::Tables => Storage::Tables(AHashMap::new()),
         StorageType::Sparse => match &type_info {
-            Some(ti) => Storage::SparseData(SparseData::new(id, Rc::clone(ti))),
+            Some(ti) => Storage::SparseData(SparseData::new(ti.clone())),
             None => Storage::SparseTag(SparseTag::new()),
         },
     };
 
-    world.components.insert(
-        id,
+    pair.map_insert(
+        map,
         ComponentInfo {
-            id,
             flags,
             type_info,
             storage,
@@ -247,18 +284,18 @@ pub(crate) mod private {
 
 #[doc(hidden)]
 pub trait ComponentDescriptor {
-    fn build(self, world: &mut World, id: Id, _: private::Passkey);
+    fn build(self, world: &mut World, id: Entity, _: private::Passkey);
 }
 
 impl ComponentDescriptor for TagBuilder {
     #[inline(always)]
-    fn build(self, world: &mut World, id: Id, _: private::Passkey) {
+    fn build(self, world: &mut World, id: Entity, _: private::Passkey) {
         self.build(world, id);
     }
 }
 
-impl<T: Component + DataComponent> ComponentDescriptor for ComponentBuilder<T> {
-    fn build(self, world: &mut World, id: Id, _: private::Passkey) {
-        self.build(world, id);
+impl<T: Component<DataType = Data>> ComponentDescriptor for ComponentBuilder<T> {
+    fn build(self, world: &mut World, id: Entity, _: private::Passkey) {
+        self.build(&mut world.components, id);
     }
 }

@@ -7,7 +7,9 @@ description = "eXtended ecs"
 [dependencies]
 xecs_macros = { path = "xecs_macros" }
 const-assert = { git = "https://github.com/aquarius2019/const-assert.git" }
-thiserror = "2.0.16"
+thiserror = "2.0.17"
+simple-ternary = "0.3.0"
+ahash = "0.8.12"
 
 [dev-dependencies]
 criterion = "0.7.0"

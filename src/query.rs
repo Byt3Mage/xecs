@@ -1,6 +1,7 @@
+use crate::id::Id;
 use crate::storage::Storage;
 use crate::table_index::TableId;
-use crate::{id::Id, storage::table::Table, world::World};
+use crate::{id::Entity, storage::table::Table, world::World};
 use std::collections::HashSet;
 use std::vec;
 
@@ -41,7 +42,7 @@ enum SelectAccess {
 }
 
 pub struct Select {
-    id: Id,
+    id: Entity,
     access: SelectAccess,
 }
 
@@ -52,7 +53,7 @@ enum ColumnAccess {
 }
 
 struct Field {
-    id: Id,
+    id: Entity,
     access: ColumnAccess,
     is_optional: bool,
 }
@@ -112,14 +113,14 @@ impl SelectStmt {
         self
     }
 
-    pub fn read(self, id: Id) -> Self {
+    pub fn read(self, id: Entity) -> Self {
         self.select(Select {
             id,
             access: SelectAccess::Read,
         })
     }
 
-    pub fn write(self, id: Id) -> Self {
+    pub fn write(self, id: Entity) -> Self {
         self.select(Select {
             id,
             access: SelectAccess::Write,
@@ -140,11 +141,11 @@ impl SelectStmt {
 
 pub struct WithStmt {
     /// WITH (A)
-    with: Vec<Id>,
+    with: Vec<Entity>,
     /// WITH (!A)
-    without: Vec<Id>,
+    without: Vec<Entity>,
     /// WITH ((A | B))
-    anyofs: Vec<Vec<Id>>,
+    anyofs: Vec<Vec<Entity>>,
 }
 
 impl WithStmt {
@@ -156,17 +157,17 @@ impl WithStmt {
         }
     }
 
-    pub fn with(mut self, id: Id) -> Self {
+    pub fn with(mut self, id: Entity) -> Self {
         self.with.push(id);
         self
     }
 
-    pub fn without(mut self, id: Id) -> Self {
+    pub fn without(mut self, id: Entity) -> Self {
         self.without.push(id);
         self
     }
 
-    pub fn with_any(mut self, any: Vec<Id>) -> Self {
+    pub fn with_any(mut self, any: Vec<Entity>) -> Self {
         assert!(any.len() >= 2, "any_group requires at least two components");
         self.anyofs.push(any);
         self
@@ -191,10 +192,11 @@ impl QueryPlan {
     pub fn init_tables(&mut self, world: &World) {
         let mut candidates = vec![];
         let mut has_mandatory = false;
+        let map = &world.components;
 
         // Mandatory WITH: pick smallest
-        for &cid in &self.with_stmt.with {
-            let ci = world.components.get(cid).unwrap();
+        for id in &self.with_stmt.with {
+            let ci = id.map_get(map).unwrap();
 
             match &ci.storage {
                 Storage::Tables(tables) => {
@@ -210,7 +212,7 @@ impl QueryPlan {
 
         // Mandatory SELECT: pick smallest
         for select in &self.select_stmt.select {
-            let ci = world.components.get(select.id).unwrap();
+            let ci = select.id.map_get(map).unwrap();
             match &ci.storage {
                 Storage::Tables(tables) => {
                     if !has_mandatory || tables.len() < candidates.len() {
@@ -231,8 +233,8 @@ impl QueryPlan {
 
         // WITH anyof: union group, intersect across groups
         for group in &self.with_stmt.anyofs {
-            for &cid in group {
-                let ci = world.components.get(cid).unwrap();
+            for id in group {
+                let ci = id.map_get(map).unwrap();
                 match &ci.storage {
                     Storage::Tables(tables) => {
                         anyof_candidates.extend(tables.keys());
@@ -245,7 +247,7 @@ impl QueryPlan {
         // SELECT anyof: union group, intersect across groups
         for group in &self.select_stmt.anyofs {
             for select in group {
-                let ci = world.components.get(select.id).unwrap();
+                let ci = select.id.map_get(map).unwrap();
                 match &ci.storage {
                     Storage::Tables(tables) => {
                         anyof_candidates.extend(tables.keys());
@@ -257,7 +259,7 @@ impl QueryPlan {
 
         // Final candidate list
         self.table_ids = if anyof_candidates.is_empty() {
-            world.table_index.all_table_ids().copied().collect()
+            world.tables.all_table_ids().copied().collect()
         } else {
             anyof_candidates.into_iter().collect()
         };
@@ -266,16 +268,17 @@ impl QueryPlan {
     pub fn next_table<'w>(&mut self, ctx: &'w mut Context) -> Option<TableView<'w>> {
         #[inline]
         fn try_select(select: &Select, table: &Table, fields: &mut Vec<Field>) -> bool {
-            if let Some(&col) = table.column_map.get(select.id) {
+            if let Some(&col) = select.id.map_get(&table.column_map) {
                 fields.push(Field::new(select, col, false));
                 return true;
             }
+
             false
         }
 
         #[inline]
         fn try_anyof(select: &Select, table: &Table, fields: &mut Vec<Field>) -> bool {
-            if let Some(&col) = table.column_map.get(select.id) {
+            if let Some(&col) = select.id.map_get(&table.column_map) {
                 fields.push(Field::new(select, col, true));
                 return true;
             }
@@ -284,9 +287,9 @@ impl QueryPlan {
 
         #[inline]
         fn select_optional(select: &Select, table: &Table, fields: &mut Vec<Field>) {
-            let col = table
-                .column_map
-                .get(select.id)
+            let col = select
+                .id
+                .map_get(&table.column_map)
                 .copied()
                 .unwrap_or(usize::MAX);
 
@@ -294,7 +297,7 @@ impl QueryPlan {
         }
 
         while let Some(arch_id) = self.table_ids.pop() {
-            let table = &ctx.world.table_index[arch_id];
+            let table = &ctx.world.tables[arch_id];
             ctx.fields.clear();
 
             // Check with

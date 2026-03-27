@@ -154,14 +154,14 @@ fn impl_component(ast: &DeriveInput) -> TokenStream {
     let (is_generic, type_index) = if has_generics {
         (
             quote! { const IS_GENERIC: bool = true; },
-            quote! { xecs::registration::TypeIndex::INVALID },
+            quote! { xecs::type_info::TypeIndex::INVALID },
         )
     } else {
         (
             quote! { const IS_GENERIC: bool = false; },
             quote! {
-                static INDEX: std::sync::LazyLock<xecs::registration::TypeIndex> =
-                std::sync::LazyLock::new(|| xecs::registration::allocate_type_index());
+                static INDEX: std::sync::LazyLock<xecs::type_info::TypeIndex> =
+                std::sync::LazyLock::new(|| xecs::type_info::allocate_type_index());
                 *INDEX
             },
         )
@@ -188,17 +188,13 @@ fn impl_component(ast: &DeriveInput) -> TokenStream {
     };
 
     quote! {
-        unsafe impl #impl_generics xecs::type_traits::Component for #name #ty_generics
+        unsafe impl #impl_generics xecs::component::Component for #name #ty_generics
         #where_clause
         {
             #data_type
             #is_generic
-        }
 
-        unsafe impl #impl_generics xecs::registration::ComponentId for #name #ty_generics
-        #where_clause
-        {
-            fn type_index() -> xecs::registration::TypeIndex {
+            fn type_index() -> xecs::type_info::TypeIndex {
                 #type_index
             }
         }

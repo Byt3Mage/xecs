@@ -1,8 +1,7 @@
 use crate::{component::ComponentLocation, table_index::TableId};
+use ahash::AHashMap;
 use sparse::{SparseData, SparseTag};
-use std::collections::HashMap;
 
-pub(crate) mod column;
 pub(crate) mod sparse;
 pub(crate) mod table;
 
@@ -31,7 +30,7 @@ pub enum StorageType {
 pub(crate) enum Storage {
     SparseTag(SparseTag),
     SparseData(SparseData),
-    Tables(HashMap<TableId, ComponentLocation>),
+    Tables(AHashMap<TableId, ComponentLocation>),
 }
 
 impl Storage {

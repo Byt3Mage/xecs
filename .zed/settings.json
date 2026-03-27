@@ -4,13 +4,6 @@
 // see the documentation: https://zed.dev/docs/configuring-zed#settings-files
 
 {
-  "inlay_hints": {
-    "enabled": true,
-    "show_type_hints": true,
-    "show_parameter_hints": false,
-    "show_other_hints": false
-  },
-
   "lsp": {
     "rust-analyzer": {
       "initialization_options": {

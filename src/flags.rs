@@ -88,7 +88,7 @@ macro_rules! impl_bitflags {
 /// Represents a set of flags for tables, used to define various properties
 /// and behaviors of tables.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TableFlags(u64);
+pub struct TableFlags(u32);
 
 impl TableFlags {
     /// Indicates that the table has built-in components.
@@ -150,19 +150,16 @@ impl TableFlags {
 impl_bitflags!(TableFlags);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct IdFlags(u64);
+pub struct EntityFlags(u32);
 
-impl IdFlags {
+impl EntityFlags {
     pub const IS_COMPONENT: Self = Self(1 << 0);
-    pub const IS_TARGET: Self = Self(1 << 1);
-    pub const IS_TRAVERSABLE: Self = Self(1 << 2);
-    pub const HAS_SPARSE: Self = Self(1 << 3);
 }
 
-impl_bitflags!(IdFlags);
+impl_bitflags!(EntityFlags);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ComponentFlags(u64);
+pub struct ComponentFlags(u32);
 
 impl ComponentFlags {
     /// Marks the component as a tag
