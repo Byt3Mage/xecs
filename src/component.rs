@@ -1,158 +1,95 @@
-use ahash::AHashMap;
-
-use crate::{
-    flags::ComponentFlags,
-    id::{Entity, Id, IdMap, pair::Pair},
-    storage::{
-        Storage, StorageType,
-        sparse::{SparseData, SparseTag},
-    },
-    type_info::{TypeHooksBuilder, TypeIndex, TypeInfo, TypeName},
-    type_traits::{ComponentType, Data},
-    world::World,
+use std::{
+    fmt::Debug,
+    marker::PhantomData,
+    ptr::NonNull,
+    rc::Rc,
+    sync::atomic::{AtomicU32, Ordering},
 };
 
-use std::rc::Rc;
+use ahash::AHashSet;
 
-/// # Safety
-/// DO NOT implement this trait directly, use #\[derive(Component)\] instead.
-pub unsafe trait Component: Sized + 'static {
-    type DataType: ComponentType;
-    type DescType: ComponentDescriptor;
-    const IS_GENERIC: bool;
-    const DEFAULT_STORAGE: StorageType = StorageType::Tables;
+use crate::{
+    ecs::Ecs,
+    error::{EcsResult, Error, IdNotComponent, InvalidId},
+    graph::{find_add_table, find_remove_table},
+    id::{Id, manager::IdRecord, map::IdMap},
+    storage::{Storage, StorageType, singleton::Singleton, sparse::SparseSet, table::move_id},
+    type_meta::TypeMeta,
+    unsafe_ecs::UnsafeEcsCell,
+    utils::ConstNonNull,
+};
 
-    #[doc(hidden)]
-    fn type_index() -> TypeIndex;
+#[derive(Debug)]
+pub struct StaticId<T: 'static> {
+    id: u32,
+    name: &'static str,
+    storage: StorageType,
+    marker: PhantomData<fn() -> T>,
+}
 
-    #[doc(hidden)]
-    fn id(world: &World) -> Option<Entity> {
-        if Self::IS_GENERIC {
-            world.type_map.get::<Self>().copied()
-        } else {
-            let idx = Self::type_index().get();
-            world.type_arr.get(idx).copied().flatten()
+impl<T: 'static> StaticId<T> {
+    pub fn new(name: &'static str, storage: StorageType) -> Self {
+        Self {
+            id: Self::allocate(),
+            name,
+            storage,
+            marker: PhantomData,
         }
     }
 
-    fn get_or_register_type(world: &mut World) -> Entity {
-        if Self::IS_GENERIC {
-            if let Some(&id) = world.type_map.get::<Self>() {
-                return id;
-            }
-            let new_id = world.new_entity();
-            world.type_map.insert::<Self>(new_id);
-            new_id
-        } else {
-            let idx = Self::type_index().get();
+    pub fn id(&self) -> u32 {
+        self.id
+    }
 
-            if idx >= world.type_arr.len() {
-                world.type_arr.resize(idx + 1, None);
-            }
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
 
-            if let Some(id) = world.type_arr[idx] {
-                return id;
-            }
+    pub fn storage(&self) -> StorageType {
+        self.storage
+    }
 
-            let new_id = world.new_entity();
-            world.type_arr[idx] = Some(new_id);
-            new_id
-        }
+    fn allocate() -> u32 {
+        static MAX_INDEX: AtomicU32 = AtomicU32::new(0);
+        MAX_INDEX.fetch_add(1, Ordering::Relaxed)
     }
 }
 
-/// Component location in a [Table](crate::storage::table::Table).
-pub(crate) struct ComponentLocation {
-    /// Index of id in the table's [Signature](crate::entity::Signature).
-    pub(crate) id_idx: usize,
-    /// [Column](crate::storage::Column) index where the id appears.
-    /// Defaults to `None` if the id is a tag.
-    pub(crate) col_idx: Option<usize>,
+/// A Rust type with an associated ECS [Id].
+pub trait TypedStaticId: 'static + Sized {
+    fn id() -> &'static StaticId<Self>;
 }
 
-pub(crate) struct ComponentInfo {
-    pub(crate) flags: ComponentFlags,
-    pub(crate) type_info: Option<Rc<TypeInfo>>,
+pub struct ComponentHooks {
+    pub on_add: Option<Box<dyn FnMut(Id)>>,
+    pub on_remove: Option<Box<dyn FnMut(Id, ConstNonNull<u8>)>>,
+    pub on_set: Option<Box<dyn FnMut(Id, NonNull<u8>)>>,
+    pub default: Option<Box<dyn FnMut(NonNull<u8>)>>,
+    pub clone: Option<Box<dyn FnMut(ConstNonNull<u8>, NonNull<u8>)>>,
+}
+
+pub(crate) struct ComponentMeta {
     pub(crate) storage: Storage,
+    pub(crate) type_meta: Rc<TypeMeta>,
+    pub(crate) singleton: Option<Singleton>,
 }
 
-pub struct TagBuilder {
-    name: Option<TypeName>,
-    flags: ComponentFlags,
-    storage_type: StorageType,
+pub struct ComponentBuilder<T: 'static> {
+    pub(crate) name: Option<Rc<str>>,
+    pub(crate) storage_type: StorageType,
+    pub(crate) _marker: PhantomData<fn() -> T>,
 }
 
-impl TagBuilder {
+impl<T: 'static> ComponentBuilder<T> {
     pub fn new() -> Self {
         Self {
             name: None,
-            flags: ComponentFlags::empty(),
             storage_type: StorageType::default(),
+            _marker: PhantomData,
         }
     }
 
-    pub fn name(mut self, name: impl Into<TypeName>) -> Self {
-        self.name = Some(name.into());
-        self
-    }
-
-    pub fn storage(mut self, storage: StorageType) -> Self {
-        self.storage_type = storage;
-        self
-    }
-
-    pub fn with_flags(mut self, flag: ComponentFlags) -> Self {
-        self.flags.insert(flag);
-        self
-    }
-
-    pub fn set_flags(mut self, flags: ComponentFlags) -> Self {
-        self.flags = flags;
-        self
-    }
-
-    pub fn clear_flag(mut self, flag: ComponentFlags) -> Self {
-        self.flags.remove(flag);
-        self
-    }
-
-    fn build<T: Id>(mut self, world: &mut World, id: T) {
-        self.flags.insert(ComponentFlags::IS_TAG);
-
-        let storage = match self.storage_type {
-            StorageType::Tables => Storage::Tables(AHashMap::new()),
-            StorageType::Sparse => Storage::SparseTag(SparseTag::new()),
-        };
-
-        id.map_insert(
-            &mut world.components,
-            ComponentInfo {
-                flags: self.flags,
-                type_info: None,
-                storage,
-            },
-        );
-    }
-}
-
-pub struct ComponentBuilder<T: Component<DataType = Data>> {
-    name: Option<TypeName>,
-    flags: ComponentFlags,
-    storage_type: StorageType,
-    hooks: TypeHooksBuilder<T>,
-}
-
-impl<T: Component<DataType = Data>> ComponentBuilder<T> {
-    pub fn new() -> Self {
-        Self {
-            name: None,
-            hooks: TypeHooksBuilder::new(),
-            flags: ComponentFlags::empty(),
-            storage_type: T::DEFAULT_STORAGE,
-        }
-    }
-
-    pub fn name(mut self, name: impl Into<TypeName>) -> Self {
+    pub fn name(mut self, name: impl Into<Rc<str>>) -> Self {
         self.name = Some(name.into());
         self
     }
@@ -163,139 +100,208 @@ impl<T: Component<DataType = Data>> ComponentBuilder<T> {
         self
     }
 
-    #[inline]
-    pub fn add_flags(mut self, flags: ComponentFlags) -> Self {
-        self.flags.insert(flags);
-        self
-    }
+    pub(crate) fn build(self, components: &mut IdMap<ComponentMeta>, id: Id) {
+        let type_meta = Rc::new(TypeMeta::of::<T>());
+        let storage = match self.storage_type {
+            StorageType::Tables => Storage::Tables(AHashSet::new()),
+            StorageType::Sparse => Storage::Sparse(SparseSet::new(id, type_meta.clone())),
+        };
 
-    #[inline]
-    pub fn set_flags(mut self, flags: ComponentFlags) -> Self {
-        self.flags = flags;
-        self
-    }
-
-    #[inline]
-    pub fn clear_flags(mut self, flags: ComponentFlags) -> Self {
-        self.flags.remove(flags);
-        self
-    }
-
-    #[inline]
-    pub fn default(mut self, f: fn() -> T) -> Self {
-        self.hooks = self.hooks.with_default(f);
-        self
-    }
-
-    #[inline]
-    pub fn clone(mut self, f: fn(&T) -> T) -> Self {
-        self.hooks = self.hooks.with_clone(f);
-        self
-    }
-
-    #[inline]
-    pub fn on_set(mut self, f: impl FnMut(Entity, &mut T) + 'static) -> Self {
-        self.hooks = self.hooks.on_set(f);
-        self
-    }
-
-    #[inline]
-    pub fn on_remove(mut self, f: impl FnMut(Entity, &mut T) + 'static) -> Self {
-        self.hooks = self.hooks.on_remove(f);
-        self
-    }
-
-    pub(crate) fn build(mut self, components: &mut IdMap<ComponentInfo>, id: Entity) {
-        let type_info = Rc::new(TypeInfo::of::<T>(self.hooks.build()));
-
-        self.flags.remove(ComponentFlags::IS_TAG);
-
-        id.map_insert(
-            components,
-            ComponentInfo {
-                flags: self.flags,
-                type_info: Some(type_info.clone()),
-                storage: match self.storage_type {
-                    StorageType::Tables => Storage::Tables(AHashMap::new()),
-                    StorageType::Sparse => Storage::SparseData(SparseData::new(type_info)),
-                },
-            },
-        );
+        components.insert(id, ComponentMeta { type_meta, storage, singleton: None });
     }
 }
 
-/// Ensures that a component exists for this id.
+/// Inserts the value of a component for an id.
+/// Returns the previously held value, if any.
 ///
-/// This function creates the component as a tag if it didn't exist.
-pub(crate) fn ensure_entity_comp(map: &mut IdMap<ComponentInfo>, comp: Entity) -> &ComponentInfo {
-    if !comp.map_contains_key(map) {
-        comp.map_insert(
-            map,
-            ComponentInfo {
-                flags: ComponentFlags::IS_TAG,
-                type_info: None,
-                storage: Storage::Tables(AHashMap::new()),
-            },
-        );
-    }
+/// # Safety
+/// - Caller must ensure that `val` is the component data type.
+pub(crate) unsafe fn insert<T: 'static>(ecs: &mut Ecs, id: Id, comp: Id, val: T) -> EcsResult<Option<T>> {
+    let r = ecs.ids.get(id).ok_or(InvalidId(id))?;
+    let ci = ecs.components.get_mut(comp).ok_or(IdNotComponent(comp))?;
 
-    comp.map_get(map).unwrap()
+    // SAFETY: Caller ensures the val is the component data type
+    unsafe {
+        match &mut ci.storage {
+            Storage::Sparse(set) => Ok(set.insert(id, val)),
+            Storage::Tables(_) => {
+                let table = &ecs.tables[r.table];
+
+                let prev = if let Some(col) = table.col_map.get(comp) {
+                    Some(table.data.columns[*col].replace(r.row, val))
+                } else {
+                    // Move id to new table
+                    let new_table = find_add_table(ecs, r.table, comp).unwrap();
+                    let dst_row = move_id(ecs, id, r.table, r.row, new_table);
+
+                    // Write data into new column
+                    let new_table = &ecs.tables[new_table];
+                    let dst_col = new_table.col_map[comp];
+                    new_table.data.columns[dst_col].write(dst_row, val);
+                    None
+                };
+
+                Ok(prev)
+            }
+        }
+    }
 }
 
-pub(crate) fn build_pair(world: &mut World, pair: Pair) {
-    // ensure both relation and target are valid, alive entities.
-    assert!(world.is_alive(pair.rel) && world.is_alive(pair.tgt));
+pub(crate) unsafe fn remove(ecs: &mut Ecs, id: Id, tag: Id) -> EcsResult<()> {
+    let r = ecs.ids.get(id).ok_or(InvalidId(id))?;
+    let cm = ecs.components.get_mut(tag).ok_or(IdNotComponent(tag))?;
 
-    let map = &mut world.components;
-
-    // TODO: use world default storage type
-    let ci_r = ensure_entity_comp(map, pair.rel);
-    let flags = ci_r.flags;
-    let storage_type = ci_r.storage.get_type();
-
-    // TODO: pair storages.
-
-    let type_info = ci_r
-        .type_info
-        .clone()
-        .or_else(|| pair.tgt.map_get(map)?.type_info.clone());
-
-    let storage = match storage_type {
-        StorageType::Tables => Storage::Tables(AHashMap::new()),
-        StorageType::Sparse => match &type_info {
-            Some(ti) => Storage::SparseData(SparseData::new(ti.clone())),
-            None => Storage::SparseTag(SparseTag::new()),
-        },
+    unsafe {
+        match &mut cm.storage {
+            Storage::Sparse(set) => set.remove(id),
+            Storage::Tables(tables) => {
+                if tables.contains(&r.table) {
+                    let dst_table = find_remove_table(ecs, r.table, tag).unwrap();
+                    move_id(ecs, id, r.table, r.row, dst_table);
+                }
+            }
+        }
     };
 
-    pair.map_insert(
-        map,
-        ComponentInfo {
-            flags,
-            type_info,
-            storage,
-        },
-    );
+    Ok(())
+}
+
+pub(crate) fn has(ecs: &Ecs, id: Id, comp: Id) -> EcsResult<bool> {
+    let r = ecs.ids.get(id).ok_or(InvalidId(id))?;
+    let cm = ecs.components.get(comp).ok_or(IdNotComponent(comp))?;
+    Ok(match &cm.storage {
+        Storage::Sparse(set) => set.contains(id),
+        Storage::Tables(tables) => tables.contains(&r.table),
+    })
+}
+
+pub(crate) unsafe fn get<T: 'static>(ecs: &Ecs, id: Id, r: IdRecord, comp: Id) -> EcsResult<&T> {
+    let ci = ecs.components.get(comp).ok_or(IdNotComponent(comp))?;
+
+    let res = unsafe {
+        match &ci.storage {
+            Storage::Tables(_) => ecs.tables[r.table].get(comp, r.row),
+            Storage::Sparse(set) => set.get(id),
+        }
+    };
+
+    res.ok_or(Error::MissingComponent { id, comp })
+}
+
+pub(crate) unsafe fn get_mut<T: 'static>(ecs: &mut Ecs, id: Id, r: IdRecord, comp: Id) -> EcsResult<&mut T> {
+    let cm = ecs.components.get_mut(comp).ok_or(IdNotComponent(comp))?;
+    let res = unsafe {
+        match &mut cm.storage {
+            Storage::Tables(_) => ecs.tables[r.table].get_mut(comp, r.row),
+            Storage::Sparse(set) => set.get_mut(id),
+        }
+    };
+
+    res.ok_or(Error::MissingComponent { id, comp })
 }
 
 pub(crate) mod private {
-    pub struct Passkey;
+    pub trait Sealed {}
 }
 
-#[doc(hidden)]
-pub trait ComponentDescriptor {
-    fn build(self, world: &mut World, id: Entity, _: private::Passkey);
+pub trait Param: private::Sealed {
+    type Output<'a>;
+    const IS_IMMUTABLE: bool;
+
+    /// # Safety
+    /// Caller must ensure access doesn't violate aliasing rules.
+    unsafe fn make(ecs: UnsafeEcsCell<'_>, id: Id, r: IdRecord) -> EcsResult<Self::Output<'_>>;
 }
 
-impl ComponentDescriptor for TagBuilder {
-    #[inline(always)]
-    fn build(self, world: &mut World, id: Entity, _: private::Passkey) {
-        self.build(world, id);
+impl<T: Param> private::Sealed for T {}
+impl<T: TypedStaticId> Param for &T {
+    type Output<'a> = &'a T;
+    const IS_IMMUTABLE: bool = true;
+
+    unsafe fn make(cell: UnsafeEcsCell<'_>, id: Id, r: IdRecord) -> EcsResult<Self::Output<'_>> {
+        unsafe {
+            let ecs = cell.ecs();
+            get(ecs, id, r, ecs.id_t::<T>()?)
+        }
     }
 }
 
-impl<T: Component<DataType = Data>> ComponentDescriptor for ComponentBuilder<T> {
-    fn build(self, world: &mut World, id: Entity, _: private::Passkey) {
-        self.build(&mut world.components, id);
+impl<T: TypedStaticId> Param for &mut T {
+    type Output<'a> = &'a mut T;
+    const IS_IMMUTABLE: bool = false;
+
+    unsafe fn make(cell: UnsafeEcsCell<'_>, id: Id, r: IdRecord) -> EcsResult<Self::Output<'_>> {
+        unsafe {
+            let ecs = cell.world_mut();
+            get_mut(ecs, id, r, ecs.id_t::<T>()?)
+        }
     }
 }
+
+pub trait Params: Sized + private::Sealed {
+    type ParamsType<'a>;
+    const ALL_IMMUTABLE: bool;
+
+    /// # Safety
+    /// Caller must ensure access validation has been performed.
+    unsafe fn create(cell: UnsafeEcsCell<'_>, id: Id) -> EcsResult<Self::ParamsType<'_>>;
+}
+
+impl<T: Param> Params for T {
+    type ParamsType<'a> = T::Output<'a>;
+    const ALL_IMMUTABLE: bool = T::IS_IMMUTABLE;
+
+    unsafe fn create(cell: UnsafeEcsCell<'_>, id: Id) -> EcsResult<Self::ParamsType<'_>> {
+        unsafe {
+            let r = cell.ecs().ids.get(id).ok_or(InvalidId(id))?;
+            T::make(cell, id, r)
+        }
+    }
+}
+
+pub(crate) fn insert_singleton<T: 'static>(ecs: &mut Ecs, id: Id, val: T) -> EcsResult<Option<T>> {
+    let cm = ecs.components.get_mut(id).ok_or(IdNotComponent(id))?;
+    let prev = match &mut cm.singleton {
+        Some(s) => {
+            let mut singleton = s.borrow_mut::<T>();
+            Some(std::mem::replace(&mut *singleton, val))
+        }
+        None => {
+            cm.singleton = Some(Singleton::new(id, cm.type_meta.clone(), val));
+            None
+        }
+    };
+
+    Ok(prev)
+}
+
+macro_rules! impl_tuple_params {
+    ($($t:ident),*) => {
+        impl<$($t: Param),*> private::Sealed for ($($t,) *) {}
+        impl<$($t: Param),*> Params for ($($t,) *) {
+            type ParamsType<'a> = ($($t::Output<'a>,)*);
+            const ALL_IMMUTABLE: bool = { $($t::IS_IMMUTABLE &&)* true };
+
+            unsafe fn create(cell: UnsafeEcsCell<'_>, id: Id) -> EcsResult<Self::ParamsType<'_>> {
+                unsafe {
+                    let r = cell.ecs().ids.get(id).ok_or(InvalidId(id))?;
+                    Ok(($($t::make(cell, id, r)?,)*))
+                }
+            }
+        }
+    }
+}
+
+impl_tuple_params!(P0);
+impl_tuple_params!(P0, P1);
+impl_tuple_params!(P0, P1, P2);
+impl_tuple_params!(P0, P1, P2, P3);
+impl_tuple_params!(P0, P1, P2, P3, P4);
+impl_tuple_params!(P0, P1, P2, P3, P4, P5);
+impl_tuple_params!(P0, P1, P2, P3, P4, P5, P6);
+impl_tuple_params!(P0, P1, P2, P3, P4, P5, P6, P7);
+impl_tuple_params!(P0, P1, P2, P3, P4, P5, P6, P7, P8);
+impl_tuple_params!(P0, P1, P2, P3, P4, P5, P6, P7, P8, P9);
+impl_tuple_params!(P0, P1, P2, P3, P4, P5, P6, P7, P8, P9, P10);
+impl_tuple_params!(P0, P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11);
+impl_tuple_params!(P0, P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12);

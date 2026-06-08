@@ -8,6 +8,10 @@ use syn::{
     token::Comma,
 };
 
+use crate::component::Components;
+
+mod component;
+
 struct AllTuples {
     macro_ident: Ident,
     start: usize,
@@ -22,11 +26,7 @@ impl Parse for AllTuples {
         input.parse::<Comma>()?;
         let end = input.parse::<LitInt>()?.base10_parse()?;
 
-        Ok(AllTuples {
-            macro_ident,
-            start,
-            end,
-        })
+        Ok(AllTuples { macro_ident, start, end })
     }
 }
 
@@ -78,13 +78,7 @@ impl Parse for ParamItem {
             input.parse::<Token![?]>()?;
         }
 
-        Ok({
-            ParamItem {
-                ident,
-                is_mut,
-                is_opt,
-            }
-        })
+        Ok(ParamItem { ident, is_mut, is_opt })
     }
 }
 
@@ -140,64 +134,62 @@ pub fn params(input: TokenStream) -> TokenStream {
     quote! { #params }.into()
 }
 
-#[proc_macro_derive(Component)]
+#[proc_macro_derive(Component, attributes(component))]
 pub fn component(input: TokenStream) -> TokenStream {
     let item = parse_macro_input!(input as DeriveInput);
     impl_component(&item)
 }
 
-fn impl_component(ast: &DeriveInput) -> TokenStream {
-    let name = &ast.ident;
-    let (impl_generics, ty_generics, where_clause) = ast.generics.split_for_impl();
-    let has_generics = !ast.generics.params.is_empty();
+fn impl_component(input: &DeriveInput) -> TokenStream {
+    let mut storage = quote! {xecs::storage::StorageType::Tables};
 
-    let (is_generic, type_index) = if has_generics {
-        (
-            quote! { const IS_GENERIC: bool = true; },
-            quote! { xecs::type_info::TypeIndex::INVALID },
-        )
-    } else {
-        (
-            quote! { const IS_GENERIC: bool = false; },
-            quote! {
-                static INDEX: std::sync::LazyLock<xecs::type_info::TypeIndex> =
-                std::sync::LazyLock::new(|| xecs::type_info::allocate_type_index());
-                *INDEX
-            },
-        )
-    };
+    for attr in &input.attrs {
+        if attr.path().is_ident("component") {
+            attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("storage") {
+                    let value = meta.value()?;
+                    let lit: syn::LitStr = value.parse()?;
 
-    let is_tag = match &ast.data {
-        syn::Data::Struct(data_struct) => data_struct.fields.is_empty(),
-        syn::Data::Enum(data_enum) => data_enum.variants.is_empty(),
-        syn::Data::Union(_) => {
-            return quote! { compile_error!("Union type not supported for components."); }.into();
-        }
-    };
+                    storage = match lit.value().as_str() {
+                        "sparse" => quote! {xecs::storage::StorageType::Sparse},
+                        "tables" => quote! {xecs::storage::StorageType::Tables},
+                        _ => quote! {compile_error!("xecs: invalid component storage type")},
+                    };
+                }
 
-    let data_type = if is_tag {
-        quote! {
-            type DataType = xecs::type_traits::Tag;
-            type DescType = xecs::component::TagBuilder;
+                Ok(())
+            })
+            .unwrap();
         }
-    } else {
-        quote! {
-            type DataType = xecs::type_traits::Data;
-            type DescType = xecs::component::ComponentBuilder<Self>;
+    }
+
+    let name = &input.ident;
+
+    if !input.generics.params.is_empty() {
+        return quote! {
+            compile_error!("xecs: generic types are not supported for Component derive, use component! macro instead.");
         }
-    };
+        .into();
+    }
+
+    if let syn::Data::Union(_) = &input.data {
+        return quote! { compile_error!("xecs: union type not supported for components."); }.into();
+    }
 
     quote! {
-        unsafe impl #impl_generics xecs::component::Component for #name #ty_generics
-        #where_clause
-        {
-            #data_type
-            #is_generic
-
-            fn type_index() -> xecs::type_info::TypeIndex {
-                #type_index
+        impl xecs::component::TypedStaticId for #name {
+            fn id() -> &'static xecs::component::StaticId<#name> {
+                static COMP: std::sync::LazyLock<xecs::component::StaticId<#name>> =
+                std::sync::LazyLock::new(||xecs::component::StaticId::new(stringify!(#name), #storage));
+                &COMP
             }
         }
     }
     .into()
+}
+
+#[proc_macro]
+pub fn components(input: TokenStream) -> TokenStream {
+    let components = parse_macro_input!(input as Components);
+    quote! { #components }.into()
 }

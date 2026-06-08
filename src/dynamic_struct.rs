@@ -1,24 +1,35 @@
-use std::alloc::Layout;
+use std::{
+    alloc::{Layout, LayoutError},
+    usize,
+};
 
-/// Computes the layout of a `repr(C)` struct.
-/// Returns (total_size, struct_alignment, field_offsets).
-#[allow(unused)]
-fn compute_c_layout(fields: &[Layout]) -> (usize, usize, Vec<usize>) {
-    let mut max_align = 1;
-    let mut current_offset = 0;
-    let mut offsets = Vec::with_capacity(fields.len());
+pub struct DynamicComponent {
+    layout: Layout,
+    offsets: Box<[usize]>,
+}
 
-    for layout in fields {
-        let size = layout.size();
-        let align = layout.align();
+impl DynamicComponent {
+    pub fn new(fields: &[Layout]) -> Result<DynamicComponent, LayoutError> {
+        let mut layout = Layout::from_size_align(0, 1)?;
+        let mut offsets = Vec::with_capacity(fields.len());
 
-        max_align = max_align.max(align);
-        let padding = (align - (current_offset % align)) % align;
-        offsets.push(current_offset + padding);
-        current_offset += padding + size;
+        for &field in fields {
+            let (new_layout, offset) = layout.extend(field)?;
+            layout = new_layout;
+            offsets.push(offset);
+        }
+
+        Ok(Self {
+            layout: layout.pad_to_align(),
+            offsets: offsets.into_boxed_slice(),
+        })
     }
 
-    // Round up to `max_align`.
-    let total_size = current_offset.div_ceil(max_align) * max_align;
-    (total_size, max_align, offsets)
+    pub fn layout(&self) -> Layout {
+        self.layout
+    }
+
+    pub fn offsets(&self) -> &[usize] {
+        &self.offsets
+    }
 }

@@ -41,14 +41,14 @@ macro_rules! chain_methods_impl {
 
 #[macro_export]
 macro_rules! view {
-    (@from($world:expr, $id:expr)) => {{
-        $crate::id::entity_view::EntityView::new(&mut $world, $id)
+    (@from($ecs:expr, $id:expr)) => {{
+        $crate::id::entity_view::EntityView::new(&mut $ecs, $id)
     }};
 
     (@use($view:expr)) => { $view };
 
-    (@from($world:expr, $id:expr) $($methods:tt)*) => {{
-        let receiver = view!(@from($world, $id));
+    (@from($ecs:expr, $id:expr) $($methods:tt)*) => {{
+        let receiver = view!(@from($ecs, $id));
         || -> Result<_, $crate::error::EcsError> { Ok($crate::chain_methods_impl!(receiver, $($methods)*))}()
     }};
 

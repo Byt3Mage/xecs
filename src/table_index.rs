@@ -49,9 +49,14 @@ impl TableIndex {
 
         let id = TableId(self.tables.len() as u32);
         let table = f(id);
-        self.table_ids.insert(table.signature.clone(), id);
+        self.table_ids.insert(table.sig.clone(), id);
         self.tables.push(table);
         id
+    }
+
+    #[inline]
+    pub(crate) fn add(&mut self, table: Table) -> TableId {
+        self.add_with_id(|_| table)
     }
 
     #[inline]
@@ -59,26 +64,37 @@ impl TableIndex {
         self.table_ids.get(ids).copied()
     }
 
+    /// ## Panics
+    /// Panics if table ids `a` and `b` are equal or if either table id is invalid.
     #[inline]
-    pub(crate) fn get_2_mut(&mut self, a: TableId, b: TableId) -> Option<(&mut Table, &mut Table)> {
+    pub(crate) fn get_2_mut(&mut self, a: TableId, b: TableId) -> [&mut Table; 2] {
         let len = self.tables.len();
         let a = a.0 as usize;
         let b = b.0 as usize;
 
-        if a == b || a >= len || b >= len {
-            None
-        } else {
-            let ptr = self.tables.as_mut_ptr();
-            // SAFETY: a and b are valid and not equal.
-            Some(unsafe { (&mut *(ptr.add(a)), &mut *(ptr.add(b))) })
+        #[cold]
+        fn validate_ids(a: usize, b: usize, len: usize) {
+            if a == b {
+                panic!("table ids are equal (id = {a})");
+            }
+
+            if a >= len {
+                panic!("table id {a} is out of bounds (len = {len})")
+            }
+
+            if b >= len {
+                panic!("table id {b} is out of bounds (len = {len})")
+            }
         }
+
+        validate_ids(a, b, len);
+
+        // SAFETY: a and b are valid indices and not equal.
+        let ptr = self.tables.as_mut_ptr();
+        unsafe { [&mut *(ptr.add(a)), &mut *(ptr.add(b))] }
     }
 
-    pub(crate) fn all_tables(&self) -> &[Table] {
-        self.tables.as_slice()
-    }
-
-    pub(crate) fn all_table_ids(&self) -> Values<Signature, TableId> {
+    pub(crate) fn all_table_ids(&self) -> Values<'_, Signature, TableId> {
         self.table_ids.values()
     }
 }

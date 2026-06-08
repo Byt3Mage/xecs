@@ -1,74 +1,16 @@
-pub(crate) mod entity_manager;
-pub mod pair;
+pub(crate) mod manager;
+pub(crate) mod map;
 
-use crate::data_structures::{SparseIndex, SparseSet};
-use ahash::AHashMap;
-use pair::Pair;
 use std::{fmt::Display, ops::Deref, rc::Rc};
 
-pub trait Id: Clone + Display {
-    fn map_insert<V>(self, map: &mut IdMap<V>, value: V) -> Option<V>;
-    fn map_get<'a, V>(&self, map: &'a IdMap<V>) -> Option<&'a V>;
-    fn map_get_mut<'a, V>(&self, map: &'a mut IdMap<V>) -> Option<&'a mut V>;
-    fn map_contains_key<V>(&self, map: &IdMap<V>) -> bool;
-}
-
-/// FFI compatible representation of an id.
+/// FFI compatible representation of an id
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct Entity(u64);
+pub struct Id(u64);
 
-impl SparseIndex for Entity {
-    #[inline(always)]
-    fn idx(&self) -> usize {
-        self.idx() as usize
-    }
-}
-
-impl Id for Entity {
-    #[inline(always)]
-    fn map_insert<V>(self, map: &mut IdMap<V>, value: V) -> Option<V> {
-        match map.id_lo.get_mut(self.as_usize()) {
-            Some(v) => v.replace(value),
-            None => map.id_hi.insert(self, value),
-        }
-    }
-
-    #[inline(always)]
-    fn map_get<'a, V>(&self, map: &'a IdMap<V>) -> Option<&'a V> {
-        match map.id_lo.get(self.as_usize()) {
-            Some(v) => v.as_ref(),
-            None => map.id_hi.get(self),
-        }
-    }
-
-    #[inline(always)]
-    fn map_get_mut<'a, V>(&self, map: &'a mut IdMap<V>) -> Option<&'a mut V> {
-        match map.id_lo.get_mut(self.as_usize()) {
-            Some(v) => v.as_mut(),
-            None => map.id_hi.get_mut(self),
-        }
-    }
-
-    #[inline(always)]
-    fn map_contains_key<V>(&self, map: &IdMap<V>) -> bool {
-        match map.id_lo.get(self.as_usize()) {
-            Some(v) => v.is_some(),
-            None => map.id_hi.contains_key(self),
-        }
-    }
-}
-
-impl Display for Entity {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Entity({}, v{})", self.idx(), self.ver())
-    }
-}
-
-impl Entity {
+impl Id {
     /// Built-in entities
-    pub const NULL: Entity = Entity(u64::MAX);
-    pub const WILDCARD: Entity = Entity(0);
+    pub const NULL: Id = Id(u64::MAX);
 
     /// Creates a new `Entity` from raw bits.
     #[inline(always)]
@@ -78,13 +20,8 @@ impl Entity {
 
     /// Converts the `Entity` back to raw bits.
     #[inline(always)]
-    pub const fn to_raw(&self) -> u64 {
+    pub const fn raw(&self) -> u64 {
         self.0
-    }
-
-    #[inline(always)]
-    pub const fn as_usize(self) -> usize {
-        self.0 as usize
     }
 
     /// Returns the ID (lower 32 bits).
@@ -100,24 +37,27 @@ impl Entity {
     }
 
     /// Increments the version counter.
-    pub(crate) const fn inc_ver(&self) -> Self {
+    pub(crate) const fn next_version(&self) -> Self {
         Self((((self.0 >> 32) + 1) << 32) | (self.idx() as u64))
     }
+}
 
-    // const version of equality comparison
-    #[inline(always)]
-    pub const fn equals(self, other: Self) -> bool {
-        self.0 == other.0
+impl From<Id> for usize {
+    fn from(value: Id) -> usize {
+        value.0 as usize
     }
+}
 
-    pub const fn from_parts(idx: u32, ver: u32) -> Self {
-        Self(((ver as u64) << 32) | idx as u64)
+impl Display for Id {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}v{}", self.idx(), self.ver())
     }
 }
 
 /// Sorted list of ids in a [Table](crate::storage::table::Table)
 #[derive(Hash, PartialEq, Eq)]
-pub struct Signature(Rc<[Entity]>);
+#[repr(transparent)]
+pub struct Signature(Rc<[Id]>);
 
 impl Display for Signature {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -131,8 +71,8 @@ impl Clone for Signature {
     }
 }
 
-impl From<Vec<Entity>> for Signature {
-    fn from(mut value: Vec<Entity>) -> Self {
+impl From<Vec<Id>> for Signature {
+    fn from(mut value: Vec<Id>) -> Self {
         Self({
             value.sort();
             value.dedup();
@@ -141,19 +81,14 @@ impl From<Vec<Entity>> for Signature {
     }
 }
 
-impl<const N: usize> From<[Entity; N]> for Signature {
-    fn from(value: [Entity; N]) -> Self {
-        Self({
-            let mut vec = Vec::from(value);
-            vec.sort();
-            vec.dedup();
-            vec.into()
-        })
+impl<const N: usize> From<[Id; N]> for Signature {
+    fn from(value: [Id; N]) -> Self {
+        Vec::from(value).into()
     }
 }
 
 impl Deref for Signature {
-    type Target = [Entity];
+    type Target = [Id];
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -162,35 +97,35 @@ impl Deref for Signature {
 
 impl Signature {
     #[inline]
-    pub fn ids(&self) -> &[Entity] {
+    pub fn ids(&self) -> &[Id] {
         &self.0
     }
 
     #[inline]
-    pub fn has_id(&self, id: Entity) -> bool {
+    pub fn has(&self, id: Id) -> bool {
         self.binary_search(&id).is_ok()
     }
 
-    /// Creates a new sorted list from [Self](IdList) and `with`
+    /// Creates a new sorted list from [Signature] and `with`
     ///
     /// Returns `None` if self already contains `with`.
-    pub fn try_extend(&self, with: Entity) -> Option<Self> {
+    pub fn try_extend(&self, with: Id) -> Option<Self> {
         match self.binary_search(&with) {
             Ok(_) => None,
             Err(pos) => Some({
-                let mut new_list = Vec::with_capacity(pos);
-                new_list.extend_from_slice(&self[..pos]);
-                new_list.push(with);
-                new_list.extend_from_slice(&self[pos..]);
-                new_list.into()
+                let mut new_sig = Vec::with_capacity(pos);
+                new_sig.extend_from_slice(&self[..pos]);
+                new_sig.push(with);
+                new_sig.extend_from_slice(&self[pos..]);
+                new_sig.into()
             }),
         }
     }
 
-    /// Creates a new sorted list from [Self](IdList) without `from`.
+    /// Creates a new sorted list from [Signature] without `from`.
     ///
     /// Returns `None` if self doesn't contain `from`.
-    pub fn try_shrink(&self, from: Entity) -> Option<Self> {
+    pub fn try_shrink(&self, from: Id) -> Option<Self> {
         match self.binary_search(&from) {
             Ok(pos) => Some({
                 let mut new_list = Vec::from(self.as_ref());
@@ -198,22 +133,6 @@ impl Signature {
                 new_list.into()
             }),
             Err(_) => None,
-        }
-    }
-}
-
-pub struct IdMap<V> {
-    id_lo: Box<[Option<V>]>,
-    id_hi: SparseSet<Entity, V>,
-    pairs: AHashMap<Pair, V>,
-}
-
-impl<V> IdMap<V> {
-    pub fn new(max_low_id: usize) -> Self {
-        Self {
-            id_lo: std::iter::repeat_with(|| None).take(max_low_id).collect(),
-            id_hi: SparseSet::new(),
-            pairs: AHashMap::new(),
         }
     }
 }

@@ -1,28 +1,33 @@
-use crate::{
-    component::Component,
-    data_structures::{ErasedVec, SparseIndex},
-    id::Entity,
-    type_info::TypeInfo,
-    type_traits::Data,
-};
-use std::{rc::Rc, usize};
+use std::{mem, rc::Rc};
 
-struct Entry<T: Component<DataType = Data>> {
-    entity: Entity,
-    val: T,
+use crate::{id::Id, storage::column::Column, type_meta::TypeMeta};
+
+#[derive(Debug)]
+pub(crate) struct SparseSet {
+    ids: Vec<Id>,
+    column: Column,
+    rows: Vec<usize>,
 }
 
-pub(crate) struct SparseData {
-    dense: ErasedVec,
-    sparse: Vec<usize>,
+impl Drop for SparseSet {
+    fn drop(&mut self) {
+        let len = self.row_count();
+        unsafe { self.column.destroy(len, len) };
+    }
 }
 
-impl SparseData {
-    pub(crate) fn new(type_info: Rc<TypeInfo>) -> Self {
+impl SparseSet {
+    pub(crate) fn new(id: Id, type_meta: Rc<TypeMeta>) -> Self {
         Self {
-            dense: ErasedVec::new(type_info),
-            sparse: vec![],
+            column: Column::new(id, type_meta),
+            rows: vec![],
+            ids: vec![],
         }
+    }
+
+    #[inline]
+    pub fn row_count(&self) -> usize {
+        self.ids.len()
     }
 
     /// Inserts a value into the set for the given entity.
@@ -30,159 +35,85 @@ impl SparseData {
     ///
     /// # Safety
     /// Caller ensures `T` is the same type as the set items.
-    pub(crate) unsafe fn insert<T>(&mut self, id: Entity, val: T) -> Option<T>
-    where
-        T: Component<DataType = Data>,
-    {
-        let sparse = id.idx();
+    pub(crate) unsafe fn insert<T: 'static>(&mut self, id: Id, val: T) -> Option<T> {
+        let row_idx = id.idx() as usize;
 
-        if sparse >= self.sparse.len() {
-            self.sparse.resize(sparse + 1, usize::MAX);
+        if row_idx >= self.rows.len() {
+            self.rows.resize(row_idx + 1, usize::MAX);
         }
 
-        let dense = &mut self.sparse[sparse];
-
-        // SAFETY: Caller ensures that T matches the type of ErasedVec items.
+        // SAFETY: Caller ensures that T matches the type of column.
         unsafe {
-            if *dense < self.dense.len() {
-                // SAFETY: We just checked that dense is in bounds
-                Some(self.dense.replace(*dense, Entry { entity: id, val }).val)
-            } else {
-                *dense = self.dense.len();
-                self.dense.push(Entry { entity: id, val });
-                None
-            }
-        }
-    }
-
-    /// Removes an entity from the set and returns its Data if present.
-    ///
-    /// # Safety
-    /// Caller ensures `T` is the same type as the set items.
-    #[inline(always)]
-    pub(crate) unsafe fn remove<T>(&mut self, e: Entity) -> Option<T>
-    where
-        T: Component<DataType = Data>,
-    {
-        let dense = match self.sparse.get_mut(e.idx()) {
-            Some(dense) if *dense < self.dense.len() => dense,
-            _ => return None, // id not in set.
-        };
-
-        let dense = std::mem::replace(dense, usize::MAX);
-
-        // SAFETY:
-        // - Caller ensures T matches the item type of the set
-        // - Dense index is valid for the ErasedVec.
-        unsafe {
-            let removed = self.dense.swap_remove::<Entry<T>>(dense);
-
-            if dense < self.dense.len() {
-                let e = self.dense.get::<Entry<T>>(dense).entity;
-                self.sparse[e.idx()] = dense;
+            let row = self.rows[row_idx];
+            if row < self.row_count() {
+                return Some(self.column.replace(row, val));
             }
 
-            Some(removed.val)
-        }
-    }
+            let old_len = self.row_count();
+            let new_len = old_len.checked_add(1).unwrap();
+            self.column.realloc(old_len, new_len);
+            self.ids.reserve(1);
 
-    #[inline(always)]
-    pub(crate) fn contains(&self, e: Entity) -> bool {
-        self.sparse
-            .get(e.idx())
-            .is_some_and(|&d| d < self.dense.len())
-    }
+            self.column.write(old_len, val);
+            self.ids.push(id);
+            self.rows[row_idx] = old_len;
 
-    #[inline]
-    pub(crate) unsafe fn get<T>(&self, e: Entity) -> Option<&T>
-    where
-        T: Component<DataType = Data>,
-    {
-        let dense = *self.sparse.get(e.idx())?;
-
-        if dense >= self.dense.len() {
-            return None;
-        }
-
-        // SAFETY:
-        // - We just checked dense is in bounds.
-        // - Caller ensures T is dense item type
-        let entry = unsafe { self.dense.get::<Entry<T>>(dense) };
-
-        Some(&entry.val)
-    }
-
-    #[inline]
-    pub(crate) unsafe fn get_mut<T>(&mut self, e: Entity) -> Option<&mut T>
-    where
-        T: Component<DataType = Data>,
-    {
-        let dense = *self.sparse.get(e.idx())?;
-
-        if dense >= self.dense.len() {
-            return None;
-        }
-
-        // SAFETY:
-        // - We just checked dense is in bounds.
-        // - Caller ensures T is dense item type
-        let entry = unsafe { self.dense.get_mut::<Entry<T>>(dense) };
-
-        Some(&mut entry.val)
-    }
-}
-
-pub(crate) struct SparseTag {
-    ids: Vec<Entity>,
-    sparse: Vec<usize>,
-}
-
-impl SparseTag {
-    pub(crate) fn new() -> Self {
-        Self {
-            ids: vec![],
-            sparse: vec![],
-        }
-    }
-
-    /// Inserts a the id into the sparse set.
-    pub(crate) fn insert(&mut self, e: Entity) {
-        let sparse = e.idx();
-
-        if sparse >= self.sparse.len() {
-            self.sparse.resize(sparse + 1, usize::MAX);
-        }
-
-        // SAFETY: we just ensured capacity for sparse index.
-        let dense = unsafe { self.sparse.get_unchecked_mut(sparse) };
-        let len = self.ids.len();
-
-        if *dense > len {
-            *dense = len;
-            self.ids.push(e);
+            None
         }
     }
 
     /// Removes an entity from the set.
-    pub(crate) fn remove(&mut self, e: Entity) {
-        let dense = match self.sparse.get_mut(e.idx()) {
-            Some(dense) if *dense < self.ids.len() => dense,
-            _ => return, // entity not in set.
+    #[inline(always)]
+    pub(crate) fn remove(&mut self, id: Id) {
+        let row_idx = id.idx() as usize;
+
+        let row = match self.rows.get_mut(row_idx) {
+            Some(r) if *r < self.ids.len() => mem::replace(r, usize::MAX),
+            _ => return,
         };
 
-        let dense = std::mem::replace(dense, usize::MAX);
-        self.ids.swap_remove(dense);
+        // SAFETY:
+        // - Caller ensures T matches the item type of the set
+        // - Row is valid for the column.
+        unsafe {
+            self.column.drop_row(row);
 
-        if dense != self.ids.len() {
-            self.sparse[self.ids[dense].idx()] = dense;
+            let last = self.row_count() - 1;
+
+            if row != last {
+                self.column.copy_row(last, row);
+                self.ids.swap_remove(row);
+                self.rows[self.ids[row].idx() as usize] = row;
+            } else {
+                self.ids.pop();
+            }
         }
     }
 
+    #[inline(always)]
+    pub(crate) fn contains(&self, id: Id) -> bool {
+        self.rows.get(id.idx() as usize).is_some_and(|&r| r < self.row_count())
+    }
+
     #[inline]
-    pub fn contains(&self, e: Entity) -> bool {
-        match self.sparse.get(e.idx()) {
-            Some(&dense) => dense < self.ids.len(),
-            None => false,
-        }
+    pub(crate) unsafe fn get<T: 'static>(&self, id: Id) -> Option<&T> {
+        // SAFETY:
+        // - We just checked row is in bounds.
+        // - Caller ensures T is column item type
+        self.rows
+            .get(id.idx() as usize)
+            .filter(|&&r| r < self.row_count())
+            .map(|&r| unsafe { self.column.get(r) })
+    }
+
+    #[inline]
+    pub(crate) unsafe fn get_mut<T: 'static>(&mut self, id: Id) -> Option<&mut T> {
+        // SAFETY:
+        // - We just checked row is in bounds.
+        // - Caller ensures T is column item type
+        self.rows
+            .get(id.idx() as usize)
+            .filter(|&&r| r < self.row_count())
+            .map(|&r| unsafe { self.column.get_mut(r) })
     }
 }

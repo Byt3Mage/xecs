@@ -88,6 +88,7 @@ macro_rules! impl_bitflags {
 /// Represents a set of flags for tables, used to define various properties
 /// and behaviors of tables.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
 pub struct TableFlags(u32);
 
 impl TableFlags {
@@ -150,6 +151,7 @@ impl TableFlags {
 impl_bitflags!(TableFlags);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
 pub struct EntityFlags(u32);
 
 impl EntityFlags {
@@ -159,6 +161,7 @@ impl EntityFlags {
 impl_bitflags!(EntityFlags);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
 pub struct ComponentFlags(u32);
 
 impl ComponentFlags {

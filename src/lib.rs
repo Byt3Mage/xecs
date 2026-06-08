@@ -1,21 +1,21 @@
-// Public modules
-pub mod atomic_refcell;
 pub mod component;
-pub mod data_structures;
+pub mod dynamic_struct;
+mod ecs;
 pub mod error;
 pub mod flags;
-pub mod get_params;
+mod graph;
 pub mod id;
 pub mod macros;
 pub mod query;
 pub mod storage;
-pub mod type_info;
-pub mod type_traits;
-pub mod world;
-
-mod dynamic_struct;
-mod graph;
-mod pointer;
 mod table_index;
+pub mod type_meta;
+mod unsafe_ecs;
 mod utils;
-mod world_utils;
+
+pub use component::{StaticId, TypedStaticId};
+pub use ecs::Ecs;
+pub use error::Error;
+pub use id::Id;
+pub use query::{Query, QueryBuilder};
+pub use xecs_macros;
