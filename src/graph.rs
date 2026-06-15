@@ -91,7 +91,7 @@ pub fn find_remove_table(ecs: &mut Ecs, from: TableId, without: Id) -> Option<Ta
     // Insert remove edge From -> To
     ecs.tables[from].graph_node.remove.insert(without, to);
     // Insert add edge To -> From
-    ecs.tables[from].graph_node.add.insert(without, from);
+    ecs.tables[to].graph_node.add.insert(without, from);
 
     Some(to)
 }

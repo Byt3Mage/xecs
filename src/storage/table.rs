@@ -214,7 +214,7 @@ pub(crate) unsafe fn move_id(ecs: &mut Ecs, id: Id, src_table: TableId, src_row:
 
     while si < src.num_cols() && di < dst.num_cols() {
         let src_col = src.column(si);
-        let dst_col = dst.column(si);
+        let dst_col = dst.column(di);
 
         match src_col.id().cmp(&dst_col.id()) {
             Ordering::Equal => {

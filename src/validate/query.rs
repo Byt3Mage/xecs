@@ -12,7 +12,7 @@ pub fn check_access(required: AccessType, declared: &Access) {
 
 #[cfg(not(feature = "validate"))]
 #[inline(always)]
-pub fn check_field(_required: AccessType, _declared: &Access) {}
+pub fn check_access(_required: AccessType, _declared: &Access) {}
 
 /// Validate a row type's required accesses against the query's declared
 /// accesses for a table. Called once per table in `each_row`, before the loop.
