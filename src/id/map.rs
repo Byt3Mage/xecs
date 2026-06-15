@@ -56,6 +56,13 @@ impl<T> IdMap<T> {
             None => self.id_index_hi.remove(&id),
         }
     }
+
+    pub fn values_mut(&mut self) -> impl Iterator<Item = &mut T> {
+        self.id_index_lo
+            .iter_mut()
+            .flatten()
+            .chain(self.id_index_hi.values_mut())
+    }
 }
 
 impl<T> Index<Id> for IdMap<T> {

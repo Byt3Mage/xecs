@@ -1,42 +1,132 @@
+use std::rc::Rc;
+
 use smallvec::SmallVec;
 
 use crate::{
+    access::{Access, AccessList, AccessType},
     component::{StaticId, TypedStaticId},
     ecs::Ecs,
     error::EcsResult,
     id::Id,
+    query::iter::Row,
     storage::Storage,
     table_index::TableId,
+    validate::WriteConflict,
 };
 
 use self::iter::TableIter;
 
 pub mod dsl;
 pub mod iter;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Access {
-    Read(Id),
-    Write(Id),
-}
-
-impl Access {
-    fn id(&self) -> Id {
-        match self {
-            Access::Read(id) | Access::Write(id) => *id,
-        }
-    }
-}
+pub mod typed_query;
 
 struct TableMatch {
     table_id: TableId,
-    columns: Box<[usize]>,
+    col_indices: Box<[usize]>,
+}
+
+pub struct QueryBuilder<'w> {
+    pub(crate) ecs: &'w Ecs,
+    pub(crate) fields: AccessList,
+    pub(crate) singletons: AccessList,
+    pub(crate) with: Vec<Id>,
+    pub(crate) without: Vec<Id>,
+}
+
+impl<'w> QueryBuilder<'w> {
+    pub fn new(ecs: &'w Ecs) -> Self {
+        Self {
+            ecs,
+            fields: AccessList::new(),
+            singletons: AccessList::new(),
+            with: vec![],
+            without: vec![],
+        }
+    }
+
+    #[inline]
+    pub fn access(mut self, access: Access) -> Result<Self, WriteConflict> {
+        self.fields.push(access)?;
+        Ok(self)
+    }
+
+    pub fn read_id(self, id: Id) -> Result<Self, WriteConflict> {
+        self.access(Access { id, ty: AccessType::Read })
+    }
+
+    pub fn write_id(self, id: Id) -> Result<Self, WriteConflict> {
+        self.access(Access { id, ty: AccessType::Write })
+    }
+
+    pub fn with_id(mut self, id: Id) -> Self {
+        self.with.push(id);
+        self
+    }
+
+    pub fn without_id(mut self, id: Id) -> Self {
+        self.without.push(id);
+        self
+    }
+
+    pub fn read<T>(self, comp: &StaticId<T>) -> EcsResult<Self> {
+        let id = self.ecs.id(comp)?;
+        Ok(self.read_id(id)?)
+    }
+
+    pub fn write<T>(self, comp: &StaticId<T>) -> EcsResult<Self> {
+        let id = self.ecs.id(comp)?;
+        Ok(self.write_id(id)?)
+    }
+
+    pub fn with<T>(self, comp: &StaticId<T>) -> EcsResult<Self> {
+        let id = self.ecs.id(comp)?;
+        Ok(self.with_id(id))
+    }
+
+    pub fn without<T>(self, comp: &StaticId<T>) -> EcsResult<Self> {
+        let id = self.ecs.id(comp)?;
+        Ok(self.without_id(id))
+    }
+
+    pub fn read_t<T: TypedStaticId>(self) -> EcsResult<Self> {
+        let id = self.ecs.id_t::<T>()?;
+        Ok(self.read_id(id)?)
+    }
+
+    pub fn write_t<T: TypedStaticId>(self) -> EcsResult<Self> {
+        let id = self.ecs.id_t::<T>()?;
+        Ok(self.write_id(id)?)
+    }
+
+    pub fn with_t<T: TypedStaticId>(self) -> EcsResult<Self> {
+        let id = self.ecs.id_t::<T>()?;
+        Ok(self.with_id(id))
+    }
+
+    pub fn without_t<T: TypedStaticId>(self) -> EcsResult<Self> {
+        let id = self.ecs.id_t::<T>()?;
+        Ok(self.without_id(id))
+    }
+
+    pub fn build(self) -> Query {
+        let mut query = Query {
+            fields: self.fields.into(),
+            resources: self.singletons.into(),
+            with: self.with.into(),
+            without: self.without.into(),
+            matches: vec![],
+        };
+
+        query.match_tables(self.ecs);
+        query
+    }
 }
 
 pub struct Query {
-    access: Box<[Access]>,
-    with: Box<[Id]>,
-    without: Box<[Id]>,
+    fields: AccessList,
+    resources: AccessList,
+    with: Rc<[Id]>,
+    without: Rc<[Id]>,
     matches: Vec<TableMatch>,
 }
 
@@ -46,7 +136,7 @@ impl Query {
     }
 
     fn try_match_all(&mut self, ecs: &Ecs) -> bool {
-        if !(self.access.is_empty() && self.with.is_empty()) {
+        if !(self.fields.is_empty() && self.with.is_empty()) {
             return false;
         }
 
@@ -55,7 +145,7 @@ impl Query {
             .all_table_ids()
             .filter_map(|&t| match self.without.iter().any(|&id| ecs.tables[t].sig.has(id)) {
                 true => None,
-                false => Some(TableMatch { table_id: t, columns: Box::new([]) }),
+                false => Some(TableMatch { table_id: t, col_indices: Box::new([]) }),
             })
             .collect();
 
@@ -70,9 +160,9 @@ impl Query {
         }
 
         let required: SmallVec<[Id; 8]> = self
-            .access
+            .fields
             .iter()
-            .map(|a| a.id())
+            .map(|f| f.id)
             .chain(self.with.iter().copied())
             .collect();
 
@@ -99,157 +189,101 @@ impl Query {
             // Must NOT have any excluded ids
             if required.iter().all(|&id| table.sig.has(id)) && !self.without.iter().any(|&id| table.sig.has(id)) {
                 // Resolve column indices for each field
-                let columns = self.access.iter().map(|f| table.col_map[f.id()]).collect();
-                self.matches.push(TableMatch { table_id, columns });
+                let columns = self.fields.iter().map(|f| table.col_map[f.id]).collect();
+                self.matches.push(TableMatch { table_id, col_indices: columns });
             }
         }
     }
 
-    /// Iterate all matched tables, calling `f` for each one.
-    /// The callback receives a `TableIter` to extract column slices.
-    pub fn each_table(&self, ecs: &Ecs, mut f: impl FnMut(TableIter<'_>)) {
-        for entry in &self.matches {
-            f(TableIter {
-                ecs,
-                table: &ecs.tables[entry.table_id],
-                col_indices: &entry.columns,
-                singletons: todo!(),
-            });
-        }
+    /// Internal: wrap this query against a shared `&Ecs`.
+    #[inline]
+    fn view<'a>(&'a self, ecs: &'a Ecs) -> QueryView<'a> {
+        QueryView { query: self, ecs }
     }
 
-    /// Iterate all matched tables, calling `f` for each one.
-    /// The callback receives a `TableIter` to extract column slices.
-    pub fn try_each_table<F, E>(&self, ecs: &Ecs, mut f: F) -> Result<(), E>
+    #[inline]
+    pub fn each<T: Row>(&self, ecs: &mut Ecs, f: impl FnMut(T::Get<'_>)) {
+        // &mut Ecs is the gate: forces multi-query access through `combine`.
+        self.view(ecs).each::<T>(f)
+    }
+
+    #[inline]
+    pub fn each_table(&self, ecs: &mut Ecs, f: impl FnMut(TableIter<'_>)) {
+        self.view(ecs).each_table(f)
+    }
+
+    #[inline]
+    pub fn try_each_table<F, E>(&self, ecs: &mut Ecs, f: F) -> Result<(), E>
     where
         F: FnMut(TableIter<'_>) -> Result<(), E>,
     {
-        Ok(for entry in &self.matches {
-            f(TableIter {
-                ecs,
-                table: &ecs.tables[entry.table_id],
-                col_indices: &entry.columns,
-                singletons: todo!(),
-            })?;
+        self.view(ecs).try_each_table(f)
+    }
+}
+
+/// A single query bound to a shared `&Ecs`, handed out by `CombinedQuery::run`.
+/// Carries no `&mut` — exclusivity across the combined set was proven by
+/// `combine`'s `check_disjoint`, so multiple views coexist over one `&Ecs`.
+pub struct QueryView<'a> {
+    query: &'a Query,
+    ecs: &'a Ecs,
+}
+
+impl<'a> QueryView<'a> {
+    #[inline]
+    fn tables(&self) -> impl Iterator<Item = TableIter<'a>> {
+        let ecs = self.ecs;
+        let query = self.query;
+        query.matches.iter().map(move |entry| TableIter {
+            ecs,
+            table: &ecs.tables[entry.table_id],
+            col_indices: &entry.col_indices,
+            fields: &query.fields,
+            singletons: &query.resources,
         })
     }
-}
 
-#[derive(Debug, thiserror::Error)]
-pub enum QueryBuildError {
-    #[error("query write conflict: {0}")]
-    WriteConflict(Id),
-}
-
-pub struct QueryBuilder<'w> {
-    ecs: &'w Ecs,
-    columns: Vec<Access>,
-    with: Vec<Id>,
-    without: Vec<Id>,
-}
-
-impl<'w> QueryBuilder<'w> {
-    pub fn new(ecs: &'w Ecs) -> Self {
-        Self {
-            ecs,
-            columns: vec![],
-            with: vec![],
-            without: vec![],
-        }
+    #[inline]
+    pub fn each<T: Row>(&self, mut f: impl FnMut(T::Get<'_>)) {
+        self.tables().for_each(|t| t.each_row::<T>(|r| f(r)))
     }
 
-    pub fn read_id(mut self, id: Id) -> Self {
-        self.columns.push(Access::Read(id));
-        self
+    #[inline]
+    pub fn each_table(&self, f: impl FnMut(TableIter<'_>)) {
+        self.tables().for_each(f)
     }
 
-    pub fn write_id(mut self, id: Id) -> Self {
-        self.columns.push(Access::Write(id));
-        self
-    }
-
-    pub fn with_id(mut self, id: Id) -> Self {
-        self.with.push(id);
-        self
-    }
-
-    pub fn without_id(mut self, id: Id) -> Self {
-        self.without.push(id);
-        self
-    }
-
-    pub fn read<T>(self, comp: &StaticId<T>) -> EcsResult<Self> {
-        let id = self.ecs.id(comp)?;
-        Ok(self.read_id(id))
-    }
-
-    pub fn write<T>(self, comp: &StaticId<T>) -> EcsResult<Self> {
-        let id = self.ecs.id(comp)?;
-        Ok(self.write_id(id))
-    }
-
-    pub fn with<T>(self, comp: &StaticId<T>) -> EcsResult<Self> {
-        let id = self.ecs.id(comp)?;
-        Ok(self.with_id(id))
-    }
-
-    pub fn without<T>(self, comp: &StaticId<T>) -> EcsResult<Self> {
-        let id = self.ecs.id(comp)?;
-        Ok(self.without_id(id))
-    }
-
-    pub fn read_t<T: TypedStaticId>(self) -> EcsResult<Self> {
-        let id = self.ecs.id_t::<T>()?;
-        Ok(self.read_id(id))
-    }
-
-    pub fn write_t<T: TypedStaticId>(self) -> EcsResult<Self> {
-        let id = self.ecs.id_t::<T>()?;
-        Ok(self.write_id(id))
-    }
-
-    pub fn with_t<T: TypedStaticId>(self) -> EcsResult<Self> {
-        let id = self.ecs.id_t::<T>()?;
-        Ok(self.with_id(id))
-    }
-
-    pub fn without_t<T: TypedStaticId>(self) -> EcsResult<Self> {
-        let id = self.ecs.id_t::<T>()?;
-        Ok(self.without_id(id))
-    }
-
-    pub fn build(self) -> Result<Query, QueryBuildError> {
-        // Validate no conflicting access on the same id
-        validate_access(&self.columns).map_err(QueryBuildError::WriteConflict)?;
-
-        let mut query = Query {
-            access: self.columns.into(),
-            with: self.with.into(),
-            without: self.without.into(),
-            matches: vec![],
-        };
-
-        query.match_tables(self.ecs);
-        Ok(query)
+    #[inline]
+    pub fn try_each_table<F, E>(&self, f: F) -> Result<(), E>
+    where
+        F: FnMut(TableIter<'_>) -> Result<(), E>,
+    {
+        self.tables().try_for_each(f)
     }
 }
 
-#[inline]
-fn validate_access(access_list: &[Access]) -> Result<(), Id> {
-    let len = access_list.len();
+pub struct CombinedQuery<'q, const N: usize> {
+    queries: [&'q Query; N],
+}
 
-    for i in 0..len {
-        for j in (i + 1)..len {
-            let a = access_list[i];
-            let b = access_list[j];
-
-            if let (Access::Write(a), Access::Write(b)) = (a, b)
-                && a == b
-            {
-                return Err(a);
-            }
-        }
+impl<'q, const N: usize> CombinedQuery<'q, N> {
+    /// Run a closure with N query views over a shared `&Ecs`. The `&mut Ecs`
+    /// gate guarantees no other query runs concurrently; `combine` proved these
+    /// N are pairwise disjoint, so the views may be used together freely.
+    #[inline]
+    pub fn run<R>(&self, ecs: &mut Ecs, f: impl FnOnce([QueryView<'_>; N]) -> R) -> R {
+        let ecs: &Ecs = ecs; // one &mut → N shared views
+        let views = self.queries.map(|q| QueryView { query: q, ecs });
+        f(views)
     }
+}
 
-    Ok(())
+pub fn combine<const N: usize>(queries: [&Query; N]) -> Result<CombinedQuery<'_, N>, WriteConflict> {
+    let fields: [&[Access]; N] = queries.map(|q| &*q.fields);
+    let resources: [&[Access]; N] = queries.map(|q| &*q.resources);
+
+    crate::validate::check_combined(&fields)?;
+    crate::validate::check_combined(&resources)?;
+
+    Ok(CombinedQuery { queries })
 }

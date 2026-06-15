@@ -1,6 +1,6 @@
-use crate::{id::Id, table_index::TableId};
+use crate::{error::InvalidId, id::Id, table_index::TableId};
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub struct IdRecord {
     pub(crate) table: TableId,
     pub(crate) row: usize,
@@ -14,23 +14,18 @@ struct Entry {
 pub struct IdManager {
     dense: Vec<Entry>,
     sparse: Vec<usize>,
-    alive_count: usize,
+    alive: usize,
     max_id: u64,
 }
 
 impl IdManager {
     pub(crate) fn new() -> Self {
-        Self {
-            dense: vec![],
-            sparse: vec![],
-            alive_count: 0,
-            max_id: 0,
-        }
+        Self { dense: vec![], sparse: vec![], alive: 0, max_id: 0 }
     }
 
     pub(crate) fn set_location(&mut self, id: Id, table: TableId, row: usize) {
         if let Some(&dense) = self.sparse.get(id.idx() as usize)
-            && dense < self.alive_count
+            && dense < self.alive
         {
             let entry = &mut self.dense[dense];
             if entry.id == id {
@@ -43,22 +38,19 @@ impl IdManager {
     /// Returns the [IdRecord] for the [Id].
     ///
     /// [Id] must exist and must be alive to have a record.
-    pub(crate) fn get(&self, id: Id) -> Option<IdRecord> {
-        let dense = *self.sparse.get(id.idx() as usize)?;
-
-        if dense >= self.alive_count {
-            return None;
-        }
-
-        let entry = &self.dense[dense];
-        (entry.id == id).then_some(entry.record)
+    pub(crate) fn get(&self, id: Id) -> Result<IdRecord, InvalidId> {
+        self.sparse
+            .get(id.idx() as usize)
+            .and_then(|dense| (dense < &self.alive).then(|| &self.dense[*dense]))
+            .and_then(|entry| (entry.id == id).then_some(entry.record))
+            .ok_or(InvalidId(id))
     }
 
     /// Checks if the [Id] is alive
     pub fn is_alive(&self, id: Id) -> bool {
         self.sparse
             .get(id.idx() as usize)
-            .is_some_and(|&d| d < self.alive_count && self.dense[d].id == id)
+            .is_some_and(|&d| d < self.alive && self.dense[d].id == id)
     }
 
     /// Check if [Id] was ever created (whether alive or dead).
@@ -76,17 +68,17 @@ impl IdManager {
         };
 
         // Do nothing entity if already dead or nonexistent.
-        if dense >= self.alive_count || self.dense[dense].id != id {
+        if dense >= self.alive || self.dense[dense].id != id {
             return;
         }
 
-        self.alive_count -= 1;
-        self.sparse[sparse] = self.alive_count;
+        self.alive -= 1;
+        self.sparse[sparse] = self.alive;
         self.dense[dense].id = id.next_version();
 
         // swap last alive entity with removed entity.
-        if dense != self.alive_count {
-            self.dense.swap(dense, self.alive_count);
+        if dense != self.alive {
+            self.dense.swap(dense, self.alive);
             self.sparse[self.dense[dense].id.idx() as usize] = dense;
         }
 
@@ -94,11 +86,11 @@ impl IdManager {
     }
 
     pub(crate) fn new_id(&mut self, f: impl FnOnce(Id) -> IdRecord) -> Id {
-        if self.alive_count < self.dense.len() {
+        if self.alive < self.dense.len() {
             // Recycle id.
-            let entry = &mut self.dense[self.alive_count];
+            let entry = &mut self.dense[self.alive];
             entry.record = f(entry.id);
-            self.alive_count += 1;
+            self.alive += 1;
             return entry.id;
         }
 
@@ -120,21 +112,21 @@ impl IdManager {
             self.sparse.resize(sparse + 1, usize::MAX);
         }
 
-        self.sparse[sparse] = self.alive_count;
-        self.alive_count += 1;
+        self.sparse[sparse] = self.alive;
+        self.alive += 1;
 
-        debug_assert!(self.alive_count == self.dense.len());
+        debug_assert!(self.alive == self.dense.len());
 
         new_id
     }
 
     #[inline]
     pub fn num_alive(&self) -> usize {
-        self.alive_count
+        self.alive
     }
 
     #[inline]
     pub fn num_dead(&self) -> usize {
-        self.dense.len() - self.alive_count
+        self.dense.len() - self.alive
     }
 }

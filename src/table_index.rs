@@ -35,10 +35,7 @@ pub(crate) struct TableIndex {
 
 impl TableIndex {
     pub(crate) fn new() -> Self {
-        Self {
-            tables: Vec::new(),
-            table_ids: HashMap::new(),
-        }
+        Self { tables: Vec::new(), table_ids: HashMap::new() }
     }
 
     pub(crate) fn add_with_id<F>(&mut self, f: F) -> TableId
@@ -72,22 +69,17 @@ impl TableIndex {
         let a = a.0 as usize;
         let b = b.0 as usize;
 
-        #[cold]
-        fn validate_ids(a: usize, b: usize, len: usize) {
-            if a == b {
-                panic!("table ids are equal (id = {a})");
-            }
-
-            if a >= len {
-                panic!("table id {a} is out of bounds (len = {len})")
-            }
-
-            if b >= len {
-                panic!("table id {b} is out of bounds (len = {len})")
-            }
+        if a == b {
+            panic!("table ids are equal (id = {a})");
         }
 
-        validate_ids(a, b, len);
+        if a >= len {
+            panic!("table id {a} is out of bounds (len = {len})")
+        }
+
+        if b >= len {
+            panic!("table id {b} is out of bounds (len = {len})")
+        }
 
         // SAFETY: a and b are valid indices and not equal.
         let ptr = self.tables.as_mut_ptr();

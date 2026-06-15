@@ -2,13 +2,12 @@ use crate::table_index::TableId;
 use ahash::AHashSet;
 use sparse::SparseSet;
 
-mod borrow;
 pub(crate) mod column;
-pub(crate) mod singleton;
+pub(crate) mod resource;
 pub(crate) mod sparse;
 pub(crate) mod table;
 
-pub use borrow::{BorrowMutError, BorrowRefError};
+mod erased_vec;
 
 /// The type of storage used for components
 #[derive(Debug, Default, Clone, Copy, PartialEq, Hash)]
@@ -34,6 +33,6 @@ pub enum StorageType {
 
 #[derive(Debug)]
 pub(crate) enum Storage {
-    Tables(AHashSet<TableId>),
     Sparse(SparseSet),
+    Tables(AHashSet<TableId>),
 }

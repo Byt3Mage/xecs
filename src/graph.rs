@@ -16,10 +16,7 @@ pub(crate) struct GraphNode {
 
 impl GraphNode {
     pub(crate) fn new() -> Self {
-        Self {
-            add: IdMap::new(),
-            remove: IdMap::new(),
-        }
+        Self { add: IdMap::new(), remove: IdMap::new() }
     }
 }
 
@@ -33,7 +30,7 @@ fn new_table(ecs: &mut Ecs, ids: Signature) -> TableId {
             match &mut cm.storage {
                 Storage::Tables(tables) => {
                     col_map.insert(id, cols.len());
-                    cols.push(Column::new(id, cm.type_meta.clone()));
+                    cols.push(Column::new(id, cm.meta.clone()));
                     tables.insert(table_id);
                 }
                 s => unreachable!("unexpected storage type {s:?} "),

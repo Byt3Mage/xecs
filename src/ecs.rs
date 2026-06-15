@@ -1,5 +1,5 @@
 use crate::{
-    component::{self, ComponentBuilder, ComponentMeta, Params, StaticId, TypedStaticId},
+    component::{self, Component, ComponentBuilder, GetMulti, StaticId, TypedStaticId},
     error::{EcsResult, Error, InvalidId},
     graph::GraphNode,
     id::{
@@ -7,14 +7,17 @@ use crate::{
         manager::{IdManager, IdRecord},
         map::IdMap,
     },
-    storage::table::{Table, TableData},
+    query::typed_query::{TQuery, TQueryBuilder, TRow},
+    storage::{
+        Storage,
+        table::{self, Table, TableData},
+    },
     table_index::{TableId, TableIndex},
-    unsafe_ecs::UnsafeEcsCell,
 };
 
 pub struct Ecs {
     pub(crate) ids: IdManager,
-    pub(crate) components: IdMap<ComponentMeta>,
+    pub(crate) components: IdMap<Component>,
     pub(crate) component_ids: Vec<Option<Id>>,
     pub(crate) tables: TableIndex,
     pub(crate) root_table: TableId,
@@ -61,8 +64,13 @@ impl Ecs {
     #[inline(always)]
     pub fn id<T>(&self, comp: &StaticId<T>) -> EcsResult<Id> {
         match self.component_ids.get(comp.id() as usize) {
-            Some(Some(id)) => Ok(*id),
-            _ => Err(Error::UnregisteredComponent(comp.name())),
+            Some(Some(id)) => {
+                if !self.ids.is_alive(*id) {
+                    return Err(Error::InvalidId(InvalidId(*id)));
+                }
+                Ok(*id)
+            }
+            Some(None) | None => Err(Error::UnregisteredStatic(comp.name())),
         }
     }
 
@@ -141,6 +149,25 @@ impl Ecs {
         })
     }
 
+    pub fn delete_id(&mut self, id: Id) -> EcsResult<()> {
+        let r = self.ids.get(id)?;
+
+        unsafe { table::remove_id(self, r.table, r.row) };
+
+        // TODO: consider optimization by caching
+        // the sparse sets containing the id.
+        for comp in self.components.values_mut() {
+            if let Storage::Sparse(s) = &mut comp.storage {
+                s.remove(id);
+            }
+        }
+
+        self.components.remove(id);
+        self.ids.remove_id(id);
+
+        Ok(())
+    }
+
     /// Checks if the `id` has the component.
     #[inline(always)]
     pub fn has_id(&self, id: Id, component: Id) -> EcsResult<bool> {
@@ -186,14 +213,16 @@ impl Ecs {
 
     #[inline]
     pub fn get<T>(&self, id: Id, component: &StaticId<T>) -> EcsResult<&T> {
-        let r = self.ids.get(id).ok_or(InvalidId(id))?;
-        unsafe { component::get(self, id, r, self.id(component)?) }
+        let r = self.ids.get(id)?;
+        let comp = self.id(component)?;
+        unsafe { component::get(self, id, r, comp)?.ok_or(Error::MissingComponent { id, comp }) }
     }
 
     #[inline]
     pub fn get_mut<T>(&mut self, id: Id, component: &StaticId<T>) -> EcsResult<&mut T> {
-        let r = self.ids.get(id).ok_or(InvalidId(id))?;
-        unsafe { component::get_mut(self, id, r, self.id(component)?) }
+        let r = self.ids.get(id)?;
+        let comp = self.id(component)?;
+        unsafe { component::get_mut(self, id, r, comp)?.ok_or(Error::MissingComponent { id, comp }) }
     }
 
     #[inline]
@@ -206,27 +235,48 @@ impl Ecs {
         self.get_mut(id, T::id())
     }
 
-    pub fn get_multi<T: Params>(&self, id: Id) -> EcsResult<T::ParamsType<'_>> {
-        const {
-            assert!(T::ALL_IMMUTABLE, "use get_many_mut for mutable access");
-        }
-
-        unsafe { T::create(UnsafeEcsCell::new(self), id) }
-    }
-
-    pub fn get_multi_mut<T: Params>(&mut self, id: Id) -> EcsResult<T::ParamsType<'_>> {
-        const { panic!("Validate no conflicting mutable access") }
-        unsafe { T::create(UnsafeEcsCell::new_mut(self), id) }
+    pub fn get_multi<T: GetMulti>(&mut self, id: Id) -> EcsResult<T::Output<'_>> {
+        T::create(self, id)
     }
 
     #[inline]
-    pub fn insert_singleton<T>(&mut self, component: &StaticId<T>, val: T) -> EcsResult<Option<T>> {
-        component::insert_singleton(self, self.id(component)?, val)
+    pub fn insert_resource<T>(&mut self, component: &StaticId<T>, val: T) -> EcsResult<Option<T>> {
+        unsafe { component::insert_resource(self, self.id(component)?, val) }
     }
 
     #[inline]
-    pub fn insert_singleton_t<T: TypedStaticId>(&mut self, val: T) -> EcsResult<Option<T>> {
-        self.insert_singleton(T::id(), val)
+    pub fn insert_resource_t<T: TypedStaticId>(&mut self, val: T) -> EcsResult<Option<T>> {
+        self.insert_resource(T::id(), val)
+    }
+
+    #[inline]
+    pub fn resource<T>(&self, component: &StaticId<T>) -> EcsResult<&T> {
+        unsafe { component::resource(self, self.id(component)?) }
+    }
+
+    #[inline]
+    pub fn resource_t<T: TypedStaticId>(&self) -> EcsResult<&T> {
+        self.resource(T::id())
+    }
+
+    #[inline]
+    pub fn resource_mut<T>(&mut self, component: &StaticId<T>) -> EcsResult<&mut T> {
+        unsafe { component::resource_mut(self, self.id(component)?) }
+    }
+
+    #[inline]
+    pub fn resource_mut_t<T: TypedStaticId>(&mut self) -> EcsResult<&mut T> {
+        self.resource_mut(T::id())
+    }
+
+    #[inline(always)]
+    pub fn query_builder_t<'w, T: TRow>(&'w self) -> EcsResult<TQueryBuilder<'w, T>> {
+        TQueryBuilder::new(self)
+    }
+
+    #[inline(always)]
+    pub fn query_t<'w, T: TRow>(&'w self) -> EcsResult<TQuery<T>> {
+        self.query_builder_t().map(TQueryBuilder::build)
     }
 
     #[inline(always)]
@@ -237,5 +287,10 @@ impl Ecs {
     #[inline(always)]
     pub fn alive_count(&self) -> usize {
         self.ids.num_alive()
+    }
+
+    #[inline(always)]
+    pub fn dead_count(&self) -> usize {
+        self.ids.num_dead()
     }
 }

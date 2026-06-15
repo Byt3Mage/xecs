@@ -97,9 +97,7 @@ impl SparseSet {
 
     #[inline]
     pub(crate) unsafe fn get<T: 'static>(&self, id: Id) -> Option<&T> {
-        // SAFETY:
-        // - We just checked row is in bounds.
-        // - Caller ensures T is column item type
+        // SAFETY: We just checked row is in bounds.
         self.rows
             .get(id.idx() as usize)
             .filter(|&&r| r < self.row_count())
@@ -107,10 +105,8 @@ impl SparseSet {
     }
 
     #[inline]
-    pub(crate) unsafe fn get_mut<T: 'static>(&mut self, id: Id) -> Option<&mut T> {
-        // SAFETY:
-        // - We just checked row is in bounds.
-        // - Caller ensures T is column item type
+    pub(crate) unsafe fn get_mut<T: 'static>(&self, id: Id) -> Option<&mut T> {
+        // SAFETY: We just checked row is in bounds.
         self.rows
             .get(id.idx() as usize)
             .filter(|&&r| r < self.row_count())

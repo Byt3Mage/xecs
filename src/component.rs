@@ -7,15 +7,17 @@ use std::{
 };
 
 use ahash::AHashSet;
+use smallvec::{SmallVec, smallvec};
 
 use crate::{
+    access::{AccessType, StaticAccess},
+    component::private::SealedGetMulti,
     ecs::Ecs,
-    error::{EcsResult, Error, IdNotComponent, InvalidId},
+    error::{EcsResult, Error, IdNotComponent},
     graph::{find_add_table, find_remove_table},
     id::{Id, manager::IdRecord, map::IdMap},
-    storage::{Storage, StorageType, singleton::Singleton, sparse::SparseSet, table::move_id},
+    storage::{Storage, StorageType, resource::Resource, sparse::SparseSet, table::move_id},
     type_meta::TypeMeta,
-    unsafe_ecs::UnsafeEcsCell,
     utils::ConstNonNull,
 };
 
@@ -68,24 +70,31 @@ pub struct ComponentHooks {
     pub clone: Option<Box<dyn FnMut(ConstNonNull<u8>, NonNull<u8>)>>,
 }
 
-pub(crate) struct ComponentMeta {
+pub(crate) struct Component {
+    pub(crate) meta: Rc<TypeMeta>,
     pub(crate) storage: Storage,
-    pub(crate) type_meta: Rc<TypeMeta>,
-    pub(crate) singleton: Option<Singleton>,
+    pub(crate) resource: Option<Resource>,
 }
 
+impl Drop for Component {
+    fn drop(&mut self) {
+        if let Some(res) = &mut self.resource {
+            res.destroy(&self.meta);
+        }
+    }
+}
 pub struct ComponentBuilder<T: 'static> {
     pub(crate) name: Option<Rc<str>>,
-    pub(crate) storage_type: StorageType,
-    pub(crate) _marker: PhantomData<fn() -> T>,
+    pub(crate) storage: StorageType,
+    pub(crate) resource: Option<T>,
 }
 
 impl<T: 'static> ComponentBuilder<T> {
     pub fn new() -> Self {
         Self {
             name: None,
-            storage_type: StorageType::default(),
-            _marker: PhantomData,
+            storage: StorageType::default(),
+            resource: None,
         }
     }
 
@@ -96,18 +105,24 @@ impl<T: 'static> ComponentBuilder<T> {
 
     #[inline]
     pub fn storage(mut self, storage_type: StorageType) -> Self {
-        self.storage_type = storage_type;
+        self.storage = storage_type;
         self
     }
 
-    pub(crate) fn build(self, components: &mut IdMap<ComponentMeta>, id: Id) {
-        let type_meta = Rc::new(TypeMeta::of::<T>());
-        let storage = match self.storage_type {
+    pub fn resource(mut self, value: Option<T>) -> Self {
+        self.resource = value;
+        self
+    }
+
+    pub(crate) fn build(self, components: &mut IdMap<Component>, id: Id) {
+        let meta = Rc::new(TypeMeta::of::<T>());
+        let resource = self.resource.map(Resource::new);
+        let storage = match self.storage {
             StorageType::Tables => Storage::Tables(AHashSet::new()),
-            StorageType::Sparse => Storage::Sparse(SparseSet::new(id, type_meta.clone())),
+            StorageType::Sparse => Storage::Sparse(SparseSet::new(id, meta.clone())),
         };
 
-        components.insert(id, ComponentMeta { type_meta, storage, singleton: None });
+        components.insert(id, Component { meta, storage, resource });
     }
 }
 
@@ -117,7 +132,7 @@ impl<T: 'static> ComponentBuilder<T> {
 /// # Safety
 /// - Caller must ensure that `val` is the component data type.
 pub(crate) unsafe fn insert<T: 'static>(ecs: &mut Ecs, id: Id, comp: Id, val: T) -> EcsResult<Option<T>> {
-    let r = ecs.ids.get(id).ok_or(InvalidId(id))?;
+    let r = ecs.ids.get(id)?;
     let ci = ecs.components.get_mut(comp).ok_or(IdNotComponent(comp))?;
 
     // SAFETY: Caller ensures the val is the component data type
@@ -126,29 +141,25 @@ pub(crate) unsafe fn insert<T: 'static>(ecs: &mut Ecs, id: Id, comp: Id, val: T)
             Storage::Sparse(set) => Ok(set.insert(id, val)),
             Storage::Tables(_) => {
                 let table = &ecs.tables[r.table];
-
-                let prev = if let Some(col) = table.col_map.get(comp) {
-                    Some(table.data.columns[*col].replace(r.row, val))
+                if let Some(&col) = table.col_map.get(comp) {
+                    // Component already present: replace in place.
+                    Ok(Some(table.column(col).replace(r.row, val)))
                 } else {
-                    // Move id to new table
+                    // Component absent: move entity to the table that has it.
                     let new_table = find_add_table(ecs, r.table, comp).unwrap();
                     let dst_row = move_id(ecs, id, r.table, r.row, new_table);
-
-                    // Write data into new column
-                    let new_table = &ecs.tables[new_table];
-                    let dst_col = new_table.col_map[comp];
-                    new_table.data.columns[dst_col].write(dst_row, val);
-                    None
-                };
-
-                Ok(prev)
+                    let nt = &ecs.tables[new_table];
+                    let dst_col = nt.col_map[comp];
+                    nt.column(dst_col).write(dst_row, val);
+                    Ok(None)
+                }
             }
         }
     }
 }
 
 pub(crate) unsafe fn remove(ecs: &mut Ecs, id: Id, tag: Id) -> EcsResult<()> {
-    let r = ecs.ids.get(id).ok_or(InvalidId(id))?;
+    let r = ecs.ids.get(id)?;
     let cm = ecs.components.get_mut(tag).ok_or(IdNotComponent(tag))?;
 
     unsafe {
@@ -167,7 +178,7 @@ pub(crate) unsafe fn remove(ecs: &mut Ecs, id: Id, tag: Id) -> EcsResult<()> {
 }
 
 pub(crate) fn has(ecs: &Ecs, id: Id, comp: Id) -> EcsResult<bool> {
-    let r = ecs.ids.get(id).ok_or(InvalidId(id))?;
+    let r = ecs.ids.get(id)?;
     let cm = ecs.components.get(comp).ok_or(IdNotComponent(comp))?;
     Ok(match &cm.storage {
         Storage::Sparse(set) => set.contains(id),
@@ -175,118 +186,150 @@ pub(crate) fn has(ecs: &Ecs, id: Id, comp: Id) -> EcsResult<bool> {
     })
 }
 
-pub(crate) unsafe fn get<T: 'static>(ecs: &Ecs, id: Id, r: IdRecord, comp: Id) -> EcsResult<&T> {
+pub(crate) unsafe fn get<T: 'static>(ecs: &Ecs, id: Id, r: IdRecord, comp: Id) -> EcsResult<Option<&T>> {
     let ci = ecs.components.get(comp).ok_or(IdNotComponent(comp))?;
-
-    let res = unsafe {
+    Ok(unsafe {
         match &ci.storage {
             Storage::Tables(_) => ecs.tables[r.table].get(comp, r.row),
             Storage::Sparse(set) => set.get(id),
         }
-    };
-
-    res.ok_or(Error::MissingComponent { id, comp })
+    })
 }
 
-pub(crate) unsafe fn get_mut<T: 'static>(ecs: &mut Ecs, id: Id, r: IdRecord, comp: Id) -> EcsResult<&mut T> {
-    let cm = ecs.components.get_mut(comp).ok_or(IdNotComponent(comp))?;
-    let res = unsafe {
-        match &mut cm.storage {
+pub(crate) unsafe fn get_mut<T: 'static>(ecs: &Ecs, id: Id, r: IdRecord, comp: Id) -> EcsResult<Option<&mut T>> {
+    let cm = ecs.components.get(comp).ok_or(IdNotComponent(comp))?;
+    Ok(unsafe {
+        match &cm.storage {
             Storage::Tables(_) => ecs.tables[r.table].get_mut(comp, r.row),
             Storage::Sparse(set) => set.get_mut(id),
         }
-    };
-
-    res.ok_or(Error::MissingComponent { id, comp })
+    })
 }
 
-pub(crate) mod private {
-    pub trait Sealed {}
-}
-
-pub trait Param: private::Sealed {
-    type Output<'a>;
-    const IS_IMMUTABLE: bool;
-
-    /// # Safety
-    /// Caller must ensure access doesn't violate aliasing rules.
-    unsafe fn make(ecs: UnsafeEcsCell<'_>, id: Id, r: IdRecord) -> EcsResult<Self::Output<'_>>;
-}
-
-impl<T: Param> private::Sealed for T {}
-impl<T: TypedStaticId> Param for &T {
-    type Output<'a> = &'a T;
-    const IS_IMMUTABLE: bool = true;
-
-    unsafe fn make(cell: UnsafeEcsCell<'_>, id: Id, r: IdRecord) -> EcsResult<Self::Output<'_>> {
-        unsafe {
-            let ecs = cell.ecs();
-            get(ecs, id, r, ecs.id_t::<T>()?)
-        }
-    }
-}
-
-impl<T: TypedStaticId> Param for &mut T {
-    type Output<'a> = &'a mut T;
-    const IS_IMMUTABLE: bool = false;
-
-    unsafe fn make(cell: UnsafeEcsCell<'_>, id: Id, r: IdRecord) -> EcsResult<Self::Output<'_>> {
-        unsafe {
-            let ecs = cell.world_mut();
-            get_mut(ecs, id, r, ecs.id_t::<T>()?)
-        }
-    }
-}
-
-pub trait Params: Sized + private::Sealed {
-    type ParamsType<'a>;
-    const ALL_IMMUTABLE: bool;
-
-    /// # Safety
-    /// Caller must ensure access validation has been performed.
-    unsafe fn create(cell: UnsafeEcsCell<'_>, id: Id) -> EcsResult<Self::ParamsType<'_>>;
-}
-
-impl<T: Param> Params for T {
-    type ParamsType<'a> = T::Output<'a>;
-    const ALL_IMMUTABLE: bool = T::IS_IMMUTABLE;
-
-    unsafe fn create(cell: UnsafeEcsCell<'_>, id: Id) -> EcsResult<Self::ParamsType<'_>> {
-        unsafe {
-            let r = cell.ecs().ids.get(id).ok_or(InvalidId(id))?;
-            T::make(cell, id, r)
-        }
-    }
-}
-
-pub(crate) fn insert_singleton<T: 'static>(ecs: &mut Ecs, id: Id, val: T) -> EcsResult<Option<T>> {
+pub(crate) unsafe fn insert_resource<T: 'static>(ecs: &mut Ecs, id: Id, value: T) -> EcsResult<Option<T>> {
     let cm = ecs.components.get_mut(id).ok_or(IdNotComponent(id))?;
-    let prev = match &mut cm.singleton {
-        Some(s) => {
-            let mut singleton = s.borrow_mut::<T>();
-            Some(std::mem::replace(&mut *singleton, val))
-        }
+    let prev = match &mut cm.resource {
+        Some(r) => Some(unsafe { r.replace(value) }),
         None => {
-            cm.singleton = Some(Singleton::new(id, cm.type_meta.clone(), val));
+            cm.resource = Some(Resource::new(value));
             None
         }
     };
-
     Ok(prev)
 }
 
-macro_rules! impl_tuple_params {
-    ($($t:ident),*) => {
-        impl<$($t: Param),*> private::Sealed for ($($t,) *) {}
-        impl<$($t: Param),*> Params for ($($t,) *) {
-            type ParamsType<'a> = ($($t::Output<'a>,)*);
-            const ALL_IMMUTABLE: bool = { $($t::IS_IMMUTABLE &&)* true };
+pub(crate) unsafe fn resource<T: 'static>(ecs: &Ecs, id: Id) -> EcsResult<&T> {
+    let cm = ecs.components.get(id).ok_or(IdNotComponent(id))?;
+    match &cm.resource {
+        Some(r) => Ok(unsafe { r.get() }),
+        None => Err(Error::MissingResource { id }),
+    }
+}
 
-            unsafe fn create(cell: UnsafeEcsCell<'_>, id: Id) -> EcsResult<Self::ParamsType<'_>> {
-                unsafe {
-                    let r = cell.ecs().ids.get(id).ok_or(InvalidId(id))?;
-                    Ok(($($t::make(cell, id, r)?,)*))
-                }
+pub(crate) unsafe fn resource_mut<T: 'static>(ecs: &Ecs, id: Id) -> EcsResult<&mut T> {
+    let cm = ecs.components.get(id).ok_or(IdNotComponent(id))?;
+    match &cm.resource {
+        Some(r) => Ok(unsafe { r.get_mut() }),
+        None => Err(Error::MissingResource { id }),
+    }
+}
+
+mod private {
+    pub trait SealedAccess {}
+    pub trait SealedGetMulti {}
+}
+
+use private::SealedAccess;
+
+pub trait ComponentAccess: Sized + private::SealedAccess {
+    type RemoveRef: 'static;
+    type Get<'a>;
+    const ACCESS: AccessType;
+
+    /// # Safety
+    /// Caller guarantees this access does not alias another live
+    /// borrow of the same component for `id` (single access, or validated
+    /// disjoint within a tuple).
+    unsafe fn fetch<'a>(ecs: &'a Ecs, id: Id, r: IdRecord, comp: Id) -> EcsResult<Self::Get<'a>>;
+}
+
+impl<T: 'static> SealedAccess for &T {}
+impl<T: 'static> SealedAccess for &mut T {}
+
+impl<T: 'static> ComponentAccess for &T {
+    type RemoveRef = T;
+    type Get<'a> = &'a T;
+    const ACCESS: AccessType = AccessType::Read;
+
+    unsafe fn fetch<'a>(ecs: &'a Ecs, id: Id, r: IdRecord, comp: Id) -> EcsResult<&'a T> {
+        unsafe { get::<T>(ecs, id, r, comp)?.ok_or(Error::MissingComponent { id, comp }) }
+    }
+}
+
+impl<T: 'static> ComponentAccess for &mut T {
+    type RemoveRef = T;
+    type Get<'a> = &'a mut T;
+    const ACCESS: AccessType = AccessType::Write;
+
+    unsafe fn fetch<'a>(ecs: &'a Ecs, id: Id, r: IdRecord, comp: Id) -> EcsResult<&'a mut T> {
+        unsafe { get_mut::<T>(ecs, id, r, comp)?.ok_or(Error::MissingComponent { id, comp }) }
+    }
+}
+
+impl<T: ComponentAccess> SealedGetMulti for T {}
+
+pub trait GetMulti: Sized + private::SealedGetMulti {
+    type Output<'a>;
+    fn accesses() -> SmallVec<[StaticAccess; 8]>;
+    fn create(ecs: &mut Ecs, id: Id) -> EcsResult<Self::Output<'_>>;
+}
+
+impl<T: ComponentAccess> GetMulti for T
+where
+    T::RemoveRef: TypedStaticId,
+{
+    type Output<'a> = T::Get<'a>;
+
+    fn accesses() -> SmallVec<[StaticAccess; 8]> {
+        smallvec![StaticAccess { id: T::RemoveRef::id().id, ty: T::ACCESS }]
+    }
+
+    fn create(ecs: &mut Ecs, id: Id) -> EcsResult<Self::Output<'_>> {
+        let r = ecs.ids.get(id)?;
+        let comp = ecs.id_t::<T::RemoveRef>()?;
+        // SAFETY: single access; &mut Ecs guarantees uniqueness. The cast from
+        // the &mut-Ecs borrow to T::Get (& or &mut) is sound because there is
+        // exactly one access and we hold the unique world reference.
+        unsafe { T::fetch(ecs, id, r, comp) }
+    }
+}
+
+macro_rules! impl_tuple_params {
+    ($($T:ident),*) => {
+        impl<$($T: ComponentAccess),*> private::SealedGetMulti for ($($T,) *) {}
+        impl<$($T: ComponentAccess),*> GetMulti for ($($T,) *)
+        where
+            $($T::RemoveRef: TypedStaticId,)*
+        {
+            type Output<'a> = ($($T::Get<'a>,)*);
+
+
+            fn accesses() -> SmallVec<[StaticAccess; 8]> {
+                smallvec![$(StaticAccess { id: $T::RemoveRef::id().id, ty: $T::ACCESS }),*]
+            }
+
+            fn create(ecs: &mut Ecs, id: Id) -> EcsResult<Self::Output<'_>> {
+                let r = ecs.ids.get(id)?;
+
+                // Validate internal disjointness: no &mut aliases another access
+                // of the same component. Panics (or Err) per your convention.
+                crate::validate::check_multi_get::<($($T,) *)>();
+
+                // SAFETY: check_multi_get proved no aliasing among the tuple's
+                // accesses; &mut Ecs proves no external aliasing. Each fetch is
+                // therefore the unique live borrow of its component.
+                let ecs: &Ecs = ecs;
+                unsafe { Ok(($($T::fetch(ecs, id, r, ecs.id_t::<$T::RemoveRef>()?)?,)*)) }
             }
         }
     }

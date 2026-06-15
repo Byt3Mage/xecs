@@ -3,13 +3,13 @@ use std::{
     usize,
 };
 
-pub struct DynamicComponent {
+pub struct DynamicStructLayout {
     layout: Layout,
-    offsets: Box<[usize]>,
+    field_offsets: Box<[usize]>,
 }
 
-impl DynamicComponent {
-    pub fn new(fields: &[Layout]) -> Result<DynamicComponent, LayoutError> {
+impl DynamicStructLayout {
+    pub fn new(fields: &[Layout]) -> Result<DynamicStructLayout, LayoutError> {
         let mut layout = Layout::from_size_align(0, 1)?;
         let mut offsets = Vec::with_capacity(fields.len());
 
@@ -21,7 +21,7 @@ impl DynamicComponent {
 
         Ok(Self {
             layout: layout.pad_to_align(),
-            offsets: offsets.into_boxed_slice(),
+            field_offsets: offsets.into_boxed_slice(),
         })
     }
 
@@ -30,6 +30,6 @@ impl DynamicComponent {
     }
 
     pub fn offsets(&self) -> &[usize] {
-        &self.offsets
+        &self.field_offsets
     }
 }
