@@ -1,9 +1,10 @@
 use std::{ops::Deref, rc::Rc};
 
-use crate::{Id, validate::WriteConflict};
+use crate::{Id, validate::WriteAccessError};
 
 /// How a field accesses its component column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum AccessType {
     Read,
     Write,
@@ -45,7 +46,7 @@ impl AccessList {
         Self { list: Vec::with_capacity(capacity) }
     }
 
-    pub fn push(&mut self, new: Access) -> Result<(), WriteConflict> {
+    pub fn push(&mut self, new: Access) -> Result<(), WriteAccessError> {
         crate::validate::check_push(&self.list, new)?;
         self.list.push(new);
         Ok(())

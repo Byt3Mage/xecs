@@ -148,7 +148,7 @@ pub fn component(input: TokenStream) -> TokenStream {
 }
 
 fn impl_component(input: &DeriveInput) -> TokenStream {
-    let mut storage = quote! {xecs::storage::StorageType::Tables};
+    let mut storage = quote! {xecs::StorageType::Tables};
 
     for attr in &input.attrs {
         if attr.path().is_ident("component") {
@@ -158,8 +158,8 @@ fn impl_component(input: &DeriveInput) -> TokenStream {
                     let lit: syn::LitStr = value.parse()?;
 
                     storage = match lit.value().as_str() {
-                        "sparse" => quote! {xecs::storage::StorageType::Sparse},
-                        "tables" => quote! {xecs::storage::StorageType::Tables},
+                        "sparse" => quote! {xecs::StorageType::Sparse},
+                        "tables" => quote! {xecs::StorageType::Tables},
                         _ => quote! {compile_error!("xecs: invalid component storage type")},
                     };
                 }
@@ -295,18 +295,18 @@ pub fn row(input: TokenStream) -> TokenStream {
             type Get<'c> = #get_ty;
 
             type Columns<'t> = ( #(
-                <#columns_field_ty as xecs::query::iter::Field>::Column<'t>,
+                <#columns_field_ty as xecs::query::fetch::ComponentFetch>::Column<'t>,
             )* );
 
             const ACCESSES: &'static [xecs::access::AccessType] = &[#(
-                <#access_field_ty as xecs::component::ComponentAccess>::ACCESS,
+                <#access_field_ty as xecs::component::ComponentFetch>::ACCESS,
             )*];
 
             fn columns<'t>(
                 iter: &'t xecs::query::iter::TableIter<'t>,
             ) -> Self::Columns<'t> {
                 ( #(
-                    <#columns_field_ty as xecs::query::iter::Field>::column(iter, #field_idx),
+                    <#columns_field_ty as xecs::query::fetch::ComponentFetch>::column(iter.table, iter.col_indices[#field_idx]),
                 )* )
             }
 
@@ -317,8 +317,7 @@ pub fn row(input: TokenStream) -> TokenStream {
                 let ( #(#field_name,)* ) = column;
                 unsafe {
                     #(
-                        let #field_name =
-                            <#row_field_ty as xecs::query::iter::Field>::row(#field_name, row);
+                        let #field_name = <#row_field_ty as xecs::query::fetch::ComponentFetch>::row(#field_name, row);
                     )*
                     #struct_name { #(#field_name),* }
                 }

@@ -1,60 +1,86 @@
-pub(crate) mod manager;
+pub(crate) mod allocator;
 pub(crate) mod map;
 
 use std::{fmt::Display, ops::Deref, rc::Rc};
 
 /// FFI compatible representation of an id
-#[repr(transparent)]
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct Id(u64);
+#[derive(Debug, Copy, Clone)]
+#[repr(C, align(8))]
+pub struct Id {
+    #[cfg(target_endian = "little")]
+    pub index: u32,
+    pub generation: u32,
+    #[cfg(target_endian = "big")]
+    pub index: u32,
+}
 
-impl Id {
-    /// Built-in entities
-    pub const NULL: Id = Id(u64::MAX);
-
-    /// Creates a new `Entity` from raw bits.
-    #[inline(always)]
-    pub const fn from_raw(raw: u64) -> Self {
-        Self(raw)
-    }
-
-    /// Converts the `Entity` back to raw bits.
-    #[inline(always)]
-    pub const fn raw(&self) -> u64 {
-        self.0
-    }
-
-    /// Returns the ID (lower 32 bits).
-    #[inline(always)]
-    pub const fn idx(&self) -> u32 {
-        self.0 as u32
-    }
-
-    /// Returns the version (higher 32 bits).
-    #[inline(always)]
-    pub const fn ver(&self) -> u32 {
-        (self.0 >> 32) as u32
-    }
-
-    /// Increments the version counter.
-    pub(crate) const fn next_version(&self) -> Self {
-        Self((((self.0 >> 32) + 1) << 32) | (self.idx() as u64))
+impl PartialEq for Id {
+    #[inline]
+    fn eq(&self, other: &Id) -> bool {
+        // By using `to_bits`, the codegen can be optimized out even
+        // further potentially. Relies on the correct alignment/field
+        // order of `Id`.
+        self.to_bits() == other.to_bits()
     }
 }
 
-impl From<Id> for usize {
-    fn from(value: Id) -> usize {
-        value.0 as usize
+impl Eq for Id {}
+
+impl PartialOrd for Id {
+    #[inline]
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Id {
+    #[inline]
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.to_bits().cmp(&other.to_bits())
+    }
+}
+
+impl std::hash::Hash for Id {
+    #[inline]
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        self.to_bits().hash(state);
+    }
+}
+
+impl Id {
+    #[inline(always)]
+    pub const fn new(index: u32) -> Self {
+        Self { index, generation: 0 }
+    }
+
+    /// Creates a new `Id` from raw bits.
+    #[inline(always)]
+    pub const fn from_bits(bits: u64) -> Self {
+        Self {
+            index: bits as u32,
+            generation: (bits >> 32) as u32,
+        }
+    }
+
+    /// Converts the `Id` back to raw bits.
+    #[inline(always)]
+    pub const fn to_bits(self) -> u64 {
+        self.index as u64 | ((self.generation as u64) << 32)
+    }
+
+    /// Increments the version counter.
+    pub(crate) const fn next_generation(self) -> Self {
+        Self { generation: self.generation + 1, ..self }
     }
 }
 
 impl Display for Id {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}v{}", self.idx(), self.ver())
+        write!(f, "{}v{}", self.index, self.generation)
     }
 }
 
-/// Sorted list of ids in a [Table](crate::storage::table::Table)
+/// Sorted list of component ids in a [Table](crate::storage::table::Table)
 #[derive(Hash, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct Signature(Rc<[Id]>);

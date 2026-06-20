@@ -23,35 +23,35 @@ impl<T> IdMap<T> {
     }
 
     pub fn contains(&self, id: Id) -> bool {
-        match self.id_index_lo.get(id.raw() as usize) {
+        match self.id_index_lo.get(id.to_bits() as usize) {
             Some(v) => v.is_some(),
             _ => self.id_index_hi.contains_key(&id),
         }
     }
 
     pub fn get(&self, id: Id) -> Option<&T> {
-        match self.id_index_lo.get(id.raw() as usize) {
+        match self.id_index_lo.get(id.to_bits() as usize) {
             Some(v) => v.as_ref(),
             _ => self.id_index_hi.get(&id),
         }
     }
 
     pub fn get_mut(&mut self, id: Id) -> Option<&mut T> {
-        match self.id_index_lo.get_mut(id.raw() as usize) {
+        match self.id_index_lo.get_mut(id.to_bits() as usize) {
             Some(v) => v.as_mut(),
             _ => self.id_index_hi.get_mut(&id),
         }
     }
 
     pub fn insert(&mut self, id: Id, val: T) -> Option<T> {
-        match self.id_index_lo.get_mut(id.raw() as usize) {
+        match self.id_index_lo.get_mut(id.to_bits() as usize) {
             Some(v) => v.replace(val),
             None => self.id_index_hi.insert(id, val),
         }
     }
 
     pub fn remove(&mut self, id: Id) -> Option<T> {
-        match self.id_index_lo.get_mut(id.raw() as usize) {
+        match self.id_index_lo.get_mut(id.to_bits() as usize) {
             Some(v) => v.take(),
             None => self.id_index_hi.remove(&id),
         }

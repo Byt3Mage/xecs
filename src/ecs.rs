@@ -1,13 +1,16 @@
 use crate::{
-    component::{self, Component, ComponentBuilder, GetMulti, StaticId, TypedStaticId},
-    error::{EcsResult, Error, InvalidId},
+    component::{self, Component, ComponentBuilder, StaticId, TypedStaticId},
+    error::{EcsResult, Error},
     graph::GraphNode,
     id::{
         Id, Signature,
-        manager::{IdManager, IdRecord},
+        allocator::{IdAllocator, IdRecord, NotAlive},
         map::IdMap,
     },
-    query::typed_query::{TQuery, TQueryBuilder, TRow},
+    query::{
+        iter::Columns,
+        typed_query::{TQuery, TQueryBuilder},
+    },
     storage::{
         Storage,
         table::{self, Table, TableData},
@@ -16,7 +19,7 @@ use crate::{
 };
 
 pub struct Ecs {
-    pub(crate) ids: IdManager,
+    pub(crate) ids: IdAllocator,
     pub(crate) components: IdMap<Component>,
     pub(crate) component_ids: Vec<Option<Id>>,
     pub(crate) tables: TableIndex,
@@ -35,7 +38,7 @@ impl Ecs {
         });
 
         Self {
-            ids: IdManager::new(),
+            ids: IdAllocator::new(),
             components: IdMap::new(),
             component_ids: Vec::new(),
             tables,
@@ -66,11 +69,11 @@ impl Ecs {
         match self.component_ids.get(comp.id() as usize) {
             Some(Some(id)) => {
                 if !self.ids.is_alive(*id) {
-                    return Err(Error::InvalidId(InvalidId(*id)));
+                    return Err(Error::NotAlive(NotAlive(*id)));
                 }
                 Ok(*id)
             }
-            Some(None) | None => Err(Error::UnregisteredStatic(comp.name())),
+            Some(None) | None => Err(Error::UnregisteredComponent(comp.name())),
         }
     }
 
@@ -174,7 +177,7 @@ impl Ecs {
         component::has(self, id, component)
     }
 
-    /// Checks if `id` has the typed component `T`.
+    /// Checks if `id` has the static component `T`.
     #[inline(always)]
     pub fn has<T>(&self, id: Id, component: &StaticId<T>) -> EcsResult<bool> {
         self.has_id(id, self.id(component)?)
@@ -235,10 +238,6 @@ impl Ecs {
         self.get_mut(id, T::id())
     }
 
-    pub fn get_multi<T: GetMulti>(&mut self, id: Id) -> EcsResult<T::Output<'_>> {
-        T::create(self, id)
-    }
-
     #[inline]
     pub fn insert_resource<T>(&mut self, component: &StaticId<T>, val: T) -> EcsResult<Option<T>> {
         unsafe { component::insert_resource(self, self.id(component)?, val) }
@@ -251,7 +250,8 @@ impl Ecs {
 
     #[inline]
     pub fn resource<T>(&self, component: &StaticId<T>) -> EcsResult<&T> {
-        unsafe { component::resource(self, self.id(component)?) }
+        let id = self.id(component)?;
+        unsafe { component::resource(self, id)?.ok_or(Error::MissingResource { id }) }
     }
 
     #[inline]
@@ -261,7 +261,8 @@ impl Ecs {
 
     #[inline]
     pub fn resource_mut<T>(&mut self, component: &StaticId<T>) -> EcsResult<&mut T> {
-        unsafe { component::resource_mut(self, self.id(component)?) }
+        let id = self.id(component)?;
+        unsafe { component::resource_mut(self, id)?.ok_or(Error::MissingResource { id }) }
     }
 
     #[inline]
@@ -270,12 +271,12 @@ impl Ecs {
     }
 
     #[inline(always)]
-    pub fn query_builder_t<'w, T: TRow>(&'w self) -> EcsResult<TQueryBuilder<'w, T>> {
+    pub fn query_builder_t<'w, T: Columns>(&'w self) -> EcsResult<TQueryBuilder<'w, T>> {
         TQueryBuilder::new(self)
     }
 
     #[inline(always)]
-    pub fn query_t<'w, T: TRow>(&'w self) -> EcsResult<TQuery<T>> {
+    pub fn query_t<'w, T: Columns>(&'w self) -> EcsResult<TQuery<T>> {
         self.query_builder_t().map(TQueryBuilder::build)
     }
 
@@ -294,3 +295,15 @@ impl Ecs {
         self.ids.num_dead()
     }
 }
+
+// /// Wrapper trait to make the API nicer to write
+// pub trait QuerySingle<R> {
+//     fn query_id<T: GetMulti>(&mut self, id: Id, query: T::Query, f: impl FnOnce(T::Output<'_>) -> R) -> EcsResult<R>;
+// }
+
+// impl<R> QuerySingle<R> for Ecs {
+//     // TODO: get table once
+//     fn query_id<T: GetMulti>(&mut self, id: Id, query: T::Query, f: impl FnOnce(T::Output<'_>) -> R) -> EcsResult<R> {
+//         T::get(self, id, query).map(f)
+//     }
+// }

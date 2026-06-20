@@ -6,7 +6,7 @@ use crate::access::{Access, AccessType};
 #[inline]
 pub fn check_access(required: AccessType, declared: &Access) {
     if required == AccessType::Write && declared.ty == AccessType::Read {
-        panic!("access requires write to read-only column {}", declared.id);
+        panic!("xecs: access requires write to read-only column {}", declared.id);
     }
 }
 
@@ -24,7 +24,7 @@ pub fn check_row(required: &[AccessType], declared: &[Access]) {
 
     assert_eq!(
         req_len, dec_len,
-        "row field count ({req_len}) != query column count ({dec_len})",
+        "xecs: row field count ({req_len}) != query column count ({dec_len})",
     );
 
     for (&req, decl) in required.iter().zip(declared) {

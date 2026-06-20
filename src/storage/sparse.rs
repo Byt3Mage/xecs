@@ -36,7 +36,7 @@ impl SparseSet {
     /// # Safety
     /// Caller ensures `T` is the same type as the set items.
     pub(crate) unsafe fn insert<T: 'static>(&mut self, id: Id, val: T) -> Option<T> {
-        let row_idx = id.idx() as usize;
+        let row_idx = id.index as usize;
 
         if row_idx >= self.rows.len() {
             self.rows.resize(row_idx + 1, usize::MAX);
@@ -65,7 +65,7 @@ impl SparseSet {
     /// Removes an entity from the set.
     #[inline(always)]
     pub(crate) fn remove(&mut self, id: Id) {
-        let row_idx = id.idx() as usize;
+        let row_idx = id.index as usize;
 
         let row = match self.rows.get_mut(row_idx) {
             Some(r) if *r < self.ids.len() => mem::replace(r, usize::MAX),
@@ -83,7 +83,7 @@ impl SparseSet {
             if row != last {
                 self.column.copy_row(last, row);
                 self.ids.swap_remove(row);
-                self.rows[self.ids[row].idx() as usize] = row;
+                self.rows[self.ids[row].index as usize] = row;
             } else {
                 self.ids.pop();
             }
@@ -92,14 +92,14 @@ impl SparseSet {
 
     #[inline(always)]
     pub(crate) fn contains(&self, id: Id) -> bool {
-        self.rows.get(id.idx() as usize).is_some_and(|&r| r < self.row_count())
+        self.rows.get(id.index as usize).is_some_and(|&r| r < self.row_count())
     }
 
     #[inline]
     pub(crate) unsafe fn get<T: 'static>(&self, id: Id) -> Option<&T> {
         // SAFETY: We just checked row is in bounds.
         self.rows
-            .get(id.idx() as usize)
+            .get(id.index as usize)
             .filter(|&&r| r < self.row_count())
             .map(|&r| unsafe { self.column.get(r) })
     }
@@ -108,7 +108,7 @@ impl SparseSet {
     pub(crate) unsafe fn get_mut<T: 'static>(&self, id: Id) -> Option<&mut T> {
         // SAFETY: We just checked row is in bounds.
         self.rows
-            .get(id.idx() as usize)
+            .get(id.index as usize)
             .filter(|&&r| r < self.row_count())
             .map(|&r| unsafe { self.column.get_mut(r) })
     }

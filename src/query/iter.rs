@@ -1,8 +1,11 @@
 use crate::{
     Ecs,
-    component::{self, ComponentAccess},
+    access::AccessType,
     id::Id,
-    query::{Access, AccessType},
+    query::{
+        Access,
+        fetch::{ComponentFetch, ReadOnlyFetch},
+    },
     storage::table::Table,
 };
 
@@ -26,126 +29,116 @@ impl<'a> TableIter<'a> {
         self.table.ids()
     }
 
-    /// Get a slice for field at `index`.
     #[inline]
-    pub fn column<T: Field>(&self, idx: usize) -> T::Column<'_> {
-        crate::validate::check_access(T::ACCESS, &self.fields[idx]);
-        T::column(self, idx)
+    pub fn column<T: ReadOnlyFetch>(&self, idx: usize) -> T::ColumnSlice<'_> {
+        crate::validate::check_access(T::ACCESS_TYPE, &self.fields[idx]);
+        let idx = T::resolve(self.table, self.col_indices[idx]);
+        let ptr = T::column_ptr(self.table, idx);
+        let len = self.num_rows();
+        unsafe { T::column_slice(ptr, len) }
+    }
+
+    #[inline]
+    pub fn column_mut<T: ComponentFetch>(&mut self, idx: usize) -> T::ColumnSlice<'_> {
+        crate::validate::check_access(T::ACCESS_TYPE, &self.fields[idx]);
+        let idx = T::resolve(self.table, self.col_indices[idx]);
+        let ptr = T::column_ptr(self.table, idx);
+        let len = self.num_rows();
+        unsafe { T::column_slice(ptr, len) }
+    }
+
+    /// Bulk slices for the whole validated row set. `&mut self` consumes the
+    /// iterator's mutable capability once: the set's pairwise disjointness was
+    /// proven by query validation, so handing out all slices together is sound,
+    /// and you cannot take a second conflicting set.
+    #[inline]
+    pub fn columns<C: Columns>(&mut self) -> C::Slices<'_> {
+        crate::validate::check_row(C::ACCESSES, self.fields);
+        unsafe { C::slices(C::pointers(self), self.num_rows()) }
     }
 
     /// Get a slice for field at `index`.
     #[inline]
-    pub fn resource<T: Field>(&self, idx: usize) -> T::Row<'_> {
-        crate::validate::check_access(T::ACCESS, &self.singletons[idx]);
-        T::resource(self, idx)
+    pub fn resource<T: ComponentFetch>(&self, idx: usize) -> T::Get<'_> {
+        crate::validate::check_access(T::ACCESS_TYPE, &self.singletons[idx]);
+        T::resource(self.ecs, self.singletons[idx].id).unwrap()
     }
 
-    pub fn each_row<T: Row + 'a>(&'a self, mut f: impl FnMut(T::Get<'a>)) {
+    pub fn each_row<T: Columns + 'a>(&'a self, mut f: impl FnMut(T::Row<'a>)) {
         crate::validate::check_row(T::ACCESSES, self.fields);
-        let mut cols = T::columns(self);
-        (0..self.num_rows()).for_each(|i| f(unsafe { T::get(&mut cols, i) }));
+        let cols = T::pointers(self);
+        for row in 0..self.num_rows() {
+            f(unsafe { T::row(cols, row) })
+        }
     }
 }
 
-pub trait Field: ComponentAccess {
+pub trait Columns: Sized {
+    type Pointers: Copy;
+    type Slices<'a>;
     type Row<'c>;
-    type Column<'t>;
-
-    unsafe fn row<'c>(column: &mut Self::Column<'c>, row: usize) -> Self::Row<'c>;
-    fn column<'t>(iter: &'t TableIter<'t>, index: usize) -> Self::Column<'t>;
-    fn resource<'t>(iter: &'t TableIter<'t>, index: usize) -> Self::Row<'t>;
-}
-
-impl<T: 'static> Field for &T {
-    type Row<'c> = &'c T;
-    type Column<'t> = &'t [T];
-
-    unsafe fn row<'c>(column: &mut Self::Column<'c>, row: usize) -> Self::Row<'c> {
-        // Reborrow to detach lifetime
-        unsafe { &*(column.get_unchecked(row) as *const T) }
-    }
-
-    fn column<'t>(iter: &'t TableIter<'t>, index: usize) -> Self::Column<'t> {
-        let col = iter.col_indices[index];
-        // SAFETY: ACCESS is Read; validation proved this column was
-        // declared Read or Write, so no conflicting &mut exists for 't.
-        unsafe { iter.table.col_slice::<T>(col) }
-    }
-
-    fn resource<'t>(iter: &'t TableIter<'t>, index: usize) -> Self::Row<'t> {
-        let col = iter.singletons[index];
-        // SAFETY: ACCESS is Read; validation proved this resource was
-        // declared Read or Write, so no conflicting &mut exists for 't.
-        unsafe { component::resource(iter.ecs, col.id).unwrap() }
-    }
-}
-
-impl<T: 'static> Field for &mut T {
-    type Row<'c> = &'c mut T;
-    type Column<'t> = &'t mut [T];
-
-    unsafe fn row<'c>(column: &mut Self::Column<'c>, row: usize) -> Self::Row<'c> {
-        // Reborrow to detach lifetime
-        unsafe { &mut *(column.get_unchecked_mut(row) as *mut T) }
-    }
-
-    fn column<'t>(iter: &'t TableIter<'t>, index: usize) -> Self::Column<'t> {
-        let col = iter.col_indices[index];
-        // SAFETY: ACCESS is Write; validation proved this column was declared
-        // Write and is internally unique (AccessList) and disjoint from any
-        // combined query (check_disjoint), so this &mut is the only borrow for 't.
-        unsafe { iter.table.col_slice_mut::<T>(col) }
-    }
-
-    fn resource<'t>(iter: &'t TableIter<'t>, index: usize) -> Self::Row<'t> {
-        let col = iter.singletons[index];
-        // SAFETY: ACCESS is Write; validation proved this resource was declared
-        // Write and is internally unique (AccessList) and disjoint from any
-        // combined query (check_disjoint), so this &mut is the only borrow for 't.
-        unsafe { component::resource_mut(iter.ecs, col.id).unwrap() }
-    }
-}
-
-pub trait Row: Sized {
-    type Get<'c>;
-    type Columns<'t>;
     const ACCESSES: &'static [AccessType];
 
-    fn columns<'t>(iter: &'t TableIter<'t>) -> Self::Columns<'t>;
-    unsafe fn get<'c>(column: &mut Self::Columns<'c>, row: usize) -> Self::Get<'c>;
+    fn pointers(iter: &TableIter) -> Self::Pointers;
+    /// # Safety
+    /// Validation proved these accesses pairwise disjoint; caller holds the
+    /// unique mutable capability for the table (TableIter taken by &mut).
+    unsafe fn slices<'a>(ptrs: Self::Pointers, count: usize) -> Self::Slices<'a>;
+    unsafe fn row<'c>(column: Self::Pointers, row: usize) -> Self::Row<'c>;
 }
 
-impl<T: Field> Row for T {
-    type Get<'c> = T::Row<'c>;
-    type Columns<'t> = T::Column<'t>;
-    const ACCESSES: &'static [AccessType] = &[T::ACCESS];
+impl<T: ComponentFetch> Columns for T {
+    type Pointers = T::ColumnPtr;
+    type Slices<'a> = T::ColumnSlice<'a>;
+    type Row<'c> = T::Get<'c>;
+    const ACCESSES: &'static [AccessType] = &[T::ACCESS_TYPE];
 
-    fn columns<'t>(iter: &'t TableIter<'t>) -> Self::Columns<'t> {
-        T::column(iter, 0)
+    fn pointers(iter: &TableIter) -> Self::Pointers {
+        T::column_ptr(iter.table, T::resolve(iter.table, iter.col_indices[0]))
     }
 
-    unsafe fn get<'c>(column: &mut Self::Columns<'c>, row: usize) -> Self::Get<'c> {
+    #[inline(always)]
+    unsafe fn slices<'t>(ptrs: Self::Pointers, count: usize) -> Self::Slices<'t> {
+        unsafe { T::column_slice(ptrs, count) }
+    }
+
+    unsafe fn row<'c>(column: Self::Pointers, row: usize) -> Self::Row<'c> {
         unsafe { T::row(column, row) }
     }
 }
 
 macro_rules! impl_tuple_row {
     ($($T:ident),+ $(,)?) => {
-        impl<$($T: Field),+ > Row for ($($T,)+) {
-            type Get<'c> = ($($T::Row<'c>,)+);
-            type Columns<'t> = ($($T::Column<'t>,)+);
-            const ACCESSES: &'static [AccessType] = &[$($T::ACCESS),+];
+        impl<$($T: ComponentFetch),+> Columns for ($($T,)+) {
+            type Row<'c> = ($($T::Get<'c>,)+);
+            type Pointers = ($($T::ColumnPtr,)+);
+            type Slices<'a> = ($($T::ColumnSlice<'a>,)+);
+            const ACCESSES: &'static [AccessType] = &[$($T::ACCESS_TYPE),+];
 
             #[inline(always)]
-            fn columns<'t>(iter: &'t TableIter<'t>) -> Self::Columns<'t> {
+            fn pointers(iter: &TableIter) -> Self::Pointers {
                 let mut i = 0usize;
                 ($(
                     #[allow(unused_assignments)]
-                    { let col = $T::column(iter, i); i += 1; col },
+                    {
+                        let idx = $T::resolve(iter.table, iter.col_indices[i]);
+                        let col = $T::column_ptr(iter.table, idx);
+                        i += 1;
+                        col
+                    },
                 )+)
             }
 
-            unsafe fn get<'c>(cols: & mut Self::Columns<'c>, row: usize) -> Self::Get<'c> {
+
+            #[inline(always)]
+            unsafe fn slices<'a>(cols: Self::Pointers, count: usize) -> Self::Slices<'a> {
+                #[allow(non_snake_case)]
+                let ($($T,)+) = cols;
+                unsafe { ($($T::column_slice($T, count),)+) }
+            }
+
+            #[inline(always)]
+            unsafe fn row<'c>(cols: Self::Pointers, row: usize) -> Self::Row<'c> {
                 #[allow(non_snake_case)]
                 let ($($T,)+) = cols;
                 unsafe { ($($T::row($T, row),)+) }
@@ -154,15 +147,15 @@ macro_rules! impl_tuple_row {
     };
 }
 
-impl_tuple_row!(P0, P1);
-impl_tuple_row!(P0, P1, P2);
-impl_tuple_row!(P0, P1, P2, P3);
-impl_tuple_row!(P0, P1, P2, P3, P4);
-impl_tuple_row!(P0, P1, P2, P3, P4, P5);
-impl_tuple_row!(P0, P1, P2, P3, P4, P5, P6);
-impl_tuple_row!(P0, P1, P2, P3, P4, P5, P6, P7);
-impl_tuple_row!(P0, P1, P2, P3, P4, P5, P6, P7, P8);
-impl_tuple_row!(P0, P1, P2, P3, P4, P5, P6, P7, P8, P9);
-impl_tuple_row!(P0, P1, P2, P3, P4, P5, P6, P7, P8, P9, P10);
-impl_tuple_row!(P0, P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11);
-impl_tuple_row!(P0, P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12);
+impl_tuple_row!(T0, T1);
+impl_tuple_row!(T0, T1, T2);
+impl_tuple_row!(T0, T1, T2, T3);
+impl_tuple_row!(T0, T1, T2, T3, T4);
+impl_tuple_row!(T0, T1, T2, T3, T4, T5);
+impl_tuple_row!(T0, T1, T2, T3, T4, T5, T6);
+impl_tuple_row!(T0, T1, T2, T3, T4, T5, T6, T7);
+impl_tuple_row!(T0, T1, T2, T3, T4, T5, T6, T7, T8);
+impl_tuple_row!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9);
+impl_tuple_row!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10);
+impl_tuple_row!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11);
+impl_tuple_row!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12);

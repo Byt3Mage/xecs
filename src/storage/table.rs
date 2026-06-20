@@ -1,4 +1,4 @@
-use std::cmp::Ordering;
+use std::{cmp::Ordering, ptr::NonNull};
 
 use crate::{
     ecs::Ecs,
@@ -38,6 +38,8 @@ impl TableData {
     pub(crate) fn columns(&self) -> &[Column] {
         &self.columns
     }
+
+    #[inline(always)]
 
     /// Ensure all columns have capacity for at least `additional` more rows.
     pub(crate) fn reserve(&mut self, additional: usize) {
@@ -153,21 +155,9 @@ impl Table {
         &self.data.columns()[col]
     }
 
-    /// # Safety
-    /// - T matches column `col`'s type
-    /// - No aliasing &mut for 'a.
     #[inline(always)]
-    pub(crate) unsafe fn col_slice<T: 'static>(&self, col: usize) -> &[T] {
-        unsafe { self.data.columns()[col].slice::<T>(self.num_rows()) }
-    }
-
-    /// # Safety
-    /// - T matches column `col`'s type
-    /// - Unique access for 'a.
-    #[inline(always)]
-    #[allow(clippy::mut_from_ref)]
-    pub(crate) unsafe fn col_slice_mut<T: 'static>(&self, col: usize) -> &mut [T] {
-        unsafe { self.data.columns()[col].slice_mut::<T>(self.num_rows()) }
+    pub(crate) fn column_ptr<T: 'static>(&self, col: usize) -> NonNull<T> {
+        self.data.columns()[col].ptr()
     }
 
     /// Typed shared read of component `id` at `row`.

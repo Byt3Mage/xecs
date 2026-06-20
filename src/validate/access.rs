@@ -5,16 +5,16 @@ use crate::id::Id;
 
 #[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
 #[error("write conflict on component {0:?}")]
-pub struct WriteConflict(pub Id);
+pub struct WriteAccessError(pub Id);
 
 /// Check a single access list is internally conflict-free (no write aliases
 /// another access of the same id). Called by `AccessList::push`.
 #[cfg(feature = "validate")]
 #[inline]
-pub fn check_push(existing: &[Access], new: Access) -> Result<(), WriteConflict> {
+pub fn check_push(existing: &[Access], new: Access) -> Result<(), WriteAccessError> {
     for a in existing {
         if a.id == new.id && (a.ty == AccessType::Write || new.ty == AccessType::Write) {
-            return Err(WriteConflict(a.id));
+            return Err(WriteAccessError(a.id));
         }
     }
     Ok(())
@@ -22,13 +22,13 @@ pub fn check_push(existing: &[Access], new: Access) -> Result<(), WriteConflict>
 
 #[cfg(not(feature = "validate"))]
 #[inline(always)]
-pub fn check_push(_existing: &[Access], _new: Access) -> Result<(), WriteConflict> {
+pub fn check_push(_existing: &[Access], _new: Access) -> Result<(), WriteAccessError> {
     Ok(())
 }
 
 #[cfg(feature = "validate")]
 #[inline]
-pub fn check_combined(lists: &[&[Access]]) -> Result<(), WriteConflict> {
+pub fn check_combined(lists: &[&[Access]]) -> Result<(), WriteAccessError> {
     fn pair_conflict(a: &[Access], b: &[Access]) -> Option<Id> {
         for x in a {
             for y in b {
@@ -43,7 +43,7 @@ pub fn check_combined(lists: &[&[Access]]) -> Result<(), WriteConflict> {
     for (i, a) in lists.iter().enumerate() {
         for b in &lists[i + 1..] {
             if let Some(id) = pair_conflict(a, b) {
-                return Err(WriteConflict(id));
+                return Err(WriteAccessError(id));
             }
         }
     }
@@ -52,6 +52,6 @@ pub fn check_combined(lists: &[&[Access]]) -> Result<(), WriteConflict> {
 
 #[cfg(not(feature = "validate"))]
 #[inline(always)]
-pub fn check_combined(_lists: &[&[Access]]) -> Result<(), WriteConflict> {
+pub fn check_combined(_lists: &[&[Access]]) -> Result<(), WriteAccessError> {
     Ok(())
 }

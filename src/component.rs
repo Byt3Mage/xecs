@@ -7,19 +7,20 @@ use std::{
 };
 
 use ahash::AHashSet;
-use smallvec::{SmallVec, smallvec};
 
 use crate::{
-    access::{AccessType, StaticAccess},
-    component::private::SealedGetMulti,
     ecs::Ecs,
-    error::{EcsResult, Error, IdNotComponent},
+    error::EcsResult,
     graph::{find_add_table, find_remove_table},
-    id::{Id, manager::IdRecord, map::IdMap},
+    id::{Id, allocator::IdRecord, map::IdMap},
     storage::{Storage, StorageType, resource::Resource, sparse::SparseSet, table::move_id},
     type_meta::TypeMeta,
     utils::ConstNonNull,
 };
+
+#[derive(Debug, thiserror::Error, Clone, Copy)]
+#[error("Id {0} is not registered as a component")]
+pub struct NotComponent(pub Id);
 
 #[derive(Debug)]
 pub struct StaticId<T: 'static> {
@@ -133,7 +134,7 @@ impl<T: 'static> ComponentBuilder<T> {
 /// - Caller must ensure that `val` is the component data type.
 pub(crate) unsafe fn insert<T: 'static>(ecs: &mut Ecs, id: Id, comp: Id, val: T) -> EcsResult<Option<T>> {
     let r = ecs.ids.get(id)?;
-    let ci = ecs.components.get_mut(comp).ok_or(IdNotComponent(comp))?;
+    let ci = ecs.components.get_mut(comp).ok_or(NotComponent(comp))?;
 
     // SAFETY: Caller ensures the val is the component data type
     unsafe {
@@ -160,7 +161,7 @@ pub(crate) unsafe fn insert<T: 'static>(ecs: &mut Ecs, id: Id, comp: Id, val: T)
 
 pub(crate) unsafe fn remove(ecs: &mut Ecs, id: Id, tag: Id) -> EcsResult<()> {
     let r = ecs.ids.get(id)?;
-    let cm = ecs.components.get_mut(tag).ok_or(IdNotComponent(tag))?;
+    let cm = ecs.components.get_mut(tag).ok_or(NotComponent(tag))?;
 
     unsafe {
         match &mut cm.storage {
@@ -179,7 +180,7 @@ pub(crate) unsafe fn remove(ecs: &mut Ecs, id: Id, tag: Id) -> EcsResult<()> {
 
 pub(crate) fn has(ecs: &Ecs, id: Id, comp: Id) -> EcsResult<bool> {
     let r = ecs.ids.get(id)?;
-    let cm = ecs.components.get(comp).ok_or(IdNotComponent(comp))?;
+    let cm = ecs.components.get(comp).ok_or(NotComponent(comp))?;
     Ok(match &cm.storage {
         Storage::Sparse(set) => set.contains(id),
         Storage::Tables(tables) => tables.contains(&r.table),
@@ -187,7 +188,7 @@ pub(crate) fn has(ecs: &Ecs, id: Id, comp: Id) -> EcsResult<bool> {
 }
 
 pub(crate) unsafe fn get<T: 'static>(ecs: &Ecs, id: Id, r: IdRecord, comp: Id) -> EcsResult<Option<&T>> {
-    let ci = ecs.components.get(comp).ok_or(IdNotComponent(comp))?;
+    let ci = ecs.components.get(comp).ok_or(NotComponent(comp))?;
     Ok(unsafe {
         match &ci.storage {
             Storage::Tables(_) => ecs.tables[r.table].get(comp, r.row),
@@ -197,7 +198,7 @@ pub(crate) unsafe fn get<T: 'static>(ecs: &Ecs, id: Id, r: IdRecord, comp: Id) -
 }
 
 pub(crate) unsafe fn get_mut<T: 'static>(ecs: &Ecs, id: Id, r: IdRecord, comp: Id) -> EcsResult<Option<&mut T>> {
-    let cm = ecs.components.get(comp).ok_or(IdNotComponent(comp))?;
+    let cm = ecs.components.get(comp).ok_or(NotComponent(comp))?;
     Ok(unsafe {
         match &cm.storage {
             Storage::Tables(_) => ecs.tables[r.table].get_mut(comp, r.row),
@@ -207,7 +208,7 @@ pub(crate) unsafe fn get_mut<T: 'static>(ecs: &Ecs, id: Id, r: IdRecord, comp: I
 }
 
 pub(crate) unsafe fn insert_resource<T: 'static>(ecs: &mut Ecs, id: Id, value: T) -> EcsResult<Option<T>> {
-    let cm = ecs.components.get_mut(id).ok_or(IdNotComponent(id))?;
+    let cm = ecs.components.get_mut(id).ok_or(NotComponent(id))?;
     let prev = match &mut cm.resource {
         Some(r) => Some(unsafe { r.replace(value) }),
         None => {
@@ -218,133 +219,16 @@ pub(crate) unsafe fn insert_resource<T: 'static>(ecs: &mut Ecs, id: Id, value: T
     Ok(prev)
 }
 
-pub(crate) unsafe fn resource<T: 'static>(ecs: &Ecs, id: Id) -> EcsResult<&T> {
-    let cm = ecs.components.get(id).ok_or(IdNotComponent(id))?;
-    match &cm.resource {
-        Some(r) => Ok(unsafe { r.get() }),
-        None => Err(Error::MissingResource { id }),
-    }
+pub(crate) unsafe fn resource<T: 'static>(ecs: &Ecs, id: Id) -> Result<Option<&T>, NotComponent> {
+    ecs.components
+        .get(id)
+        .ok_or(NotComponent(id))
+        .map(|c| c.resource.as_ref().map(|r| unsafe { r.get() }))
 }
 
-pub(crate) unsafe fn resource_mut<T: 'static>(ecs: &Ecs, id: Id) -> EcsResult<&mut T> {
-    let cm = ecs.components.get(id).ok_or(IdNotComponent(id))?;
-    match &cm.resource {
-        Some(r) => Ok(unsafe { r.get_mut() }),
-        None => Err(Error::MissingResource { id }),
-    }
+pub(crate) unsafe fn resource_mut<T: 'static>(ecs: &Ecs, id: Id) -> Result<Option<&mut T>, NotComponent> {
+    ecs.components
+        .get(id)
+        .ok_or(NotComponent(id))
+        .map(|c| c.resource.as_ref().map(|r| unsafe { r.get_mut() }))
 }
-
-mod private {
-    pub trait SealedAccess {}
-    pub trait SealedGetMulti {}
-}
-
-use private::SealedAccess;
-
-pub trait ComponentAccess: Sized + private::SealedAccess {
-    type RemoveRef: 'static;
-    type Get<'a>;
-    const ACCESS: AccessType;
-
-    /// # Safety
-    /// Caller guarantees this access does not alias another live
-    /// borrow of the same component for `id` (single access, or validated
-    /// disjoint within a tuple).
-    unsafe fn fetch<'a>(ecs: &'a Ecs, id: Id, r: IdRecord, comp: Id) -> EcsResult<Self::Get<'a>>;
-}
-
-impl<T: 'static> SealedAccess for &T {}
-impl<T: 'static> SealedAccess for &mut T {}
-
-impl<T: 'static> ComponentAccess for &T {
-    type RemoveRef = T;
-    type Get<'a> = &'a T;
-    const ACCESS: AccessType = AccessType::Read;
-
-    unsafe fn fetch<'a>(ecs: &'a Ecs, id: Id, r: IdRecord, comp: Id) -> EcsResult<&'a T> {
-        unsafe { get::<T>(ecs, id, r, comp)?.ok_or(Error::MissingComponent { id, comp }) }
-    }
-}
-
-impl<T: 'static> ComponentAccess for &mut T {
-    type RemoveRef = T;
-    type Get<'a> = &'a mut T;
-    const ACCESS: AccessType = AccessType::Write;
-
-    unsafe fn fetch<'a>(ecs: &'a Ecs, id: Id, r: IdRecord, comp: Id) -> EcsResult<&'a mut T> {
-        unsafe { get_mut::<T>(ecs, id, r, comp)?.ok_or(Error::MissingComponent { id, comp }) }
-    }
-}
-
-impl<T: ComponentAccess> SealedGetMulti for T {}
-
-pub trait GetMulti: Sized + private::SealedGetMulti {
-    type Output<'a>;
-    fn accesses() -> SmallVec<[StaticAccess; 8]>;
-    fn create(ecs: &mut Ecs, id: Id) -> EcsResult<Self::Output<'_>>;
-}
-
-impl<T: ComponentAccess> GetMulti for T
-where
-    T::RemoveRef: TypedStaticId,
-{
-    type Output<'a> = T::Get<'a>;
-
-    fn accesses() -> SmallVec<[StaticAccess; 8]> {
-        smallvec![StaticAccess { id: T::RemoveRef::id().id, ty: T::ACCESS }]
-    }
-
-    fn create(ecs: &mut Ecs, id: Id) -> EcsResult<Self::Output<'_>> {
-        let r = ecs.ids.get(id)?;
-        let comp = ecs.id_t::<T::RemoveRef>()?;
-        // SAFETY: single access; &mut Ecs guarantees uniqueness. The cast from
-        // the &mut-Ecs borrow to T::Get (& or &mut) is sound because there is
-        // exactly one access and we hold the unique world reference.
-        unsafe { T::fetch(ecs, id, r, comp) }
-    }
-}
-
-macro_rules! impl_tuple_params {
-    ($($T:ident),*) => {
-        impl<$($T: ComponentAccess),*> private::SealedGetMulti for ($($T,) *) {}
-        impl<$($T: ComponentAccess),*> GetMulti for ($($T,) *)
-        where
-            $($T::RemoveRef: TypedStaticId,)*
-        {
-            type Output<'a> = ($($T::Get<'a>,)*);
-
-
-            fn accesses() -> SmallVec<[StaticAccess; 8]> {
-                smallvec![$(StaticAccess { id: $T::RemoveRef::id().id, ty: $T::ACCESS }),*]
-            }
-
-            fn create(ecs: &mut Ecs, id: Id) -> EcsResult<Self::Output<'_>> {
-                let r = ecs.ids.get(id)?;
-
-                // Validate internal disjointness: no &mut aliases another access
-                // of the same component. Panics (or Err) per your convention.
-                crate::validate::check_multi_get::<($($T,) *)>();
-
-                // SAFETY: check_multi_get proved no aliasing among the tuple's
-                // accesses; &mut Ecs proves no external aliasing. Each fetch is
-                // therefore the unique live borrow of its component.
-                let ecs: &Ecs = ecs;
-                unsafe { Ok(($($T::fetch(ecs, id, r, ecs.id_t::<$T::RemoveRef>()?)?,)*)) }
-            }
-        }
-    }
-}
-
-impl_tuple_params!(P0);
-impl_tuple_params!(P0, P1);
-impl_tuple_params!(P0, P1, P2);
-impl_tuple_params!(P0, P1, P2, P3);
-impl_tuple_params!(P0, P1, P2, P3, P4);
-impl_tuple_params!(P0, P1, P2, P3, P4, P5);
-impl_tuple_params!(P0, P1, P2, P3, P4, P5, P6);
-impl_tuple_params!(P0, P1, P2, P3, P4, P5, P6, P7);
-impl_tuple_params!(P0, P1, P2, P3, P4, P5, P6, P7, P8);
-impl_tuple_params!(P0, P1, P2, P3, P4, P5, P6, P7, P8, P9);
-impl_tuple_params!(P0, P1, P2, P3, P4, P5, P6, P7, P8, P9, P10);
-impl_tuple_params!(P0, P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11);
-impl_tuple_params!(P0, P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12);

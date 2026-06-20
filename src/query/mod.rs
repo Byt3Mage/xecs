@@ -8,15 +8,16 @@ use crate::{
     ecs::Ecs,
     error::EcsResult,
     id::Id,
-    query::iter::Row,
+    query::{fetch::ComponentFetch, iter::Columns},
     storage::Storage,
     table_index::TableId,
-    validate::WriteConflict,
+    validate::WriteAccessError,
 };
 
 use self::iter::TableIter;
 
 pub mod dsl;
+pub mod fetch;
 pub mod iter;
 pub mod typed_query;
 
@@ -45,17 +46,28 @@ impl<'w> QueryBuilder<'w> {
     }
 
     #[inline]
-    pub fn access(mut self, access: Access) -> Result<Self, WriteConflict> {
+    pub fn fetch(mut self, access: Access) -> Result<Self, WriteAccessError> {
         self.fields.push(access)?;
         Ok(self)
     }
 
-    pub fn read_id(self, id: Id) -> Result<Self, WriteConflict> {
-        self.access(Access { id, ty: AccessType::Read })
+    #[inline]
+    pub fn fetch_t<T>(self) -> EcsResult<Self>
+    where
+        T: ComponentFetch,
+        T::RemoveRef: TypedStaticId,
+    {
+        let id = self.ecs.id_t::<T::RemoveRef>()?;
+        let ty = T::ACCESS_TYPE;
+        Ok(self.fetch(Access { id, ty })?)
     }
 
-    pub fn write_id(self, id: Id) -> Result<Self, WriteConflict> {
-        self.access(Access { id, ty: AccessType::Write })
+    pub fn read_id(self, id: Id) -> Result<Self, WriteAccessError> {
+        self.fetch(Access { id, ty: AccessType::Read })
+    }
+
+    pub fn write_id(self, id: Id) -> Result<Self, WriteAccessError> {
+        self.fetch(Access { id, ty: AccessType::Write })
     }
 
     pub fn with_id(mut self, id: Id) -> Self {
@@ -86,16 +98,6 @@ impl<'w> QueryBuilder<'w> {
     pub fn without<T>(self, comp: &StaticId<T>) -> EcsResult<Self> {
         let id = self.ecs.id(comp)?;
         Ok(self.without_id(id))
-    }
-
-    pub fn read_t<T: TypedStaticId>(self) -> EcsResult<Self> {
-        let id = self.ecs.id_t::<T>()?;
-        Ok(self.read_id(id)?)
-    }
-
-    pub fn write_t<T: TypedStaticId>(self) -> EcsResult<Self> {
-        let id = self.ecs.id_t::<T>()?;
-        Ok(self.write_id(id)?)
     }
 
     pub fn with_t<T: TypedStaticId>(self) -> EcsResult<Self> {
@@ -189,7 +191,11 @@ impl Query {
             // Must NOT have any excluded ids
             if required.iter().all(|&id| table.sig.has(id)) && !self.without.iter().any(|&id| table.sig.has(id)) {
                 // Resolve column indices for each field
-                let columns = self.fields.iter().map(|f| table.col_map[f.id]).collect();
+                let columns = self
+                    .fields
+                    .iter()
+                    .map(|f| table.col_map.get(f.id).copied().unwrap_or(usize::MAX))
+                    .collect();
                 self.matches.push(TableMatch { table_id, col_indices: columns });
             }
         }
@@ -202,7 +208,7 @@ impl Query {
     }
 
     #[inline]
-    pub fn each<T: Row>(&self, ecs: &mut Ecs, f: impl FnMut(T::Get<'_>)) {
+    pub fn each<T: Columns>(&self, ecs: &mut Ecs, f: impl FnMut(T::Row<'_>)) {
         // &mut Ecs is the gate: forces multi-query access through `combine`.
         self.view(ecs).each::<T>(f)
     }
@@ -244,7 +250,7 @@ impl<'a> QueryView<'a> {
     }
 
     #[inline]
-    pub fn each<T: Row>(&self, mut f: impl FnMut(T::Get<'_>)) {
+    pub fn each<T: Columns>(&self, mut f: impl FnMut(T::Row<'_>)) {
         self.tables().for_each(|t| t.each_row::<T>(|r| f(r)))
     }
 
@@ -278,7 +284,7 @@ impl<'q, const N: usize> CombinedQuery<'q, N> {
     }
 }
 
-pub fn combine<const N: usize>(queries: [&Query; N]) -> Result<CombinedQuery<'_, N>, WriteConflict> {
+pub fn combine<const N: usize>(queries: [&Query; N]) -> Result<CombinedQuery<'_, N>, WriteAccessError> {
     let fields: [&[Access]; N] = queries.map(|q| &*q.fields);
     let resources: [&[Access]; N] = queries.map(|q| &*q.resources);
 

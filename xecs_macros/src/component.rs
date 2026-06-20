@@ -46,14 +46,14 @@ impl ToTokens for ComponentDesc {
         let storage = match &self.storage {
             Some(storage) => {
                 if storage == "tables" {
-                    quote! {xecs::storage::StorageType::Tables}
+                    quote! {xecs::StorageType::Tables}
                 } else if storage == "sparse" {
-                    quote! {xecs::storage::StorageType::Sparse}
+                    quote! {xecs::StorageType::Sparse}
                 } else {
                     quote! {compile_error!("xecs: invalid component storage type")}
                 }
             }
-            None => quote! {xecs::storage::StorageType::Tables},
+            None => quote! {xecs::StorageType::Tables},
         };
 
         let ty = self.ty.as_ref().map_or(quote! {()}, |ty| quote! {#ty});

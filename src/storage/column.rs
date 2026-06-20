@@ -32,6 +32,12 @@ impl Column {
         self.meta.layout.size()
     }
 
+    #[inline(always)]
+    pub(crate) fn ptr<T: 'static>(&self) -> NonNull<T> {
+        crate::validate::check_type::<T>(&self.meta);
+        self.data.cast()
+    }
+
     /// Byte pointer to the element at `row`. Internal; size read from meta..
     ///
     /// # Safety
@@ -64,31 +70,6 @@ impl Column {
     pub(crate) unsafe fn get_mut<T: 'static>(&self, row: usize) -> &mut T {
         crate::validate::check_type::<T>(&self.meta);
         unsafe { self.row_ptr(row).cast().as_mut() }
-    }
-
-    /// Borrow `len` initialized elements as `&[T]`.
-    ///
-    /// # Safety
-    /// - `T` is the stored type.
-    /// - No `&mut` to this column exists for the returned lifetime.
-    #[inline(always)]
-    pub(crate) unsafe fn slice<T: 'static>(&self, len: usize) -> &[T] {
-        crate::validate::check_type::<T>(&self.meta);
-        // SAFETY: data valid for len Ts (table invariant); aliasing upheld by caller.
-        unsafe { std::slice::from_raw_parts(self.data.as_ptr().cast::<T>(), len) }
-    }
-
-    /// Borrow `len` initialized elements as `&mut [T]`.
-    ///
-    /// # Safety
-    /// - `T` is the stored type.
-    /// - No other borrow of this column exists for the returned lifetime.
-    #[inline(always)]
-    #[allow(clippy::mut_from_ref)]
-    pub(crate) unsafe fn slice_mut<T: 'static>(&self, len: usize) -> &mut [T] {
-        crate::validate::check_type::<T>(&self.meta);
-        // SAFETY: exclusivity upheld by caller (query validation).
-        unsafe { std::slice::from_raw_parts_mut(self.data.as_ptr().cast::<T>(), len) }
     }
 
     /// Write a value at `row` without reading or dropping the old value.

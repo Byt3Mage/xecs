@@ -1,24 +1,25 @@
-pub mod access;
-pub mod bundle;
+mod access;
+mod bundle;
 pub mod component;
-pub mod dynamic_struct;
+mod dynamic_struct;
 mod ecs;
-pub mod error;
-pub mod flags;
+mod error;
+mod flags;
 mod graph;
-pub mod id;
-pub mod macros;
-pub mod query;
-pub mod storage;
+mod id;
+mod macros;
+mod query;
+mod storage;
 mod table_index;
-pub mod type_meta;
+mod type_meta;
 mod utils;
-pub mod validate;
+mod validate;
 
 // Re-exports
-pub use component::{StaticId, TypedStaticId};
 pub use ecs::Ecs;
 pub use error::Error;
 pub use id::Id;
 pub use query::{Query, QueryBuilder};
-pub use xecs_macros;
+pub use storage::StorageType;
+pub use validate::WriteAccessError;
+pub use xecs_macros::{Component, components};
