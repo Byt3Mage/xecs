@@ -1,3 +1,6 @@
+use crate::graph::GraphNode;
+use crate::id::map::IdMap;
+use crate::storage::table::TableData;
 use crate::{id::Signature, storage::table::Table};
 use std::collections::hash_map::Values;
 use std::{
@@ -29,13 +32,35 @@ impl TableId {
 }
 
 pub(crate) struct TableIndex {
+    root: TableId,
     tables: Vec<Table>,
     table_ids: HashMap<Signature, TableId>,
 }
 
 impl TableIndex {
     pub(crate) fn new() -> Self {
-        Self { tables: Vec::new(), table_ids: HashMap::new() }
+        Self {
+            root: TableId(0),
+            tables: vec![Table {
+                sig: Signature::from(vec![]),
+                data: TableData::new(Box::new([])),
+                col_map: IdMap::new(),
+                graph_node: GraphNode::new(),
+            }],
+            table_ids: HashMap::new(),
+        }
+    }
+
+    pub fn root_id(&self) -> TableId {
+        self.root
+    }
+
+    pub fn root(&self) -> &Table {
+        &self.tables[self.root.0 as usize]
+    }
+
+    pub fn root_mut(&mut self) -> &mut Table {
+        &mut self.tables[self.root.0 as usize]
     }
 
     pub(crate) fn add_with_id<F>(&mut self, f: F) -> TableId

@@ -1,9 +1,9 @@
 use crate::{
+    Query,
     component::{self, Component, ComponentBuilder, StaticId, TypedStaticId},
     error::{EcsResult, Error},
-    graph::GraphNode,
     id::{
-        Id, Signature,
+        Id,
         allocator::{IdAllocator, IdRecord, NotAlive},
         map::IdMap,
     },
@@ -13,9 +13,9 @@ use crate::{
     },
     storage::{
         Storage,
-        table::{self, Table, TableData},
+        table::{self},
     },
-    table_index::{TableId, TableIndex},
+    table_index::TableIndex,
 };
 
 pub struct Ecs {
@@ -23,26 +23,17 @@ pub struct Ecs {
     pub(crate) components: IdMap<Component>,
     pub(crate) component_ids: Vec<Option<Id>>,
     pub(crate) tables: TableIndex,
-    pub(crate) root_table: TableId,
+    pub(crate) cached_queries: Vec<Query>,
 }
 
 impl Ecs {
     pub fn new() -> Self {
-        let mut tables = TableIndex::new();
-
-        let root_table = tables.add(Table {
-            sig: Signature::from(vec![]),
-            data: TableData::new(Box::new([])),
-            col_map: IdMap::new(),
-            graph_node: GraphNode::new(),
-        });
-
         Self {
             ids: IdAllocator::new(),
             components: IdMap::new(),
             component_ids: Vec::new(),
-            tables,
-            root_table,
+            cached_queries: Vec::new(),
+            tables: TableIndex::new(),
         }
     }
 
@@ -144,11 +135,10 @@ impl Ecs {
 
     /// Creates a new [Id].
     pub fn new_id(&mut self) -> Id {
-        // SAFETY: Root table does not have columns,
-        // so it's safe leave uninitialized.
+        // SAFETY: No columns in root table, so there's nothing to initialize.
         self.ids.new_id(|id| IdRecord {
-            table: self.root_table,
-            row: unsafe { self.tables[self.root_table].data.alloc_row(id) },
+            table: self.tables.root_id(),
+            row: unsafe { self.tables.root_mut().data.alloc_row(id) },
         })
     }
 

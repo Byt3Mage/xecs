@@ -18,17 +18,26 @@ impl AccessType {
     pub const fn is_write(&self) -> bool {
         matches!(self, AccessType::Write)
     }
+
+    pub const fn join(self, other: AccessType) -> AccessType {
+        match (self, other) {
+            (AccessType::Read, AccessType::Read) => AccessType::Read,
+            _ => AccessType::Write,
+        }
+    }
+}
+
+impl std::ops::BitOr for AccessType {
+    type Output = AccessType;
+
+    fn bitor(self, other: AccessType) -> Self::Output {
+        self.join(other)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Access {
     pub id: Id,
-    pub ty: AccessType,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StaticAccess {
-    pub id: u32,
     pub ty: AccessType,
 }
 

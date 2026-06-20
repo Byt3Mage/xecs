@@ -14,7 +14,6 @@ impl<T: 'static> private::SealedFetch for &T {}
 impl<T: 'static> private::SealedFetch for &mut T {}
 impl<T: 'static> private::SealedFetch for Option<&T> {}
 impl<T: 'static> private::SealedFetch for Option<&mut T> {}
-
 impl<T: 'static> private::SealedReadOnlyFetch for &T {}
 impl<T: 'static> private::SealedReadOnlyFetch for Option<&T> {}
 
@@ -179,51 +178,51 @@ pub trait ReadOnlyFetch: ComponentFetch + SealedReadOnlyFetch {}
 impl<T: 'static> ReadOnlyFetch for &T {}
 impl<T: 'static> ReadOnlyFetch for Option<&T> {}
 
-// pub trait GetMulti: Sized + private::SealedGetMulti {
-//     type Output<'a>;
-//     type Query;
-//     fn get(ecs: &mut Ecs, id: Id, query: Self::Query) -> EcsResult<Self::Output<'_>>;
-// }
+/*pub trait GetMulti: Sized + private::SealedGetMulti {
+    type Output<'a>;
+    type Query;
+    fn get(ecs: &mut Ecs, id: Id, query: Self::Query) -> EcsResult<Self::Output<'_>>;
+}
 
-// macro_rules! count {
-//     () => { 0 };
-//     ($head:tt $($rest:tt)*) => { 1 + count!($($rest)*) };
-// }
+macro_rules! count {
+    () => { 0 };
+    ($head:tt $($rest:tt)*) => { 1 + count!($($rest)*) };
+}
 
-// macro_rules! impl_tuple_params {
-//     ($($T:ident),+) => {
-//         impl<$($T: ComponentFetch),*> private::SealedGetMulti for ($($T),+) {}
-//         impl<$($T: ComponentFetch),*> GetMulti for ($($T,)+) {
-//             type Output<'a> = ($($T::Get<'a>,)+);
-//             type Query = [Id; { count!($($T)+) }];
+macro_rules! impl_tuple_params {
+    ($($T:ident),+) => {
+        impl<$($T: ComponentFetch),*> private::SealedGetMulti for ($($T),+) {}
+        impl<$($T: ComponentFetch),*> GetMulti for ($($T,)+) {
+            type Output<'a> = ($($T::Get<'a>,)+);
+            type Query = [Id; { count!($($T)+) }];
 
-//             fn get(ecs: &mut Ecs, id: Id, query: Self::Query) -> EcsResult<Self::Output<'_>> {
-//                 let r = ecs.ids.get(id)?;
+            fn get(ecs: &mut Ecs, id: Id, query: Self::Query) -> EcsResult<Self::Output<'_>> {
+                let r = ecs.ids.get(id)?;
 
-//                 #[allow(non_snake_case)]
-//                 let [$($T,)+] = query;
+                #[allow(non_snake_case)]
+                let [$($T,)+] = query;
 
-//                 //todo!("validation");
+                //todo!("validation");
 
-//                 // SAFETY: check_multi_get proved no aliasing among the tuple's
-//                 // accesses; &mut Ecs proves no external aliasing. Each fetch is
-//                 // therefore the unique live borrow of its component.
-//                 let ecs: &Ecs = ecs;
-//                 Ok(unsafe { ($($T::get(ecs, id, r, $T )?,)*) })
-//             }
-//         }
-//     }
-// }
+                // SAFETY: check_multi_get proved no aliasing among the tuple's
+                // accesses; &mut Ecs proves no external aliasing. Each fetch is
+                // therefore the unique live borrow of its component.
+                let ecs: &Ecs = ecs;
+                Ok(unsafe { ($($T::get(ecs, id, r, $T )?,)*) })
+            }
+        }
+    }
+}
 
-// impl_tuple_params!(T0, T1);
-// impl_tuple_params!(T0, T1, T2);
-// impl_tuple_params!(T0, T1, T2, T3);
-// impl_tuple_params!(T0, T1, T2, T3, T4);
-// impl_tuple_params!(T0, T1, T2, T3, T4, T5);
-// impl_tuple_params!(T0, T1, T2, T3, T4, T5, T6);
-// impl_tuple_params!(T0, T1, T2, T3, T4, T5, T6, T7);
-// impl_tuple_params!(T0, T1, T2, T3, T4, T5, T6, T7, T8);
-// impl_tuple_params!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9);
-// impl_tuple_params!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10);
-// impl_tuple_params!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11);
-// impl_tuple_params!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12);
+impl_tuple_params!(T0, T1);
+impl_tuple_params!(T0, T1, T2);
+impl_tuple_params!(T0, T1, T2, T3);
+impl_tuple_params!(T0, T1, T2, T3, T4);
+impl_tuple_params!(T0, T1, T2, T3, T4, T5);
+impl_tuple_params!(T0, T1, T2, T3, T4, T5, T6);
+impl_tuple_params!(T0, T1, T2, T3, T4, T5, T6, T7);
+impl_tuple_params!(T0, T1, T2, T3, T4, T5, T6, T7, T8);
+impl_tuple_params!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9);
+impl_tuple_params!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10);
+impl_tuple_params!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11);
+impl_tuple_params!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12);*/

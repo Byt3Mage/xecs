@@ -16,15 +16,3 @@ pub fn check_type<T: 'static>(meta: &TypeMeta) {
 #[cfg(not(feature = "validate"))]
 #[inline(always)]
 pub fn check_type<T: 'static>(_meta: &TypeMeta) {}
-
-/// Assert a row index does not exceed column bounds.
-
-#[cfg(feature = "validate")]
-#[inline]
-pub fn check_row_bounds(row: usize, count: usize) {
-    assert!(row < count, "xecs: row index out of bounds: row={row} count={count}",);
-}
-
-#[cfg(not(feature = "validate"))]
-#[inline(always)]
-pub fn check_row_bounds(row: usize, count: usize) {}
