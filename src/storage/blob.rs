@@ -1,23 +1,17 @@
 use std::{ptr::NonNull, rc::Rc};
 
-use crate::{id::Id, type_meta::TypeMeta};
+use crate::type_meta::TypeMeta;
 
 #[derive(Debug)]
-pub(crate) struct Column {
-    pub(super) id: Id,
-    pub(super) data: NonNull<u8>,
-    pub(super) meta: Rc<TypeMeta>,
+pub(crate) struct Blob {
+    data: NonNull<u8>,
+    meta: Rc<TypeMeta>,
 }
 
-impl Column {
+impl Blob {
     /// Creates a new column with a dangling pointer (no allocation).
-    pub(crate) fn new(id: Id, meta: Rc<TypeMeta>) -> Self {
-        Self { id, data: meta.dangling, meta }
-    }
-
-    #[inline(always)]
-    pub(crate) fn id(&self) -> Id {
-        self.id
+    pub(crate) fn new(meta: Rc<TypeMeta>) -> Self {
+        Self { data: meta.dangling, meta }
     }
 
     /// Whether this column stores ZSTs.
@@ -33,9 +27,8 @@ impl Column {
     }
 
     #[inline(always)]
-    pub(crate) fn ptr<T: 'static>(&self) -> NonNull<T> {
-        crate::validate::check_type::<T>(&self.meta);
-        self.data.cast()
+    pub(crate) fn ptr(&self) -> NonNull<u8> {
+        self.data
     }
 
     /// Byte pointer to the element at `row`. Internal; size read from meta..
@@ -43,8 +36,8 @@ impl Column {
     /// # Safety
     /// `row` must be within the table's current capacity.
     #[inline(always)]
-    unsafe fn row_ptr(&self, row: usize) -> NonNull<u8> {
-        unsafe { self.data.add(row * self.stride()) }
+    unsafe fn row_ptr(&self, row: u32) -> NonNull<u8> {
+        unsafe { self.data.add(row as usize * self.stride()) }
     }
 
     /// Typed shared read of the element at `row`.
@@ -54,7 +47,7 @@ impl Column {
     /// - `T` is the type stored in this column.
     /// - No `&mut` to this element exists for the returned lifetime.
     #[inline(always)]
-    pub(crate) unsafe fn get<T: 'static>(&self, row: usize) -> &T {
+    pub(crate) unsafe fn get<T: 'static>(&self, row: u32) -> &T {
         crate::validate::check_type::<T>(&self.meta);
         unsafe { self.row_ptr(row).cast().as_ref() }
     }
@@ -67,7 +60,7 @@ impl Column {
     /// - No other borrow of this element exists for the returned lifetime.
     #[inline(always)]
     #[allow(clippy::mut_from_ref, reason = "Borrow checking is performed by callers ")]
-    pub(crate) unsafe fn get_mut<T: 'static>(&self, row: usize) -> &mut T {
+    pub(crate) unsafe fn get_mut<T: 'static>(&self, row: u32) -> &mut T {
         crate::validate::check_type::<T>(&self.meta);
         unsafe { self.row_ptr(row).cast().as_mut() }
     }
@@ -79,7 +72,7 @@ impl Column {
     /// - `T` must be the type stored in this column.
     /// - The slot at `row` must be uninitialized or already moved out.
     #[inline(always)]
-    pub(crate) unsafe fn write<T: 'static>(&self, row: usize, val: T) {
+    pub(crate) unsafe fn write<T: 'static>(&self, row: u32, val: T) {
         crate::validate::check_type::<T>(&self.meta);
         unsafe { self.row_ptr(row).cast().write(val) };
     }
@@ -90,7 +83,7 @@ impl Column {
     /// - `row` must be within the table's row count.
     /// - `T` must be the type stored in this column.
     #[inline(always)]
-    pub(crate) unsafe fn replace<T: 'static>(&self, row: usize, val: T) -> T {
+    pub(crate) unsafe fn replace<T: 'static>(&self, row: u32, val: T) -> T {
         crate::validate::check_type::<T>(&self.meta);
         unsafe { self.row_ptr(row).cast().replace(val) }
     }
@@ -101,7 +94,7 @@ impl Column {
     /// # Safety
     /// Both rows must be within bounds.
     #[inline(always)]
-    pub(crate) unsafe fn copy_row(&self, src_row: usize, dst_row: usize) {
+    pub(crate) unsafe fn copy_row(&self, src_row: u32, dst_row: u32) {
         unsafe {
             let src = self.row_ptr(src_row);
             let dst = self.row_ptr(dst_row);
@@ -117,7 +110,7 @@ impl Column {
     /// - `self` and `dst` store the same type (equal `meta`).
     /// - `src_row` valid in `self`, `dst_row` valid in `dst`.
     #[inline(always)]
-    pub(crate) unsafe fn move_row_to(&self, src_row: usize, dst: &Column, dst_row: usize) {
+    pub(crate) unsafe fn move_row_to(&self, src_row: u32, dst: &Blob, dst_row: u32) {
         debug_assert_eq!(self.stride(), dst.stride());
         unsafe {
             let src = self.row_ptr(src_row);
@@ -132,7 +125,7 @@ impl Column {
     /// - `row` must be within the table's row count.
     /// - The value at `row` must be initialized and not already moved out.
     #[inline(always)]
-    pub(crate) unsafe fn drop_row(&self, row: usize) {
+    pub(crate) unsafe fn drop_row(&self, row: u32) {
         if let Some(dtor) = self.meta.dtor {
             unsafe { dtor(self.row_ptr(row)) };
         }
@@ -170,7 +163,7 @@ impl Column {
     /// # Safety
     /// - `len` must be the actual number of initialized elements.
     /// - `cap` must be the current allocation capacity.
-    pub(crate) unsafe fn destroy(&mut self, len: usize, cap: usize) {
+    pub(crate) unsafe fn destroy(&mut self, len: u32, cap: u32) {
         if cap == 0 {
             return;
         }
@@ -181,7 +174,7 @@ impl Column {
             }
 
             if !self.is_zst() {
-                let layout = self.meta.layout.repeat_packed(cap).unwrap();
+                let layout = self.meta.layout.repeat_packed(cap as usize).unwrap();
                 std::alloc::dealloc(self.data.as_ptr(), layout);
             }
         }

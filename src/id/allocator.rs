@@ -2,13 +2,13 @@ use crate::{id::Id, table_index::TableId};
 
 /// Error returned if accessing an [IdRecord](crate::id::manager::IdRecord) fails
 #[derive(thiserror::Error, Debug)]
-#[error("Id {0} is not alive")]
+#[error("{0} is not alive")]
 pub struct NotAlive(pub Id);
 
 #[derive(Debug, Clone, Copy)]
 pub struct IdRecord {
     pub(crate) table: TableId,
-    pub(crate) row: usize,
+    pub(crate) row: u32,
 }
 
 struct Entry {
@@ -17,19 +17,19 @@ struct Entry {
 }
 
 pub struct IdAllocator {
-    dense: Vec<Entry>,
     sparse: Vec<usize>,
+    dense: Vec<Entry>,
     alive: usize,
-    max_id: u32,
+    max: u32,
 }
 
 impl IdAllocator {
     pub(crate) fn new() -> Self {
-        Self { dense: vec![], sparse: vec![], alive: 0, max_id: 0 }
+        Self { sparse: vec![], dense: vec![], alive: 0, max: 0 }
     }
 
-    pub(crate) fn set_location(&mut self, id: Id, table: TableId, row: usize) {
-        if let Some(&dense) = self.sparse.get(id.index as usize)
+    pub(crate) fn set_location(&mut self, id: Id, table: TableId, row: u32) {
+        if let Some(&dense) = self.sparse.get(id.index() as usize)
             && dense < self.alive
         {
             let entry = &mut self.dense[dense];
@@ -37,6 +37,8 @@ impl IdAllocator {
                 entry.record.table = table;
                 entry.record.row = row
             }
+        } else {
+            debug_assert!(false, "set_location on stale id")
         }
     }
 
@@ -45,7 +47,7 @@ impl IdAllocator {
     /// [Id] must be alive to have a record.
     pub(crate) fn get(&self, id: Id) -> Result<IdRecord, NotAlive> {
         self.sparse
-            .get(id.index as usize)
+            .get(id.index() as usize)
             .and_then(|dense| (dense < &self.alive).then(|| &self.dense[*dense]))
             .and_then(|entry| (entry.id == id).then_some(entry.record))
             .ok_or(NotAlive(id))
@@ -54,19 +56,19 @@ impl IdAllocator {
     /// Checks if the [Id] is alive
     pub fn is_alive(&self, id: Id) -> bool {
         self.sparse
-            .get(id.index as usize)
+            .get(id.index() as usize)
             .is_some_and(|&d| d < self.alive && self.dense[d].id == id)
     }
 
     /// Check if [Id] was ever created (whether alive or dead).
     pub fn exists(&self, id: Id) -> bool {
         self.sparse
-            .get(id.index as usize)
+            .get(id.index() as usize)
             .is_some_and(|&d| d < self.dense.len())
     }
 
     pub(crate) fn remove_id(&mut self, id: Id) {
-        let sparse = id.index as usize;
+        let sparse = id.index() as usize;
 
         let Some(&dense) = self.sparse.get(sparse) else {
             return;
@@ -84,7 +86,7 @@ impl IdAllocator {
         // swap last alive entity with removed entity.
         if dense != self.alive {
             self.dense.swap(dense, self.alive);
-            self.sparse[self.dense[dense].id.index as usize] = dense;
+            self.sparse[self.dense[dense].id.index() as usize] = dense;
         }
 
         debug_assert!(!self.is_alive(id), "XECS INTERNAL ERROR: IdAllocator corrupted");
@@ -99,14 +101,21 @@ impl IdAllocator {
         }
 
         // Create new id.
-        let new_id = Id::new(self.max_id);
-        self.max_id = self.max_id.checked_add(1).expect("max id overflow");
+        assert!(
+            self.max < Id::MAX_INDEX,
+            "id index {} exceeds limit(={})",
+            self.max,
+            Id::MAX_INDEX
+        );
+
+        let new_id = Id::new(self.max);
+        self.max += 1;
 
         debug_assert!(!self.exists(new_id), "new id: `{new_id}` already in use");
 
         self.dense.push(Entry { id: new_id, record: f(new_id) });
 
-        let sparse = new_id.index as usize;
+        let sparse = new_id.index() as usize;
 
         if sparse >= self.sparse.len() {
             self.sparse.resize(sparse + 1, usize::MAX);

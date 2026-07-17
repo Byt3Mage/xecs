@@ -1,40 +1,36 @@
+use ahash::AHashMap;
+
 use crate::{
+    component::{ComponentId, Signature},
     ecs::Ecs,
-    id::{Id, Signature, map::IdMap},
     storage::{
-        Storage,
-        column::Column,
-        table::{Table, TableData},
+        blob::Blob,
+        table::{Column, Table, TableData},
     },
     table_index::TableId,
 };
 
 pub(crate) struct GraphNode {
-    add: IdMap<TableId>,
-    remove: IdMap<TableId>,
+    add: AHashMap<ComponentId, TableId>,
+    remove: AHashMap<ComponentId, TableId>,
 }
 
 impl GraphNode {
     pub(crate) fn new() -> Self {
-        Self { add: IdMap::new(), remove: IdMap::new() }
+        Self { add: AHashMap::new(), remove: AHashMap::new() }
     }
 }
 
 fn new_table(ecs: &mut Ecs, ids: Signature) -> TableId {
     ecs.tables.add_with_id(|table_id| {
-        let mut col_map = IdMap::new();
+        let mut col_map = AHashMap::new();
         let mut cols = Vec::new();
 
         for &id in ids.iter() {
-            let cm = &mut ecs.components[id];
-            match &mut cm.storage {
-                Storage::Tables(tables) => {
-                    col_map.insert(id, cols.len());
-                    cols.push(Column::new(id, cm.meta.clone()));
-                    tables.insert(table_id);
-                }
-                s => unreachable!("unexpected storage type {s:?} "),
-            }
+            let ci = &mut ecs.components[id];
+            col_map.insert(id, cols.len());
+            ci.insert_table(table_id);
+            cols.push(Column { id, data: Blob::new(ci.meta.clone()) });
         }
 
         Table {
@@ -49,10 +45,10 @@ fn new_table(ecs: &mut Ecs, ids: Signature) -> TableId {
 /// Traverse the table graph to find the destination table for an added component.
 ///
 /// Returns `None` if the component is already present in the table.
-pub fn find_add_table(ecs: &mut Ecs, from: TableId, with: Id) -> Option<TableId> {
+pub fn find_add_table(ecs: &mut Ecs, from: TableId, with: ComponentId) -> Option<TableId> {
     let from_table = &ecs.tables[from];
 
-    if let Some(&to) = from_table.graph_node.add.get(with) {
+    if let Some(&to) = from_table.graph_node.add.get(&with) {
         return Some(to);
     }
 
@@ -74,10 +70,10 @@ pub fn find_add_table(ecs: &mut Ecs, from: TableId, with: Id) -> Option<TableId>
 /// Traverse the table graph to find the destination table for a removed component.
 ///
 /// Returns `None` if the component is not present in the table.
-pub fn find_remove_table(ecs: &mut Ecs, from: TableId, without: Id) -> Option<TableId> {
+pub fn find_remove_table(ecs: &mut Ecs, from: TableId, without: ComponentId) -> Option<TableId> {
     let from_table = &ecs.tables[from];
 
-    if let Some(&to) = from_table.graph_node.remove.get(without) {
+    if let Some(&to) = from_table.graph_node.remove.get(&without) {
         return Some(to);
     }
 

@@ -1,19 +1,22 @@
-use crate::graph::GraphNode;
-use crate::id::map::IdMap;
-use crate::storage::table::TableData;
-use crate::{id::Signature, storage::table::Table};
-use std::collections::hash_map::Values;
 use std::{
-    collections::HashMap,
+    collections::hash_map::Values,
     fmt::Display,
     hash::Hash,
     ops::{Index, IndexMut},
 };
 
+use ahash::AHashMap;
+
+use crate::{
+    component::Signature,
+    graph::GraphNode,
+    storage::table::{Table, TableData},
+};
+
 /// Stable, non-recycled handle into [TableIndex].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
-pub(crate) struct TableId(u32);
+pub(crate) struct TableId(pub(crate) u32);
 
 impl Display for TableId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -29,12 +32,16 @@ impl Default for TableId {
 
 impl TableId {
     pub(crate) const NULL: Self = Self(u32::MAX);
+
+    pub fn get(self) -> usize {
+        self.0 as usize
+    }
 }
 
 pub(crate) struct TableIndex {
     root: TableId,
     tables: Vec<Table>,
-    table_ids: HashMap<Signature, TableId>,
+    table_ids: AHashMap<Signature, TableId>,
 }
 
 impl TableIndex {
@@ -44,11 +51,16 @@ impl TableIndex {
             tables: vec![Table {
                 sig: Signature::from(vec![]),
                 data: TableData::new(Box::new([])),
-                col_map: IdMap::new(),
+                col_map: AHashMap::new(),
                 graph_node: GraphNode::new(),
             }],
-            table_ids: HashMap::new(),
+            table_ids: AHashMap::new(),
         }
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.tables.len()
     }
 
     pub fn root_id(&self) -> TableId {
@@ -87,7 +99,7 @@ impl TableIndex {
     }
 
     /// ## Panics
-    /// Panics if table ids `a` and `b` are equal or if either table id is invalid.
+    /// Panics if table ids `a` and `b` are equal or if either id is invalid.
     #[inline]
     pub(crate) fn get_2_mut(&mut self, a: TableId, b: TableId) -> [&mut Table; 2] {
         let len = self.tables.len();
@@ -109,6 +121,10 @@ impl TableIndex {
         // SAFETY: a and b are valid indices and not equal.
         let ptr = self.tables.as_mut_ptr();
         unsafe { [&mut *(ptr.add(a)), &mut *(ptr.add(b))] }
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &Table> {
+        self.tables.iter()
     }
 
     pub(crate) fn all_table_ids(&self) -> Values<'_, Signature, TableId> {

@@ -1,27 +1,39 @@
-use std::{cmp::Ordering, ptr::NonNull};
+use std::cmp::Ordering;
+
+use ahash::AHashMap;
 
 use crate::{
+    component::{ComponentId, Signature},
     ecs::Ecs,
     graph::GraphNode,
-    id::{Id, Signature, map::IdMap},
-    storage::column::Column,
+    id::Id,
+    storage::blob::Blob,
     table_index::TableId,
 };
+
+pub(crate) struct Column {
+    pub(crate) id: ComponentId,
+    pub(crate) data: Blob,
+}
 
 pub(crate) struct TableData {
     ids: Vec<Id>,
     columns: Box<[Column]>,
-    capacity: usize,
 }
 
 impl TableData {
     pub(crate) fn new(columns: Box<[Column]>) -> Self {
-        Self { ids: Vec::new(), columns, capacity: 0 }
+        Self { ids: Vec::new(), columns }
     }
 
     #[inline(always)]
-    pub(crate) fn num_rows(&self) -> usize {
-        self.ids.len()
+    pub(crate) fn num_rows(&self) -> u32 {
+        self.ids.len() as u32
+    }
+
+    #[inline(always)]
+    pub(crate) fn capacity(&self) -> u32 {
+        self.ids.capacity() as u32
     }
 
     #[inline(always)]
@@ -42,20 +54,18 @@ impl TableData {
     #[inline(always)]
 
     /// Ensure all columns have capacity for at least `additional` more rows.
-    pub(crate) fn reserve(&mut self, additional: usize) {
+    pub(crate) fn reserve(&mut self, additional: u32) {
+        let capacity = self.capacity();
         let required = self.num_rows().checked_add(additional).unwrap();
-        if required <= self.capacity {
-            return;
-        }
 
-        let old_cap = self.capacity;
-        self.capacity = required;
+        if required > capacity {
+            self.ids.reserve(additional as usize);
 
-        for col in self.columns.iter_mut() {
-            // SAFETY: required > old_cap (just checked); old_cap is current cap.
-            unsafe { col.realloc(old_cap, required) };
+            for col in self.columns.iter_mut() {
+                // SAFETY: required > old_cap (just checked); old_cap is current cap.
+                unsafe { col.data.realloc(capacity as usize, required as usize) };
+            }
         }
-        self.ids.reserve(additional);
     }
 
     /// Append a row slot for `id`. Columns are uninitialized at the new row.
@@ -64,11 +74,11 @@ impl TableData {
     ///
     /// # Safety
     /// Caller must initialize every column at the returned row before any read.
-    pub(crate) unsafe fn alloc_row(&mut self, id: Id) -> usize {
+    pub(crate) unsafe fn alloc_row(&mut self, id: Id) -> u32 {
         self.reserve(1);
         let row = self.num_rows();
         self.ids.push(id);
-        row
+        row as u32
     }
 
     /// Swap-remove the row at `row`: drops every column's value at `row`, then
@@ -80,12 +90,12 @@ impl TableData {
     /// `row` must be a valid row index. Unlike the previous design, this DROPS
     /// the row's data itself. Callers that have already moved a column's bytes
     /// out (e.g. table moves) must use [`swap_remove_row_no_drop`] instead.
-    pub(crate) unsafe fn swap_remove_row(&mut self, row: usize) -> Option<Id> {
+    pub(crate) unsafe fn swap_remove_row(&mut self, row: u32) -> Option<Id> {
         debug_assert!(row < self.num_rows());
         // Drop the outgoing row's data in every column.
         for col in self.columns.iter() {
             // SAFETY: row is valid and initialized.
-            unsafe { col.drop_row(row) };
+            unsafe { col.data.drop_row(row) };
         }
         unsafe { self.swap_remove_row_no_drop(row) }
     }
@@ -96,17 +106,17 @@ impl TableData {
     /// # Safety
     /// - `row` valid.
     /// - Every column's slot at `row` is already dropped or moved out.
-    pub(crate) unsafe fn swap_remove_row_no_drop(&mut self, row: usize) -> Option<Id> {
+    pub(crate) unsafe fn swap_remove_row_no_drop(&mut self, row: u32) -> Option<Id> {
         debug_assert!(row < self.num_rows());
         let last = self.num_rows() - 1;
 
         if row != last {
             for col in self.columns.iter() {
                 // SAFETY: last and row both valid; copies last's bytes into hole.
-                unsafe { col.copy_row(last, row) };
+                unsafe { col.data.copy_row(last, row) };
             }
-            let swapped = self.ids[last];
-            self.ids[row] = swapped;
+            let swapped = self.ids[last as usize];
+            self.ids[row as usize] = swapped;
             self.ids.pop();
             Some(swapped)
         } else {
@@ -119,9 +129,9 @@ impl TableData {
 impl Drop for TableData {
     fn drop(&mut self) {
         let len = self.num_rows();
-        let cap = self.capacity;
+        let cap = self.capacity();
         for col in self.columns.iter_mut() {
-            unsafe { col.destroy(len, cap) }
+            unsafe { col.data.destroy(len, cap) }
         }
     }
 }
@@ -129,14 +139,14 @@ impl Drop for TableData {
 pub struct Table {
     pub(crate) sig: Signature,
     pub(crate) data: TableData,
-    pub(crate) col_map: IdMap<usize>,
+    pub(crate) col_map: AHashMap<ComponentId, usize>,
     pub(crate) graph_node: GraphNode,
 }
 
 impl Table {
     #[inline]
-    pub fn num_rows(&self) -> usize {
-        self.data.ids.len()
+    pub fn num_rows(&self) -> u32 {
+        self.data.num_rows()
     }
 
     #[inline]
@@ -155,20 +165,16 @@ impl Table {
         &self.data.columns()[col]
     }
 
-    #[inline(always)]
-    pub(crate) fn column_ptr<T: 'static>(&self, col: usize) -> NonNull<T> {
-        self.data.columns()[col].ptr()
-    }
-
     /// Typed shared read of component `id` at `row`.
     ///
     /// # Safety
     /// - `row` valid in this table.
     /// - No `&mut` to the same element exists for the returned lifetime.
-    pub(crate) unsafe fn get<T: 'static>(&self, id: Id, row: usize) -> Option<&T> {
-        let col = self.col_map.get(id)?;
+    pub(crate) unsafe fn get<T: 'static>(&self, id: ComponentId, row: u32) -> Option<&T> {
         // SAFETY: forwarded preconditions.
-        Some(unsafe { self.data.columns()[*col].get(row) })
+        self.col_map
+            .get(&id)
+            .map(|&c| unsafe { self.data.columns()[c].data.get(row) })
     }
 
     /// Typed exclusive read of component `id` at `row`.
@@ -176,10 +182,11 @@ impl Table {
     /// # Safety
     /// - `row` valid in this table.
     /// - No other borrow of the same element exists for the returned lifetime.
-    pub(crate) unsafe fn get_mut<T: 'static>(&self, id: Id, row: usize) -> Option<&mut T> {
-        let col = self.col_map.get(id)?;
+    pub(crate) unsafe fn get_mut<T: 'static>(&self, id: ComponentId, row: u32) -> Option<&mut T> {
         // SAFETY: forwarded preconditions.
-        Some(unsafe { self.data.columns()[*col].get_mut(row) })
+        self.col_map
+            .get(&id)
+            .map(|&c| unsafe { self.data.columns()[c].data.get_mut(row) })
     }
 }
 
@@ -192,7 +199,7 @@ impl Table {
 /// # Safety
 /// - `src_row` must be valid in src table.
 /// - caller must initialize all uninitialized columns.
-pub(crate) unsafe fn move_id(ecs: &mut Ecs, id: Id, src_table: TableId, src_row: usize, dst_table: TableId) -> usize {
+pub(crate) unsafe fn move_id(ecs: &mut Ecs, id: Id, src_table: TableId, src_row: u32, dst_table: TableId) -> u32 {
     let [src, dst] = ecs.tables.get_2_mut(src_table, dst_table);
 
     // SAFETY: caller initializes dst-only columns below / after.
@@ -206,17 +213,17 @@ pub(crate) unsafe fn move_id(ecs: &mut Ecs, id: Id, src_table: TableId, src_row:
         let src_col = src.column(si);
         let dst_col = dst.column(di);
 
-        match src_col.id().cmp(&dst_col.id()) {
+        match src_col.id.cmp(&dst_col.id) {
             Ordering::Equal => {
                 // SAFETY: same component id ⇒ same type; rows valid.
-                unsafe { src_col.move_row_to(src_row, dst_col, dst_row) };
+                unsafe { src_col.data.move_row_to(src_row, &dst_col.data, dst_row) };
                 si += 1;
                 di += 1;
             }
             Ordering::Less => {
                 // Component removed: drop the src value.
                 // SAFETY: src_row valid and initialized.
-                unsafe { src_col.drop_row(src_row) };
+                unsafe { src_col.data.drop_row(src_row) };
                 si += 1;
             }
             Ordering::Greater => {
@@ -229,7 +236,7 @@ pub(crate) unsafe fn move_id(ecs: &mut Ecs, id: Id, src_table: TableId, src_row:
     // Remaining src columns are removed components: drop each.
     for i in si..src.num_cols() {
         // SAFETY: src_row valid and initialized.
-        unsafe { src.column(i).drop_row(src_row) };
+        unsafe { src.column(i).data.drop_row(src_row) };
     }
 
     // Src data at src_row is fully moved-out / dropped, so use the no-drop variant.
@@ -243,7 +250,7 @@ pub(crate) unsafe fn move_id(ecs: &mut Ecs, id: Id, src_table: TableId, src_row:
     dst_row
 }
 
-pub(crate) unsafe fn remove_id(ecs: &mut Ecs, table: TableId, row: usize) {
+pub(crate) unsafe fn remove_id(ecs: &mut Ecs, table: TableId, row: u32) {
     if let Some(swapped) = unsafe { ecs.tables[table].data.swap_remove_row(row) } {
         ecs.ids.set_location(swapped, table, row);
     }
