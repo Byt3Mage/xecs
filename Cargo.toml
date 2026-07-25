@@ -5,16 +5,8 @@ version = "0.1.0"
 edition = "2024"
 description = "eXtended ecs"
 
-[features]
-default = ["validate"]
-# Disable to compile out all runtime validation. Unsafe preconditions must
-# then be upheld by construction (query model) — for measuring raw speed or
-# trusted release builds.
-validate = []
-
 [dependencies]
 xecs_macros = { path = "xecs_macros" }
 const-assert = { git = "https://github.com/aquarius2019/const-assert.git" }
 thiserror = "2.0.18"
 ahash = "0.8.12"
-smallvec = "1.15.2"

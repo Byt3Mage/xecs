@@ -15,7 +15,7 @@ pub struct TypeMeta {
     pub dangling: NonNull<u8>,
     pub layout: Layout,
     pub type_id: TypeId,
-    pub name: Option<fn() -> &'static str>,
+    pub name: fn() -> &'static str,
 }
 
 impl TypeMeta {
@@ -26,7 +26,7 @@ impl TypeMeta {
             dangling: NonNull::<T>::dangling().cast(),
             layout: Layout::new::<T>(),
             type_id: TypeId::of::<T>(),
-            name: Some(std::any::type_name::<T>),
+            name: std::any::type_name::<T>,
         }
     }
 
@@ -36,13 +36,13 @@ impl TypeMeta {
     }
 
     #[inline(always)]
-    pub fn is_zst(&self) -> bool {
+    pub const fn is_zst(&self) -> bool {
         self.layout.size() == 0
     }
 
     #[inline(always)]
-    pub fn name(&self) -> &'static str {
-        self.name.map_or("<anonymous>", |n| n())
+    pub fn type_name(&self) -> &'static str {
+        (self.name)()
     }
 
     #[inline(always)]
@@ -50,7 +50,7 @@ impl TypeMeta {
         assert!(
             self.is::<T>(),
             "type mismatch: expected {}, got {}",
-            self.name(),
+            self.type_name(),
             std::any::type_name::<T>(),
         )
     }

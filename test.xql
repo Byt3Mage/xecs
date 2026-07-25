@@ -1,8 +1,7 @@
-SELECT Power FILTER Enemy, <MinionOf(*) AS enemy
-FOLLOW Wields(#006) [ SELECT Weapon FILTER PoweredUp AS weapon ]
+SELECT Power AS enemy FILTER Enemy, <MinionOf(*)
+FOLLOW Wields(#006) [ SELECT Weapon AS weapon FILTER PoweredUp ]
 FOLLOW Targets [
-    SELECT mut Health, LocalTransform
+    SELECT mut Health, LocalTransform AS player
     FILTER Player, LooksAt(enemy), !Resists(weapon)
-    AS player
     FOLLOW IsAttacking(enemy) [ WITH Shield ]
 ]

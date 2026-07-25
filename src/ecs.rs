@@ -1,3 +1,5 @@
+use std::sync::atomic::AtomicU32;
+
 use crate::{
     component::{self, ComponentConfig, ComponentId, StaticId, TypedStaticId, registry::ComponentRegistry},
     error::{EcsResult, Error},
@@ -5,18 +7,24 @@ use crate::{
         Id,
         allocator::{IdAllocator, IdRecord, NotAlive},
     },
-    relation::RelationRegistry,
+    relation::{RelationId, RelationRegistry},
     storage::table::{self},
     table_index::TableIndex,
 };
+
+fn ecs_id_allocate() -> u32 {
+    static MAX_ID: AtomicU32 = AtomicU32::new(0);
+    MAX_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
 
 pub struct Ecs {
     pub(crate) ids: IdAllocator,
     pub(crate) components: ComponentRegistry,
     pub(crate) relations: RelationRegistry,
     pub(crate) tables: TableIndex,
-    pub(crate) generation: u64,
     pub(crate) static_ids: Vec<Option<ComponentId>>,
+    pub(crate) generation: u32,
+    unique_id: u32,
 }
 
 impl Ecs {
@@ -28,7 +36,18 @@ impl Ecs {
             tables: TableIndex::new(),
             generation: 0,
             static_ids: Vec::new(),
+            unique_id: ecs_id_allocate(),
         }
+    }
+
+    #[inline(always)]
+    pub fn generation(&self) -> u32 {
+        self.generation
+    }
+
+    #[inline(always)]
+    pub fn unique_id(&self) -> u32 {
+        self.unique_id
     }
 
     /// Gets the [ComponentId] for the static id.
@@ -166,6 +185,16 @@ impl Ecs {
     #[inline]
     pub fn get_mut_t<T: TypedStaticId>(&mut self, id: Id) -> EcsResult<&mut T> {
         self.get_mut(id, T::id())
+    }
+
+    #[inline]
+    pub fn relate(&mut self, id: Id, relation: RelationId, target: Id) {
+        self.relations.index_mut(relation).relate(id, target);
+    }
+
+    #[inline]
+    pub fn unrelate(&mut self, id: Id, relation: RelationId, target: Id) {
+        self.relations.index_mut(relation).unrelate(id, target);
     }
 
     #[inline(always)]

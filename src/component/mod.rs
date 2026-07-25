@@ -120,13 +120,18 @@ pub(crate) unsafe fn insert<T: 'static>(ecs: &mut Ecs, id: Id, comp: ComponentId
     unsafe {
         let table = &ecs.tables[r.table];
         Ok(match table.col_map.get(&comp) {
-            Some(&col) => Some(table.column(col).data.replace(r.row, val)),
+            Some(&idx) => {
+                let col = table.column(idx);
+                let row = col.data.row_ptr(r.row);
+                Some(row.cast().replace(val))
+            }
             None => {
-                let new_table = find_add_table(ecs, r.table, comp).unwrap();
-                let dst_row = move_id(ecs, id, r.table, r.row, new_table);
-                let nt = &ecs.tables[new_table];
-                let dst_col = nt.col_map[&comp];
-                nt.column(dst_col).data.write(dst_row, val);
+                let dst_table_id = find_add_table(ecs, r.table, comp).unwrap();
+                let dst_row = move_id(ecs, id, r.table, r.row, dst_table_id);
+                let dst_table = &ecs.tables[dst_table_id];
+                let dst_col = dst_table.col_map[&comp];
+                let dst_row = dst_table.column(dst_col).data.row_ptr(dst_row);
+                dst_row.cast().write(val);
                 None
             }
         })
@@ -147,11 +152,15 @@ pub(crate) fn has(ecs: &Ecs, r: IdRecord, comp: ComponentId) -> bool {
 }
 
 pub(crate) unsafe fn get<T: 'static>(ecs: &Ecs, r: IdRecord, comp: ComponentId) -> Option<&T> {
-    unsafe { ecs.tables[r.table].get(comp, r.row) }
+    let table = &ecs.tables[r.table];
+    let col = table.col_map.get(&comp).map(|&i| table.column(i))?;
+    Some(unsafe { col.data.row_ptr(r.row).cast().as_ref() })
 }
 
-pub(crate) unsafe fn get_mut<T: 'static>(ecs: &Ecs, r: IdRecord, comp: ComponentId) -> Option<&mut T> {
-    unsafe { ecs.tables[r.table].get_mut(comp, r.row) }
+pub(crate) unsafe fn get_mut<T: 'static>(ecs: &mut Ecs, r: IdRecord, comp: ComponentId) -> Option<&mut T> {
+    let table = &ecs.tables[r.table];
+    let col = table.col_map.get(&comp).map(|&i| table.column(i))?;
+    Some(unsafe { col.data.row_ptr(r.row).cast().as_mut() })
 }
 
 /// Sorted list of component ids in a [Table](crate::storage::table::Table)

@@ -1,27 +1,28 @@
 use std::{
     alloc::{Layout, LayoutError},
+    rc::Rc,
     usize,
 };
 
 pub struct DynamicStructLayout {
     layout: Layout,
-    field_offsets: Box<[usize]>,
+    field_offsets: Rc<[usize]>,
 }
 
 impl DynamicStructLayout {
     pub fn new(fields: &[Layout]) -> Result<DynamicStructLayout, LayoutError> {
         let mut layout = Layout::from_size_align(0, 1)?;
-        let mut offsets = Vec::with_capacity(fields.len());
+        let mut offsets = vec![usize::MAX; fields.len()];
 
-        for &field in fields {
+        for (i, &field) in fields.iter().enumerate() {
             let (new_layout, offset) = layout.extend(field)?;
             layout = new_layout;
-            offsets.push(offset);
+            offsets[i] = offset;
         }
 
         Ok(Self {
             layout: layout.pad_to_align(),
-            field_offsets: offsets.into_boxed_slice(),
+            field_offsets: offsets.into(),
         })
     }
 

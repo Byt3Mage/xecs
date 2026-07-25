@@ -58,12 +58,12 @@ impl Id {
 
 impl core::fmt::Debug for Id {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "ID #{}v{}", self.index(), self.generation())
+        write!(f, "ID#{}v{}", self.index(), self.generation())
     }
 }
 
 impl core::fmt::Display for Id {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "ID #{}v{}", self.index(), self.generation())
+        write!(f, "ID#{}v{}", self.index(), self.generation())
     }
 }

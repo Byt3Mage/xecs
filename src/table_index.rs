@@ -1,5 +1,4 @@
 use std::{
-    collections::hash_map::Values,
     fmt::Display,
     hash::Hash,
     ops::{Index, IndexMut},
@@ -20,21 +19,13 @@ pub(crate) struct TableId(pub(crate) u32);
 
 impl Display for TableId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "TableId({})", self.0)
+        write!(f, "Table#{}", self.0)
     }
 }
 
 impl Default for TableId {
     fn default() -> Self {
-        Self::NULL
-    }
-}
-
-impl TableId {
-    pub(crate) const NULL: Self = Self(u32::MAX);
-
-    pub fn get(self) -> usize {
-        self.0 as usize
+        Self(u32::MAX)
     }
 }
 
@@ -58,17 +49,8 @@ impl TableIndex {
         }
     }
 
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.tables.len()
-    }
-
     pub fn root_id(&self) -> TableId {
         self.root
-    }
-
-    pub fn root(&self) -> &Table {
-        &self.tables[self.root.0 as usize]
     }
 
     pub fn root_mut(&mut self) -> &mut Table {
@@ -89,11 +71,6 @@ impl TableIndex {
     }
 
     #[inline]
-    pub(crate) fn add(&mut self, table: Table) -> TableId {
-        self.add_with_id(|_| table)
-    }
-
-    #[inline]
     pub(crate) fn get_id(&self, ids: &Signature) -> Option<TableId> {
         self.table_ids.get(ids).copied()
     }
@@ -106,17 +83,22 @@ impl TableIndex {
         let a = a.0 as usize;
         let b = b.0 as usize;
 
-        if a == b {
-            panic!("table ids are equal (id = {a})");
+        #[cold]
+        fn validate(a: usize, b: usize, len: usize) {
+            if a == b {
+                panic!("table ids are equal (id = {a})");
+            }
+
+            if a >= len {
+                panic!("table id {a} is out of bounds (len = {len})")
+            }
+
+            if b >= len {
+                panic!("table id {b} is out of bounds (len = {len})")
+            }
         }
 
-        if a >= len {
-            panic!("table id {a} is out of bounds (len = {len})")
-        }
-
-        if b >= len {
-            panic!("table id {b} is out of bounds (len = {len})")
-        }
+        validate(a, b, len);
 
         // SAFETY: a and b are valid indices and not equal.
         let ptr = self.tables.as_mut_ptr();
@@ -125,10 +107,6 @@ impl TableIndex {
 
     pub(crate) fn iter(&self) -> impl Iterator<Item = &Table> {
         self.tables.iter()
-    }
-
-    pub(crate) fn all_table_ids(&self) -> Values<'_, Signature, TableId> {
-        self.table_ids.values()
     }
 }
 

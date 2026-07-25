@@ -2,7 +2,10 @@ use std::{collections::hash_map::Entry, rc::Rc};
 
 use ahash::AHashMap;
 
-use crate::{TypeMeta, relation::index::RelationIndex};
+use crate::{
+    TypeMeta,
+    relation::index::{RelationIndex, RelationProperties, SymmetryError},
+};
 
 pub mod index;
 
@@ -16,20 +19,10 @@ impl std::fmt::Display for RelationId {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct RelationProps {
-    pub unique_source: bool,
-    pub unique_target: bool,
-    pub acyclic: bool,
-    pub symmetric: bool,
-    pub indexed_reverse: bool,
-}
-
 pub struct RelationInfo {
-    pub name: Option<Rc<str>>,
-    pub props: RelationProps,
-    pub index: RelationIndex,
-    pub edge_meta: Option<Rc<TypeMeta>>,
+    name: Option<Rc<str>>,
+    index: RelationIndex,
+    edge_meta: Option<Rc<TypeMeta>>,
 }
 
 pub struct RelationRegistry {
@@ -45,22 +38,26 @@ impl RelationRegistry {
     pub fn register(
         &mut self,
         name: Option<Rc<str>>,
-        props: RelationProps,
+        props: RelationProperties,
         edge_meta: Option<Rc<TypeMeta>>,
-    ) -> RelationId {
+    ) -> Result<RelationId, SymmetryError> {
         let id = RelationId(self.infos.len() as u32);
 
-        if let Some(name) = name.clone() {
+        let info = RelationInfo {
+            name: name.clone(),
+            index: RelationIndex::select(props)?,
+            edge_meta,
+        };
+
+        if let Some(name) = name {
             match self.names.entry(name) {
                 Entry::Vacant(e) => e.insert(id),
                 Entry::Occupied(e) => panic!("duplicate relation name `{}`", e.key()),
             };
         }
 
-        let index = RelationIndex::select(&props, edge_meta.clone());
-        self.infos.push(RelationInfo { name, props, index, edge_meta });
-
-        id
+        self.infos.push(info);
+        Ok(id)
     }
 
     pub fn get(&self, id: RelationId) -> &RelationInfo {
@@ -74,5 +71,10 @@ impl RelationRegistry {
     #[inline(always)]
     pub fn index(&self, id: RelationId) -> &RelationIndex {
         &self.infos[id.0 as usize].index
+    }
+
+    #[inline(always)]
+    pub fn index_mut(&mut self, id: RelationId) -> &mut RelationIndex {
+        &mut self.infos[id.0 as usize].index
     }
 }

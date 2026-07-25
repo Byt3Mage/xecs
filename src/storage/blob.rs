@@ -36,56 +36,8 @@ impl Blob {
     /// # Safety
     /// `row` must be within the table's current capacity.
     #[inline(always)]
-    unsafe fn row_ptr(&self, row: u32) -> NonNull<u8> {
+    pub(crate) unsafe fn row_ptr(&self, row: u32) -> NonNull<u8> {
         unsafe { self.data.add(row as usize * self.stride()) }
-    }
-
-    /// Typed shared read of the element at `row`.
-    ///
-    /// # Safety
-    /// - `row` is within the table's row count.
-    /// - `T` is the type stored in this column.
-    /// - No `&mut` to this element exists for the returned lifetime.
-    #[inline(always)]
-    pub(crate) unsafe fn get<T: 'static>(&self, row: u32) -> &T {
-        crate::validate::check_type::<T>(&self.meta);
-        unsafe { self.row_ptr(row).cast().as_ref() }
-    }
-
-    /// Typed exclusive read of the element at `row`.
-    ///
-    /// # Safety
-    /// - `row` is within the table's row count.
-    /// - `T` is the type stored in this column.
-    /// - No other borrow of this element exists for the returned lifetime.
-    #[inline(always)]
-    #[allow(clippy::mut_from_ref, reason = "Borrow checking is performed by callers ")]
-    pub(crate) unsafe fn get_mut<T: 'static>(&self, row: u32) -> &mut T {
-        crate::validate::check_type::<T>(&self.meta);
-        unsafe { self.row_ptr(row).cast().as_mut() }
-    }
-
-    /// Write a value at `row` without reading or dropping the old value.
-    ///
-    /// # Safety
-    /// - `row` must be within the table's row capacity.
-    /// - `T` must be the type stored in this column.
-    /// - The slot at `row` must be uninitialized or already moved out.
-    #[inline(always)]
-    pub(crate) unsafe fn write<T: 'static>(&self, row: u32, val: T) {
-        crate::validate::check_type::<T>(&self.meta);
-        unsafe { self.row_ptr(row).cast().write(val) };
-    }
-
-    /// Replace the value at `row`, returning the old value.
-    ///
-    /// # Safety
-    /// - `row` must be within the table's row count.
-    /// - `T` must be the type stored in this column.
-    #[inline(always)]
-    pub(crate) unsafe fn replace<T: 'static>(&self, row: u32, val: T) -> T {
-        crate::validate::check_type::<T>(&self.meta);
-        unsafe { self.row_ptr(row).cast().replace(val) }
     }
 
     /// Copy element bytes from `src_row` to `dst_row` within this column.
@@ -164,10 +116,6 @@ impl Blob {
     /// - `len` must be the actual number of initialized elements.
     /// - `cap` must be the current allocation capacity.
     pub(crate) unsafe fn destroy(&mut self, len: u32, cap: u32) {
-        if cap == 0 {
-            return;
-        }
-
         unsafe {
             if let Some(dtor) = self.meta.dtor {
                 (0..len).for_each(|i| dtor(self.row_ptr(i)));

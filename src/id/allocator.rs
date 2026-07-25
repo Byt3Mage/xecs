@@ -1,6 +1,6 @@
 use crate::{id::Id, table_index::TableId};
 
-/// Error returned if accessing an [IdRecord](crate::id::manager::IdRecord) fails
+/// Error returned if accessing an [IdRecord] fails
 #[derive(thiserror::Error, Debug)]
 #[error("{0} is not alive")]
 pub struct NotAlive(pub Id);
@@ -34,8 +34,7 @@ impl IdAllocator {
         {
             let entry = &mut self.dense[dense];
             if entry.id == id {
-                entry.record.table = table;
-                entry.record.row = row
+                entry.record = IdRecord { table, row };
             }
         } else {
             debug_assert!(false, "set_location on stale id")

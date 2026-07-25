@@ -19,3 +19,66 @@ pub enum LowerError {
     #[error("conflicting access to `{0}` between scopes {1} and {2}")]
     WriteConflict(ComponentId, ScopeId, ScopeId),
 }
+
+#[derive(thiserror::Error, Debug)]
+pub enum ValidateError {
+    #[error("scope {scope}, access {index} ({name}): &mut on a Read access")]
+    WriteOnRead {
+        scope: ScopeId,
+        index: usize,
+        name: &'static str,
+    },
+
+    #[error("scope {scope}, access {index} ({name}): &T on a Write access")]
+    ReadOnWrite {
+        scope: ScopeId,
+        index: usize,
+        name: &'static str,
+    },
+
+    #[error("scope {scope}, access {index} ({name}): query declares optional access")]
+    RequiredOnOptional {
+        scope: ScopeId,
+        index: usize,
+        name: &'static str,
+    },
+
+    #[error("scope {scope}, access {index} ({name}): query declares required access")]
+    OptionalOnRequired {
+        scope: ScopeId,
+        index: usize,
+        name: &'static str,
+    },
+
+    #[error("scope {scope}, access {index}: column type is {received}, query declares {expected}")]
+    TypeMismatch {
+        scope: ScopeId,
+        index: usize,
+        received: &'static str,
+        expected: &'static str,
+    },
+
+    #[error("scope {scope}: claims {received} columns, query declares {expected}")]
+    ColumnArity {
+        scope: ScopeId,
+        received: usize,
+        expected: usize,
+    },
+
+    #[error("scope {scope}: claims {received} joins, query declares {expected}")]
+    JoinArity {
+        scope: ScopeId,
+        received: usize,
+        expected: usize,
+    },
+
+    #[error("Join<{index}> out of range: query has {count} joins")]
+    JoinIndex { index: usize, count: usize },
+
+    #[error("Join<{index}> is not a join from scope {scope} (its from-scope is {actual})")]
+    JoinFrom {
+        index: usize,
+        scope: ScopeId,
+        actual: ScopeId,
+    },
+}

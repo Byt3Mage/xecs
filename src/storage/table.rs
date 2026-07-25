@@ -1,4 +1,8 @@
-use std::cmp::Ordering;
+use std::{
+    alloc::{self, Layout, LayoutError},
+    cmp::Ordering,
+    ptr::NonNull,
+};
 
 use ahash::AHashMap;
 
@@ -11,29 +15,36 @@ use crate::{
     table_index::TableId,
 };
 
+/// [Id] must not require drop, i.e., must be a plain identifier
+const _: () = const { assert!(!std::mem::needs_drop::<Id>()) };
+
+#[inline(always)]
+const fn ids_layout(cap: u32) -> Result<Layout, LayoutError> {
+    const SIZE: usize = std::mem::size_of::<Id>();
+    const ALIGN: usize = std::mem::align_of::<Id>();
+    Layout::from_size_align(cap as usize * SIZE, ALIGN)
+}
+
 pub(crate) struct Column {
     pub(crate) id: ComponentId,
     pub(crate) data: Blob,
 }
 
 pub(crate) struct TableData {
-    ids: Vec<Id>,
     columns: Box<[Column]>,
+    ids: NonNull<Id>,
+    len: u32,
+    cap: u32,
 }
 
 impl TableData {
     pub(crate) fn new(columns: Box<[Column]>) -> Self {
-        Self { ids: Vec::new(), columns }
+        Self { ids: NonNull::dangling(), columns, len: 0, cap: 0 }
     }
 
     #[inline(always)]
     pub(crate) fn num_rows(&self) -> u32 {
-        self.ids.len() as u32
-    }
-
-    #[inline(always)]
-    pub(crate) fn capacity(&self) -> u32 {
-        self.ids.capacity() as u32
+        self.len
     }
 
     #[inline(always)]
@@ -41,29 +52,29 @@ impl TableData {
         self.columns.len()
     }
 
-    #[inline(always)]
-    pub(crate) fn ids(&self) -> &[Id] {
-        &self.ids
-    }
-
-    #[inline(always)]
-    pub(crate) fn columns(&self) -> &[Column] {
-        &self.columns
-    }
-
-    #[inline(always)]
-
     /// Ensure all columns have capacity for at least `additional` more rows.
+    #[inline(always)]
     pub(crate) fn reserve(&mut self, additional: u32) {
-        let capacity = self.capacity();
-        let required = self.num_rows().checked_add(additional).unwrap();
+        let cap = self.cap;
+        let req = self.len.checked_add(additional).unwrap();
 
-        if required > capacity {
-            self.ids.reserve(additional as usize);
+        if req > self.cap {
+            unsafe {
+                let new = ids_layout(req).unwrap();
+                let ptr = match self.cap == 0 {
+                    true => std::alloc::alloc(new),
+                    false => alloc::realloc(self.ids.as_ptr().cast(), ids_layout(cap).unwrap(), new.size()),
+                };
 
-            for col in self.columns.iter_mut() {
-                // SAFETY: required > old_cap (just checked); old_cap is current cap.
-                unsafe { col.data.realloc(capacity as usize, required as usize) };
+                self.ids = match NonNull::new(ptr) {
+                    Some(ptr) => ptr.cast(),
+                    None => alloc::handle_alloc_error(new),
+                };
+
+                for col in self.columns.iter_mut() {
+                    // SAFETY: required > old_cap (just checked); old_cap is current cap.
+                    col.data.realloc(cap as usize, req as usize)
+                }
             }
         }
     }
@@ -77,8 +88,8 @@ impl TableData {
     pub(crate) unsafe fn alloc_row(&mut self, id: Id) -> u32 {
         self.reserve(1);
         let row = self.num_rows();
-        self.ids.push(id);
-        row as u32
+        unsafe { self.ids.add(row as usize).write(id) };
+        row
     }
 
     /// Swap-remove the row at `row`: drops every column's value at `row`, then
@@ -111,16 +122,18 @@ impl TableData {
         let last = self.num_rows() - 1;
 
         if row != last {
-            for col in self.columns.iter() {
-                // SAFETY: last and row both valid; copies last's bytes into hole.
-                unsafe { col.data.copy_row(last, row) };
+            unsafe {
+                let src = self.ids.add(last as usize);
+                let dst = self.ids.add(row as usize);
+                let swapped = src.read();
+
+                src.copy_to_nonoverlapping(dst, 1);
+                self.columns.iter().for_each(|col| col.data.copy_row(last, row));
+                self.len -= 1;
+                Some(swapped)
             }
-            let swapped = self.ids[last as usize];
-            self.ids[row as usize] = swapped;
-            self.ids.pop();
-            Some(swapped)
         } else {
-            self.ids.pop();
+            self.len -= 1;
             None
         }
     }
@@ -128,10 +141,17 @@ impl TableData {
 
 impl Drop for TableData {
     fn drop(&mut self) {
-        let len = self.num_rows();
-        let cap = self.capacity();
-        for col in self.columns.iter_mut() {
-            unsafe { col.data.destroy(len, cap) }
+        if self.cap == 0 {
+            return;
+        }
+
+        unsafe {
+            let layout = ids_layout(self.cap).unwrap();
+            alloc::dealloc(self.ids.as_ptr().cast(), layout);
+
+            for col in self.columns.iter_mut() {
+                col.data.destroy(self.len, self.cap)
+            }
         }
     }
 }
@@ -155,38 +175,14 @@ impl Table {
     }
 
     #[inline(always)]
-    pub(crate) fn ids(&self) -> &[Id] {
-        self.data.ids()
+    pub(crate) fn ids(&self) -> NonNull<Id> {
+        self.data.ids
     }
 
     /// Borrow a column by index.
     #[inline(always)]
     pub(crate) fn column(&self, col: usize) -> &Column {
-        &self.data.columns()[col]
-    }
-
-    /// Typed shared read of component `id` at `row`.
-    ///
-    /// # Safety
-    /// - `row` valid in this table.
-    /// - No `&mut` to the same element exists for the returned lifetime.
-    pub(crate) unsafe fn get<T: 'static>(&self, id: ComponentId, row: u32) -> Option<&T> {
-        // SAFETY: forwarded preconditions.
-        self.col_map
-            .get(&id)
-            .map(|&c| unsafe { self.data.columns()[c].data.get(row) })
-    }
-
-    /// Typed exclusive read of component `id` at `row`.
-    ///
-    /// # Safety
-    /// - `row` valid in this table.
-    /// - No other borrow of the same element exists for the returned lifetime.
-    pub(crate) unsafe fn get_mut<T: 'static>(&self, id: ComponentId, row: u32) -> Option<&mut T> {
-        // SAFETY: forwarded preconditions.
-        self.col_map
-            .get(&id)
-            .map(|&c| unsafe { self.data.columns()[c].data.get_mut(row) })
+        &self.data.columns[col]
     }
 }
 
