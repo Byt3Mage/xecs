@@ -1,15 +1,21 @@
 use std::sync::atomic::AtomicU32;
 
 use crate::{
-    component::{self, ComponentConfig, ComponentId, StaticId, TypedStaticId, registry::ComponentRegistry},
-    error::{EcsResult, Error},
+    component::{
+        self, ComponentConfig, Path,
+        id::{ComponentId, StaticId, TypedStaticId},
+        registry::{ComponentRegistry, Unregistered},
+    },
+    error::{EcsError, EcsResult},
     id::{
         Id,
         allocator::{IdAllocator, IdRecord, NotAlive},
     },
+    query::logical::Relation,
     relation::{RelationId, RelationRegistry},
     storage::table::{self},
     table_index::TableIndex,
+    type_meta::HasMeta,
 };
 
 fn ecs_id_allocate() -> u32 {
@@ -22,7 +28,6 @@ pub struct Ecs {
     pub(crate) components: ComponentRegistry,
     pub(crate) relations: RelationRegistry,
     pub(crate) tables: TableIndex,
-    pub(crate) static_ids: Vec<Option<ComponentId>>,
     pub(crate) generation: u32,
     unique_id: u32,
 }
@@ -35,7 +40,6 @@ impl Ecs {
             relations: RelationRegistry::new(),
             tables: TableIndex::new(),
             generation: 0,
-            static_ids: Vec::new(),
             unique_id: ecs_id_allocate(),
         }
     }
@@ -50,58 +54,32 @@ impl Ecs {
         self.unique_id
     }
 
-    /// Gets the [ComponentId] for the static id.
     #[inline(always)]
-    pub fn id<T>(&self, comp: &StaticId<T>) -> EcsResult<ComponentId> {
-        match self.static_ids.get(comp.id() as usize) {
-            Some(Some(id)) => Ok(*id),
-            Some(None) | None => Err(Error::UnregisteredStatic(comp.id())),
-        }
+    pub fn component_id<T: HasMeta>(&self, id: &'static StaticId<T>) -> Result<ComponentId, Unregistered> {
+        self.components.find(id)
     }
 
     #[inline(always)]
-    pub fn id_t<T: TypedStaticId>(&self) -> EcsResult<ComponentId> {
-        self.id(T::id())
+    pub fn relation_id(&self) -> Result<Relation, Unregistered> {
+        todo!()
     }
 
-    /// Registers the type with the ecs or returns its [ComponentId] if already registered.
-    ///
-    /// Lazily evaluates the descriptor and only calls it if the type is not registered.
-    pub fn register_with<T, F>(&mut self, comp: &StaticId<T>, f: F) -> ComponentId
-    where
-        F: FnOnce() -> ComponentConfig,
-    {
-        let idx = comp.id() as usize;
-
-        if idx >= self.static_ids.len() {
-            self.static_ids.resize(idx + 1, None);
-        }
-
-        *self.static_ids[idx].get_or_insert_with(|| self.components.register(f()))
+    #[inline(always)]
+    pub fn component_id_t<T: TypedStaticId>(&self) -> Result<ComponentId, Unregistered> {
+        self.component_id(T::id())
     }
 
-    /// Registers the component with the ecs if not registered and returns its [Id].
-    ///
-    /// This function uses the default builder value (see [ECS::register_with]
-    /// for lazily evaluated descriptor function).
-    pub fn register<T>(&mut self, component: &StaticId<T>) -> ComponentId {
-        self.register_with(component, || ComponentConfig::new().name(component.name()))
-    }
-
-    /// Registers the type with the ecs if not registered and returns its [Id].
-    ///
-    /// This function uses the default builder value (see [ECS::register_with]
-    /// for lazily evaluated descriptor function).
-    pub fn register_t<T: TypedStaticId>(&mut self) -> ComponentId {
-        self.register(T::id())
+    #[inline(always)]
+    pub fn register<T: HasMeta>(&mut self, component: &StaticId<T>) -> ComponentId {
+        self.components.register(component)
     }
 
     /// Creates a new component and returns its [Id].
     ///
     /// Useful for creating "newtype" runtime components.
-    #[inline]
-    pub fn new_component(&mut self, builder: ComponentConfig) -> ComponentId {
-        self.components.register(builder)
+    #[inline(always)]
+    pub fn new_component<T: Into<Path>>(&mut self, config: ComponentConfig<T>) -> ComponentId {
+        self.components.new_component(config)
     }
 
     /// Creates a new [Id].
@@ -120,16 +98,12 @@ impl Ecs {
         Ok(())
     }
 
-    /// Checks if the `id` has the component.
+    /// Checks if `id` has the `component`.
     #[inline(always)]
-    pub fn has_id(&self, id: Id, component: ComponentId) -> Result<bool, NotAlive> {
-        self.ids.get(id).map(|r| component::has(self, r, component))
-    }
-
-    /// Checks if `id` has the static component `T`.
-    #[inline(always)]
-    pub fn has<T>(&self, id: Id, component: &StaticId<T>) -> EcsResult<bool> {
-        self.has_id(id, self.id(component)?).map_err(Error::NotAlive)
+    pub fn has<T: HasMeta>(&self, id: Id, component: &'static StaticId<T>) -> EcsResult<bool> {
+        let r = self.ids.get(id)?;
+        let component = self.components.find(component).unwrap();
+        Ok(component::has(self, r, component))
     }
 
     /// Checks if `id` has the typed component `T`.
@@ -139,8 +113,9 @@ impl Ecs {
     }
 
     #[inline]
-    pub fn insert<T>(&mut self, id: Id, component: &StaticId<T>, value: T) -> EcsResult<Option<T>> {
-        unsafe { component::insert(self, id, self.id(component)?, value) }
+    pub fn insert<T: HasMeta>(&mut self, id: Id, component: &'static StaticId<T>, value: T) -> EcsResult<Option<T>> {
+        let component = self.components.find(component)?;
+        Ok(unsafe { component::insert(self, id, component, value)? })
     }
 
     #[inline]
@@ -149,13 +124,9 @@ impl Ecs {
     }
 
     #[inline]
-    pub fn remove_id(&mut self, id: Id, component: ComponentId) -> Result<(), NotAlive> {
-        unsafe { component::remove(self, id, component) }
-    }
-
-    #[inline]
-    pub fn remove<T>(&mut self, id: Id, component: &StaticId<T>) -> EcsResult<()> {
-        self.remove_id(id, self.id(component)?).map_err(Error::NotAlive)
+    pub fn remove<T: HasMeta>(&mut self, id: Id, component: &'static StaticId<T>) -> EcsResult<()> {
+        let component = self.components.find(component)?;
+        Ok(unsafe { component::remove(self, id, component)? })
     }
 
     #[inline]
@@ -164,17 +135,17 @@ impl Ecs {
     }
 
     #[inline]
-    pub fn get<T>(&self, id: Id, component: &StaticId<T>) -> EcsResult<&T> {
+    pub fn get<T: HasMeta>(&self, id: Id, component: &'static StaticId<T>) -> EcsResult<&T> {
         let r = self.ids.get(id)?;
-        let component = self.id(component)?;
-        unsafe { component::get(self, r, component) }.ok_or(Error::MissingComponent { id, component })
+        let component = self.components.find(component)?;
+        unsafe { component::get(self, r, component) }.ok_or(EcsError::MissingComponent { id, component })
     }
 
     #[inline]
-    pub fn get_mut<T>(&mut self, id: Id, component: &StaticId<T>) -> EcsResult<&mut T> {
+    pub fn get_mut<T: HasMeta>(&mut self, id: Id, component: &'static StaticId<T>) -> EcsResult<&mut T> {
         let r = self.ids.get(id)?;
-        let component = self.id(component)?;
-        unsafe { component::get_mut(self, r, component) }.ok_or(Error::MissingComponent { id, component })
+        let component = self.components.find(component)?;
+        unsafe { component::get_mut(self, r, component) }.ok_or(EcsError::MissingComponent { id, component })
     }
 
     #[inline]
@@ -212,15 +183,3 @@ impl Ecs {
         self.ids.num_dead()
     }
 }
-
-// /// Wrapper trait to make the API nicer to write
-// pub trait QuerySingle<R> {
-//     fn query_id<T: GetMulti>(&mut self, id: Id, query: T::Query, f: impl FnOnce(T::Output<'_>) -> R) -> EcsResult<R>;
-// }
-
-// impl<R> QuerySingle<R> for Ecs {
-//     // TODO: get table once
-//     fn query_id<T: GetMulti>(&mut self, id: Id, query: T::Query, f: impl FnOnce(T::Output<'_>) -> R) -> EcsResult<R> {
-//         T::get(self, id, query).map(f)
-//     }
-// }

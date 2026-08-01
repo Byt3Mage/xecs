@@ -1,16 +1,17 @@
 use crate::{
     ComponentId,
+    component::registry::Unregistered,
     id::{Id, allocator::NotAlive},
 };
 
 #[derive(thiserror::Error, Debug)]
-pub enum Error {
+pub enum EcsError {
     #[error(transparent)]
     NotAlive(#[from] NotAlive),
+    #[error(transparent)]
+    UnregisteredStatic(#[from] Unregistered),
     #[error("{id} does not have {component}")]
     MissingComponent { id: Id, component: ComponentId },
-    #[error("static id `{0}` is not registered with this ecs")]
-    UnregisteredStatic(u32),
 }
 
-pub type EcsResult<T> = Result<T, Error>;
+pub type EcsResult<T> = Result<T, EcsError>;

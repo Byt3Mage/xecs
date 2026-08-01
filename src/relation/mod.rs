@@ -15,7 +15,7 @@ pub struct RelationId(u32);
 
 impl std::fmt::Display for RelationId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Relation#{}", self.0)
+        write!(f, "R#{}", self.0)
     }
 }
 

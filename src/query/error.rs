@@ -1,4 +1,4 @@
-use crate::{component::ComponentId, query::logical::ScopeId, relation::RelationId};
+use crate::{component::id::ComponentId, query::logical::ScopeId, relation::RelationId};
 
 /// Errors produced while lowering a logical plan against a world.
 /// All of these are programming errors in the query or a missing
@@ -21,7 +21,7 @@ pub enum LowerError {
 }
 
 #[derive(thiserror::Error, Debug)]
-pub enum ValidateError {
+pub enum ValidationError {
     #[error("scope {scope}, access {index} ({name}): &mut on a Read access")]
     WriteOnRead {
         scope: ScopeId,

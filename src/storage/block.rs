@@ -1,29 +1,36 @@
-use std::{ptr::NonNull, rc::Rc};
-
-use crate::type_meta::TypeMeta;
+use std::{
+    alloc::{self, Layout},
+    ptr::NonNull,
+};
 
 #[derive(Debug)]
-pub(crate) struct Blob {
+pub(crate) struct Block {
     data: NonNull<u8>,
-    meta: Rc<TypeMeta>,
+    drop: Option<unsafe fn(ptr: NonNull<u8>)>,
+    elem_layout: Layout,
 }
 
-impl Blob {
+impl Block {
     /// Creates a new column with a dangling pointer (no allocation).
-    pub(crate) fn new(meta: Rc<TypeMeta>) -> Self {
-        Self { data: meta.dangling, meta }
+    pub(crate) fn new(elem_layout: Layout, drop: Option<unsafe fn(ptr: NonNull<u8>)>) -> Self {
+        debug_assert!(
+            elem_layout == elem_layout.pad_to_align(),
+            "Layout size must be a multiple of its alignment",
+        );
+        let data = elem_layout.dangling_ptr();
+        Self { data, drop, elem_layout }
     }
 
     /// Whether this column stores ZSTs.
     #[inline(always)]
     pub(crate) fn is_zst(&self) -> bool {
-        self.meta.layout.size() == 0
+        self.elem_layout.size() == 0
     }
 
     /// Element stride in bytes. `meta.layout` is padded-to-align, so size == stride.
     #[inline(always)]
     pub(crate) fn stride(&self) -> usize {
-        self.meta.layout.size()
+        self.elem_layout.size()
     }
 
     #[inline(always)]
@@ -62,12 +69,12 @@ impl Blob {
     /// - `self` and `dst` store the same type (equal `meta`).
     /// - `src_row` valid in `self`, `dst_row` valid in `dst`.
     #[inline(always)]
-    pub(crate) unsafe fn move_row_to(&self, src_row: u32, dst: &Blob, dst_row: u32) {
+    pub(crate) unsafe fn move_row_to(&self, src_row: u32, dst: &Block, dst_row: u32) {
         debug_assert_eq!(self.stride(), dst.stride());
         unsafe {
             let src = self.row_ptr(src_row);
-            let dst_ptr = dst.row_ptr(dst_row);
-            dst_ptr.copy_from_nonoverlapping(src, self.stride());
+            let dst = dst.row_ptr(dst_row);
+            dst.copy_from_nonoverlapping(src, self.stride());
         }
     }
 
@@ -78,8 +85,8 @@ impl Blob {
     /// - The value at `row` must be initialized and not already moved out.
     #[inline(always)]
     pub(crate) unsafe fn drop_row(&self, row: u32) {
-        if let Some(dtor) = self.meta.dtor {
-            unsafe { dtor(self.row_ptr(row)) };
+        if let Some(drop) = self.drop {
+            unsafe { drop(self.row_ptr(row)) };
         }
     }
 
@@ -93,21 +100,18 @@ impl Blob {
             return;
         }
 
-        let new_layout = self.meta.layout.repeat_packed(new_cap).unwrap();
+        let new_layout = self.elem_layout.repeat_packed(new_cap).unwrap();
 
         let ptr = unsafe {
             if old_cap == 0 {
-                std::alloc::alloc(new_layout)
+                alloc::alloc(new_layout)
             } else {
-                let old_layout = self.meta.layout.repeat_packed(old_cap).unwrap();
-                std::alloc::realloc(self.data.as_ptr(), old_layout, new_layout.size())
+                let layout = self.elem_layout.repeat_packed(old_cap).unwrap();
+                alloc::realloc(self.data.as_ptr(), layout, new_layout.size())
             }
         };
 
-        self.data = match NonNull::new(ptr) {
-            Some(ptr) => ptr,
-            None => std::alloc::handle_alloc_error(new_layout),
-        };
+        self.data = NonNull::new(ptr).unwrap_or_else(|| alloc::handle_alloc_error(new_layout));
     }
 
     /// Drop all elements in the column and deallocate.
@@ -117,13 +121,17 @@ impl Blob {
     /// - `cap` must be the current allocation capacity.
     pub(crate) unsafe fn destroy(&mut self, len: u32, cap: u32) {
         unsafe {
-            if let Some(dtor) = self.meta.dtor {
-                (0..len).for_each(|i| dtor(self.row_ptr(i)));
+            if let Some(drop) = self.drop {
+                // self.drop is set to None for unwind safety.
+                // This ensures elements are not dropped twice if drop panics.
+                self.drop = None;
+                (0..len).for_each(|i| drop(self.row_ptr(i)));
+                self.drop = Some(drop);
             }
 
             if !self.is_zst() {
-                let layout = self.meta.layout.repeat_packed(cap as usize).unwrap();
-                std::alloc::dealloc(self.data.as_ptr(), layout);
+                let layout = self.elem_layout.repeat_packed(cap as usize).unwrap();
+                alloc::dealloc(self.data.as_ptr(), layout);
             }
         }
     }

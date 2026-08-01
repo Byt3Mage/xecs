@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
 
 use crate::{
-    Ecs, Id, ValidateError,
+    Ecs, Id, ValidationError,
     query::{
         access::{Follows, Select},
         context::{Binds, QueryCtx},
@@ -23,8 +23,9 @@ pub struct Query {
 }
 
 impl Query {
-    pub fn new() -> Self {
-        todo!()
+    pub fn new(ecs: &Ecs, logical: LogicalPlan) -> Self {
+        let physical = logical.lower(ecs);
+        Self { logical, physical }
     }
 
     /// Re-evaluate the physical plan if out of sync with current ecs state.
@@ -47,24 +48,29 @@ impl Query {
 
     /// Converts [Query] to a typed [TQuery] with access validation performed.
     #[inline]
-    pub fn typed<C: Select, F: Follows>(self, ecs: &Ecs) -> Result<TQuery<C, F>, ValidateError> {
-        validate_scope::<C, F>(ecs, &self.logical, 0)?;
+    pub fn typed<S: Select, F: Follows>(self, ecs: &Ecs) -> Result<TQuery<S, F>, ValidationError> {
+        validate_scope::<S, F>(ecs, &self.logical, 0)?;
         Ok(TQuery { query: self, marker: PhantomData })
     }
 
     /// Clones [Query] to a typed [TQuery] with access validation performed.
     #[inline(always)]
-    pub fn clone_typed<C: Select, F: Follows>(self, ecs: &Ecs) -> Result<TQuery<C, F>, ValidateError> {
+    pub fn clone_typed<C: Select, F: Follows>(self, ecs: &Ecs) -> Result<TQuery<C, F>, ValidationError> {
         self.clone().typed(ecs)
     }
 }
 
-pub struct TQuery<S: Select, F: Follows> {
+pub struct TQuery<S: Select, F: Follows = ()> {
     query: Query,
     marker: PhantomData<(S, F)>,
 }
 
 impl<S: Select, F: Follows> TQuery<S, F> {
+    #[inline(always)]
+    pub fn new(ecs: &Ecs, query: Query) -> Result<Self, ValidationError> {
+        query.typed(ecs)
+    }
+
     pub fn each(&mut self, ecs: &mut Ecs, params: &[Id], mut f: impl FnMut(Id, S::Row<'_>, F::Get<'_>)) {
         let driver = &self.query.physical.scopes[0];
         let ctx = self.query.make_ctx(ecs, params);
@@ -93,6 +99,35 @@ impl<S: Select, F: Follows> TQuery<S, F> {
     }
 }
 
+impl<S: Select> TQuery<S, ()> {
+    pub fn each_row(&mut self, ecs: &mut Ecs, params: &[Id], mut f: impl FnMut(Id, S::Row<'_>)) {
+        let driver = &self.query.physical.scopes[0];
+        let ctx = self.query.make_ctx(ecs, params);
+
+        for mt in &driver.matched_tables {
+            let table = &ecs.tables[mt.id];
+            let num_rows = table.num_rows();
+
+            if num_rows == 0 {
+                continue;
+            }
+
+            let ids = table.ids();
+            let columns = S::columns(table, &mt.columns);
+
+            for row in 0..num_rows {
+                // SAFETY: `row` is in bounds for this table
+                unsafe {
+                    let id = ids.add(row as usize).read();
+                    if driver.passes_relation_checks(id, &ctx) {
+                        f(id, S::row(columns, row));
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub struct Follow<'w, S: Select = (), F: Follows = ()> {
     ctx: &'w QueryCtx<'w>,
     index: usize,
@@ -108,7 +143,7 @@ impl<'w, S: Select, F: Follows> Follow<'w, S, F> {
 
     #[inline(always)]
     pub fn iter(&mut self) -> FollowIter<'w, S, F> {
-        let join = &self.ctx.plan.joins[self.index];
+        let join = &self.ctx.plan.follows[self.index];
         FollowIter {
             ctx: self.ctx,
             fan: join.fan(self.from, self.ctx),

@@ -25,7 +25,7 @@ pub struct PhysicalPlan {
 
     /// Per join, same indices as logical.
     /// Carries everything join execution needs.
-    pub(crate) joins: Box<[PhysicalJoin]>,
+    pub(crate) follows: Box<[PhysicalFollow]>,
 }
 
 #[derive(Debug, Clone)]
@@ -128,14 +128,14 @@ impl IdSource {
 
 /// One join, fully lowered.
 #[derive(Debug, Clone)]
-pub(crate) struct PhysicalJoin {
+pub(crate) struct PhysicalFollow {
     pub(crate) relation: RelationId,
     pub(crate) reversed: bool,
     pub(crate) pinned_id: Option<IdSource>,
     pub(crate) scope: ScopeId,
 }
 
-impl PhysicalJoin {
+impl PhysicalFollow {
     pub(crate) fn fan<'w>(&self, id: Id, ctx: &QueryCtx<'w>) -> Fan<'w> {
         let index = ctx.ecs.relations.index(self.relation);
 

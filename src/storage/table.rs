@@ -7,11 +7,11 @@ use std::{
 use ahash::AHashMap;
 
 use crate::{
-    component::{ComponentId, Signature},
+    component::{Signature, id::ComponentId},
     ecs::Ecs,
     graph::GraphNode,
     id::Id,
-    storage::blob::Blob,
+    storage::block::Block,
     table_index::TableId,
 };
 
@@ -27,7 +27,7 @@ const fn ids_layout(cap: u32) -> Result<Layout, LayoutError> {
 
 pub(crate) struct Column {
     pub(crate) id: ComponentId,
-    pub(crate) data: Blob,
+    pub(crate) data: Block,
 }
 
 pub(crate) struct TableData {
@@ -58,10 +58,10 @@ impl TableData {
         let cap = self.cap;
         let req = self.len.checked_add(additional).unwrap();
 
-        if req > self.cap {
+        if req > cap {
             unsafe {
                 let new = ids_layout(req).unwrap();
-                let ptr = match self.cap == 0 {
+                let ptr = match cap == 0 {
                     true => std::alloc::alloc(new),
                     false => alloc::realloc(self.ids.as_ptr().cast(), ids_layout(cap).unwrap(), new.size()),
                 };
@@ -72,10 +72,11 @@ impl TableData {
                 };
 
                 for col in self.columns.iter_mut() {
-                    // SAFETY: required > old_cap (just checked); old_cap is current cap.
+                    // SAFETY: required > capacity; old_cap is current capacity.
                     col.data.realloc(cap as usize, req as usize)
                 }
             }
+            self.cap = req;
         }
     }
 
@@ -87,7 +88,8 @@ impl TableData {
     /// Caller must initialize every column at the returned row before any read.
     pub(crate) unsafe fn alloc_row(&mut self, id: Id) -> u32 {
         self.reserve(1);
-        let row = self.num_rows();
+        let row = self.len;
+        self.len += 1;
         unsafe { self.ids.add(row as usize).write(id) };
         row
     }

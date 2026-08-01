@@ -10,18 +10,23 @@ mod relation;
 mod storage;
 mod table_index;
 mod type_meta;
-mod utils;
 
-pub use component::{ComponentHooks, ComponentId, StaticId, TypedStaticId};
+#[doc(hidden)]
+pub use linkme as __linkme;
+
+pub use component::{
+    ComponentHooks,
+    id::{ComponentId, STATIC_COMPONENTS, StaticId, TypedStaticId, UntypedStaticId, static_id_count},
+};
 pub use ecs::Ecs;
-pub use error::Error;
+pub use error::EcsError;
 pub use id::Id;
 pub use inline_vec::InlineVec;
 pub use query::{
     Follow, FollowIter, Query, TQuery,
-    access::Follows,
-    error::{LowerError, ValidateError},
-    logical::PlanBuilder,
+    access::{Access, AccessMode, Follows, Select},
+    error::{LowerError, ValidationError},
+    logical::{LogicalPlan, PlanBuilder},
 };
 pub use type_meta::TypeMeta;
-pub use xecs_macros::{Component, components};
+pub use xecs_macros::Component;

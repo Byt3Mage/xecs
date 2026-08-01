@@ -1,14 +1,8 @@
-use std::{
-    fmt::Debug,
-    marker::PhantomData,
-    ptr::NonNull,
-    rc::Rc,
-    sync::atomic::{AtomicU32, Ordering},
-};
+use std::{rc::Rc, sync::Arc};
 
 use crate::{
+    component::id::ComponentId,
     ecs::Ecs,
-    error::EcsResult,
     graph::{find_add_table, find_remove_table},
     id::{
         Id,
@@ -17,65 +11,25 @@ use crate::{
     storage::table::move_id,
     table_index::TableId,
     type_meta::TypeMeta,
-    utils::ConstNonNull,
 };
 
+pub mod id;
 pub mod registry;
 pub mod traits;
 
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[repr(transparent)]
-pub struct ComponentId(u32);
-
-impl std::fmt::Display for ComponentId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Component#{}", self.0)
-    }
-}
-
-#[derive(Debug)]
-pub struct StaticId<T: 'static> {
-    id: u32,
-    name: &'static str,
-    marker: PhantomData<fn() -> T>,
-}
-
-impl<T: 'static> StaticId<T> {
-    pub fn new(name: &'static str) -> Self {
-        Self { id: Self::allocate(), name, marker: PhantomData }
-    }
-
-    pub fn id(&self) -> u32 {
-        self.id
-    }
-
-    pub fn name(&self) -> &'static str {
-        self.name
-    }
-
-    fn allocate() -> u32 {
-        static MAX_INDEX: AtomicU32 = AtomicU32::new(0);
-        MAX_INDEX.fetch_add(1, Ordering::Relaxed)
-    }
-}
-
-/// A Rust type with an associated [ComponentId]
-pub trait TypedStaticId: 'static + Sized {
-    fn id() -> &'static StaticId<Self>;
-}
-
 #[derive(Default)]
 pub struct ComponentHooks {
-    pub on_add: Option<Box<dyn FnMut(Id)>>,
-    pub on_remove: Option<Box<dyn FnMut(Id, ConstNonNull<u8>)>>,
-    pub on_set: Option<Box<dyn FnMut(Id, NonNull<u8>)>>,
-    pub default: Option<Box<dyn FnMut(NonNull<u8>)>>,
-    pub clone: Option<Box<dyn FnMut(ConstNonNull<u8>, NonNull<u8>)>>,
+    pub on_insert: Option<Box<dyn FnMut(Id, *mut u8)>>,
+    pub on_remove: Option<Box<dyn FnMut(Id, *mut u8)>>,
+    pub clone: Option<Box<dyn FnMut(*const u8, *mut u8)>>,
+    pub default: Option<Box<dyn FnMut(*mut u8)>>,
 }
 
+pub type Path = Arc<str>;
+
 pub struct ComponentInfo {
-    pub(crate) name: Option<Rc<str>>,
-    pub(crate) meta: Rc<TypeMeta>,
+    pub(crate) name: Option<Path>,
+    pub(crate) meta: TypeMeta,
     pub(crate) tables: Vec<TableId>,
 }
 
@@ -87,18 +41,19 @@ impl ComponentInfo {
     }
 }
 
-pub struct ComponentConfig {
-    pub(crate) name: Option<Rc<str>>,
+#[derive(Debug, Clone)]
+pub struct ComponentConfig<T: Into<Path>> {
+    pub(crate) name: Option<T>,
     pub(crate) meta: TypeMeta,
 }
 
-impl ComponentConfig {
+impl<T: Into<Arc<str>>> ComponentConfig<T> {
     pub fn new() -> Self {
         Self { name: None, meta: TypeMeta::of::<()>() }
     }
 
-    pub fn name(mut self, name: impl Into<Rc<str>>) -> Self {
-        self.name = Some(name.into());
+    pub fn name(mut self, name: T) -> Self {
+        self.name = Some(name);
         self
     }
 
@@ -112,8 +67,13 @@ impl ComponentConfig {
 /// Returns the previously held value, if any.
 ///
 /// # Safety
-/// - Caller must ensure that `val` is the component data type.
-pub(crate) unsafe fn insert<T: 'static>(ecs: &mut Ecs, id: Id, comp: ComponentId, val: T) -> EcsResult<Option<T>> {
+/// - Caller must ensure that `T` is the component data type.
+pub(crate) unsafe fn insert<T: 'static>(
+    ecs: &mut Ecs,
+    id: Id,
+    comp: ComponentId,
+    val: T,
+) -> Result<Option<T>, NotAlive> {
     let r = ecs.ids.get(id)?;
 
     // SAFETY: Caller ensures the val is the component data type
@@ -147,6 +107,7 @@ pub(crate) unsafe fn remove(ecs: &mut Ecs, id: Id, comp: ComponentId) -> Result<
     Ok(())
 }
 
+#[inline(always)]
 pub(crate) fn has(ecs: &Ecs, r: IdRecord, comp: ComponentId) -> bool {
     ecs.tables[r.table].col_map.contains_key(&comp)
 }

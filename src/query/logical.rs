@@ -2,10 +2,10 @@ use std::{cmp::Ordering, rc::Rc};
 
 use crate::{
     Ecs, Id, LowerError,
-    component::ComponentId,
+    component::id::ComponentId,
     query::{
         access::{Access, AccessMode, Follows, Select},
-        error::ValidateError,
+        error::ValidationError,
         physical::{MatchedTable, PhysicalPlan},
     },
     relation::{RelationId, index::Topology},
@@ -54,7 +54,7 @@ impl RelTarget {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct Scope {
+pub struct LogicalScope {
     pub access: Vec<Access>,
     pub with: Vec<ComponentId>,
     pub without: Vec<ComponentId>,
@@ -62,7 +62,7 @@ pub struct Scope {
 }
 
 #[derive(Copy, Clone, Debug)]
-pub struct Join {
+pub struct LogicalFollow {
     pub relation: Relation,
     pub from: ScopeId,
     pub dest: ScopeId,
@@ -70,8 +70,8 @@ pub struct Join {
 
 #[derive(Debug, Clone)]
 pub struct LogicalPlan {
-    pub(crate) scopes: Rc<[Scope]>,
-    pub(crate) joins: Rc<[Join]>,
+    pub(crate) scopes: Rc<[LogicalScope]>,
+    pub(crate) follows: Rc<[LogicalFollow]>,
 }
 
 impl LogicalPlan {
@@ -79,14 +79,14 @@ impl LogicalPlan {
         PhysicalPlan {
             resolved_at: ecs.generation(),
             scopes: Box::new([]),
-            joins: Box::new([]),
+            follows: Box::new([]),
         }
     }
 }
 
 pub struct PlanBuilder {
-    pub(crate) scopes: Vec<Scope>,
-    pub(crate) joins: Vec<Join>,
+    pub(crate) scopes: Vec<LogicalScope>,
+    pub(crate) joins: Vec<LogicalFollow>,
     pub(crate) labels: Vec<(Rc<str>, ScopeId)>,
     current: ScopeId,
 }
@@ -100,12 +100,12 @@ impl PlanBuilder {
             current: 0,
         }
     }
-    pub fn access(&mut self, access: Access) -> &mut Self {
+    pub fn access(mut self, access: Access) -> Self {
         self.scopes[self.current].access.push(access);
         self
     }
 
-    pub fn with(&mut self, c: ComponentId) -> &mut Self {
+    pub fn with(mut self, c: ComponentId) -> Self {
         self.scopes[self.current].with.push(c);
         self
     }
@@ -143,8 +143,8 @@ impl PlanBuilder {
 
         // Appended BEFORE descending: joins end up in declaration order,
         // so every join's `from` scope is bound before it executes.
-        self.scopes.push(Scope::default());
-        self.joins.push(Join { relation, from: source, dest: target });
+        self.scopes.push(LogicalScope::default());
+        self.joins.push(LogicalFollow { relation, from: source, dest: target });
 
         let (current, labels) = (self.current, self.labels.len());
         self.current = target;
@@ -157,12 +157,12 @@ impl PlanBuilder {
     pub fn build(self) -> LogicalPlan {
         LogicalPlan {
             scopes: self.scopes.into(),
-            joins: self.joins.into(),
+            follows: self.joins.into(),
         }
     }
 }
 
-pub fn validate_scope<C, J>(ecs: &Ecs, plan: &LogicalPlan, scope: ScopeId) -> Result<(), ValidateError>
+pub fn validate_scope<C, J>(ecs: &Ecs, plan: &LogicalPlan, scope: ScopeId) -> Result<(), ValidationError>
 where
     C: Select,
     J: Follows,
@@ -171,7 +171,7 @@ where
     let declared = &plan.scopes[scope].access;
 
     if requests.len() != declared.len() {
-        return Err(ValidateError::ColumnArity {
+        return Err(ValidationError::ColumnArity {
             scope,
             received: requests.len(),
             expected: declared.len(),
@@ -182,31 +182,24 @@ where
         use AccessMode::*;
         match (req.mode, dec.mode) {
             (Read, Read) | (Write, Write) => {}
-            (Read, Write) => return Err(ValidateError::ReadOnWrite { scope, index, name: req.type_name }),
-            (Write, Read) => return Err(ValidateError::WriteOnRead { scope, index, name: req.type_name }),
+            (Read, Write) => return Err(ValidationError::ReadOnWrite { scope, index, name: req.type_name }),
+            (Write, Read) => return Err(ValidationError::WriteOnRead { scope, index, name: req.type_name }),
         }
 
         match (req.optional, dec.optional) {
             (true, true) | (false, false) => {}
-            (true, false) => return Err(ValidateError::OptionalOnRequired { scope, index, name: req.type_name }),
-            (false, true) => return Err(ValidateError::RequiredOnOptional { scope, index, name: req.type_name }),
+            (true, false) => return Err(ValidationError::OptionalOnRequired { scope, index, name: req.type_name }),
+            (false, true) => return Err(ValidationError::RequiredOnOptional { scope, index, name: req.type_name }),
         }
 
         let meta = &ecs.components.get(dec.id).meta;
-        if meta.type_id != req.type_id {
-            return Err(ValidateError::TypeMismatch {
-                scope,
-                index,
-                received: req.type_name,
-                expected: meta.type_name(),
-            });
-        }
+        todo!("use layout fingerprint");
     }
 
     Ok(())
 }
 
-fn match_scope(Scope { access, with, without, .. }: &Scope, ecs: &Ecs) -> Box<[MatchedTable]> {
+fn match_scope(LogicalScope { access, with, without, .. }: &LogicalScope, ecs: &Ecs) -> Box<[MatchedTable]> {
     if access.is_empty() && with.is_empty() {
         // Every table matches, so we remove tables that have 'without' components.
         return ecs
@@ -244,21 +237,21 @@ fn match_scope(Scope { access, with, without, .. }: &Scope, ecs: &Ecs) -> Box<[M
 }
 
 fn check_capabilities(logical: &LogicalPlan, ecs: &Ecs) -> Result<(), LowerError> {
-    let joins = logical.joins.iter().filter_map(|j| j.relation.as_reversed());
     let scopes = logical.scopes.iter();
+    let follows = logical.follows.iter().filter_map(|j| j.relation.as_reversed());
     let checks = scopes.flat_map(|s| s.rel_check.iter().filter_map(|c| c.relation.as_reversed()));
 
-    for rel in joins.chain(checks) {
+    for rel in follows.chain(checks) {
         let index = ecs.relations.index(rel.id);
 
         // Symmetric edges must have no direction.
-        if index.props().topology == Topology::Symmetric {
+        if index.props().topology.is_symmetric() {
             return Err(LowerError::ReversedSymmetric(rel.id));
         }
 
         // Reversed enumeration walks the reverse index.
         // So reversed relationships without a pinned target must have one.
-        if !index.has_reverse() && rel.target.is_any() {
+        if rel.target.is_any() && !index.has_reverse() {
             return Err(LowerError::NoReverseIndex(rel.id));
         }
     }
@@ -285,7 +278,7 @@ fn cleared_by_nonoverlap(a: &[MatchedTable], b: &[MatchedTable]) -> bool {
 /// relationship? Acyclicity forbids self-edges, so from and dest of one
 /// hop can't be the same entity, regardless of pinning or reversal.
 fn cleared_by_acyclicity(x: ScopeId, y: ScopeId, logical: &LogicalPlan, ecs: &Ecs) -> bool {
-    logical.joins.iter().any(|j| {
+    logical.follows.iter().any(|j| {
         let connected = (j.from == x && j.dest == y) || (j.from == y && j.dest == x);
         connected && ecs.relations.index(j.relation.id).props().acyclic
     })

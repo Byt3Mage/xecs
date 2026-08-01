@@ -12,10 +12,9 @@ const fn dtor<T>() -> Option<unsafe fn(ptr: NonNull<u8>)> {
 #[derive(Debug, Clone, Copy)]
 pub struct TypeMeta {
     pub dtor: Option<unsafe fn(ptr: NonNull<u8>)>,
-    pub dangling: NonNull<u8>,
     pub layout: Layout,
-    pub type_id: TypeId,
-    pub name: fn() -> &'static str,
+    pub type_id: Option<fn() -> TypeId>,
+    pub type_name: Option<fn() -> &'static str>,
 }
 
 impl TypeMeta {
@@ -23,16 +22,10 @@ impl TypeMeta {
     pub const fn of<T: 'static>() -> Self {
         Self {
             dtor: dtor::<T>(),
-            dangling: NonNull::<T>::dangling().cast(),
             layout: Layout::new::<T>(),
-            type_id: TypeId::of::<T>(),
-            name: std::any::type_name::<T>,
+            type_id: Some(TypeId::of::<T>),
+            type_name: Some(std::any::type_name::<T>),
         }
-    }
-
-    #[inline(always)]
-    pub fn is<T: 'static>(&self) -> bool {
-        self.type_id == TypeId::of::<T>()
     }
 
     #[inline(always)]
@@ -41,17 +34,20 @@ impl TypeMeta {
     }
 
     #[inline(always)]
-    pub fn type_name(&self) -> &'static str {
-        (self.name)()
+    pub fn type_id(&self) -> Option<TypeId> {
+        self.type_id.map(|id| id())
     }
 
     #[inline(always)]
-    pub fn assert_type<T: 'static>(&self) {
-        assert!(
-            self.is::<T>(),
-            "type mismatch: expected {}, got {}",
-            self.type_name(),
-            std::any::type_name::<T>(),
-        )
+    pub fn type_name(&self) -> Option<&'static str> {
+        self.type_name.map(|n| n())
     }
+}
+
+pub trait HasMeta: 'static {
+    const META: &'static TypeMeta;
+}
+
+impl<T: 'static> HasMeta for T {
+    const META: &'static TypeMeta = &TypeMeta::of::<Self>();
 }

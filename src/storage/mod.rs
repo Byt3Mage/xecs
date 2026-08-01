@@ -1,2 +1,2 @@
-pub(crate) mod blob;
+pub(crate) mod block;
 pub(crate) mod table;

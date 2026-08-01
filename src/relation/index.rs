@@ -22,6 +22,13 @@ pub enum Topology {
     Symmetric,
 }
 
+impl Topology {
+    #[inline]
+    pub fn is_symmetric(&self) -> bool {
+        matches!(self, Self::Symmetric)
+    }
+}
+
 /// Declaration-time validation. Invalid combinations are rejected here;
 /// storage selection below is total over what passes.
 #[derive(thiserror::Error, Debug)]

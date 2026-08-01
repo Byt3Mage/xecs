@@ -5,8 +5,10 @@ version = "0.1.0"
 edition = "2024"
 description = "eXtended ecs"
 
+
 [dependencies]
+linkme = "0.3.37"
 xecs_macros = { path = "xecs_macros" }
 const-assert = { git = "https://github.com/aquarius2019/const-assert.git" }
-thiserror = "2.0.18"
+thiserror = "2.0.19"
 ahash = "0.8.12"
