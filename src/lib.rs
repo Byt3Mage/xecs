@@ -24,8 +24,8 @@ pub use id::Id;
 pub use inline_vec::InlineVec;
 pub use query::{
     Follow, FollowIter, Query, TQuery,
-    access::{Access, AccessMode, Follows, Select},
-    error::{LowerError, ValidationError},
+    access::{Access, AccessMode, Select},
+    error::{PlanValidationError, ValidationError},
     logical::{LogicalPlan, PlanBuilder},
 };
 pub use type_meta::TypeMeta;

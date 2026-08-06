@@ -1,10 +1,14 @@
 use std::{any::TypeId, ptr::NonNull};
 
 use crate::{
-    ComponentId, Id,
+    ComponentId, Follow, Id,
     inline_vec::InlineVec,
     invec,
-    query::{Follow, access::private::SealedFetch, context::QueryCtx, logical::ScopeId},
+    query::{
+        access::private::SealedFetch,
+        context::QueryCtx,
+        logical::{FollowId, ScopeId},
+    },
     storage::table::Table,
 };
 
@@ -212,25 +216,21 @@ impl<T: TypedAccess> Select for T {
 }
 
 pub trait Follows {
-    type Get<'w>;
-    fn get<'w>(ctx: &'w QueryCtx<'w>, scope: ScopeId, from: Id) -> Self::Get<'w>;
+    type Get<'a>;
+    fn get<'a>(ctx: &'a QueryCtx<'a>, scope: ScopeId, from: Id, indices: &[FollowId]) -> Self::Get<'a>;
 }
 
-/// Leaf scopes: no nested joins.
 impl Follows for () {
-    type Get<'w> = ();
-
-    #[inline(always)]
-    fn get<'w>(_: &'w QueryCtx<'w>, _: ScopeId, _: Id) -> Self::Get<'w> {}
+    type Get<'a> = ();
+    fn get<'a>(_: &'a QueryCtx<'a>, _: ScopeId, _: Id, _: &[FollowId]) -> Self::Get<'a> {}
 }
 
-impl<C: Select, J: Follows> Follows for Follow<'_, C, J> {
-    type Get<'a> = Follow<'a, C, J>;
+impl<F: Follows> Follows for Follow<'_, F> {
+    type Get<'a> = Follow<'a, F>;
 
-    #[inline(always)]
-    fn get<'w>(ctx: &'w QueryCtx<'w>, scope: ScopeId, from: Id) -> Self::Get<'w> {
+    fn get<'a>(ctx: &'a QueryCtx<'a>, scope: ScopeId, from: Id, indices: &[FollowId]) -> Self::Get<'a> {
         ctx.binds.set(scope, from);
-        Follow::new(ctx, 0, from)
+        Follow::new(ctx, from, indices[0])
     }
 }
 
@@ -273,26 +273,3 @@ impl_column_tuple!(P0, P1, P2, P3, P4, P5, P6, P7, P8, P9);
 impl_column_tuple!(P0, P1, P2, P3, P4, P5, P6, P7, P8, P9, P10);
 impl_column_tuple!(P0, P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11);
 impl_column_tuple!(P0, P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12);
-
-macro_rules! impl_follow_tuple {
-    ($(($C: ident, $J: ident)),+) => {
-        impl<$($C: Select, $J: Follows),+> Follows for ($(Follow<'_, $C, $J>,)+)
-        {
-            type Get<'w> = ($(Follow<'w, $C, $J>,)+);
-
-            #[inline(always)]
-             fn get<'w>(ctx: &'w QueryCtx<'w>, scope: ScopeId, from: Id) -> Self::Get<'w> {
-                ctx.binds.set(scope, from);
-                let mut idx = 0;
-                ($(
-                     #[allow(unused_assignments)]
-                    { let j = Follow::<$C, $J>::new(ctx, idx, from); idx += 1; j },
-                )+)
-            }
-        }
-    };
-}
-impl_follow_tuple!((C0, J0));
-impl_follow_tuple!((C0, J0), (C1, J1));
-impl_follow_tuple!((C0, J0), (C1, J1), (C2, J2));
-impl_follow_tuple!((C0, J0), (C1, J1), (C2, J2), (C3, J3));

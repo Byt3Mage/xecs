@@ -28,8 +28,8 @@ pub struct ComponentHooks {
 pub type Path = Arc<str>;
 
 pub struct ComponentInfo {
-    pub(crate) name: Option<Path>,
-    pub(crate) meta: TypeMeta,
+    pub path: Option<Path>,
+    pub meta: TypeMeta,
     pub(crate) tables: Vec<TableId>,
 }
 
@@ -41,87 +41,12 @@ impl ComponentInfo {
     }
 }
 
+pub const ANONYMOUS: &'static str = "<anonymous>";
+
 #[derive(Debug, Clone)]
-pub struct ComponentConfig<T: Into<Path>> {
-    pub(crate) name: Option<T>,
-    pub(crate) meta: TypeMeta,
-}
-
-impl<T: Into<Arc<str>>> ComponentConfig<T> {
-    pub fn new() -> Self {
-        Self { name: None, meta: TypeMeta::of::<()>() }
-    }
-
-    pub fn name(mut self, name: T) -> Self {
-        self.name = Some(name);
-        self
-    }
-
-    pub fn meta(mut self, meta: TypeMeta) -> Self {
-        self.meta = meta;
-        self
-    }
-}
-
-/// Inserts the value of a component for an id.
-/// Returns the previously held value, if any.
-///
-/// # Safety
-/// - Caller must ensure that `T` is the component data type.
-pub(crate) unsafe fn insert<T: 'static>(
-    ecs: &mut Ecs,
-    id: Id,
-    comp: ComponentId,
-    val: T,
-) -> Result<Option<T>, NotAlive> {
-    let r = ecs.ids.get(id)?;
-
-    // SAFETY: Caller ensures the val is the component data type
-    unsafe {
-        let table = &ecs.tables[r.table];
-        Ok(match table.col_map.get(&comp) {
-            Some(&idx) => {
-                let col = table.column(idx);
-                let row = col.data.row_ptr(r.row);
-                Some(row.cast().replace(val))
-            }
-            None => {
-                let dst_table_id = find_add_table(ecs, r.table, comp).unwrap();
-                let dst_row = move_id(ecs, id, r.table, r.row, dst_table_id);
-                let dst_table = &ecs.tables[dst_table_id];
-                let dst_col = dst_table.col_map[&comp];
-                let dst_row = dst_table.column(dst_col).data.row_ptr(dst_row);
-                dst_row.cast().write(val);
-                None
-            }
-        })
-    }
-}
-
-pub(crate) unsafe fn remove(ecs: &mut Ecs, id: Id, comp: ComponentId) -> Result<(), NotAlive> {
-    let r = ecs.ids.get(id)?;
-    if ecs.components.get(comp).tables.contains(&r.table) {
-        let dst_table = find_remove_table(ecs, r.table, comp).unwrap();
-        unsafe { move_id(ecs, id, r.table, r.row, dst_table) };
-    }
-    Ok(())
-}
-
-#[inline(always)]
-pub(crate) fn has(ecs: &Ecs, r: IdRecord, comp: ComponentId) -> bool {
-    ecs.tables[r.table].col_map.contains_key(&comp)
-}
-
-pub(crate) unsafe fn get<T: 'static>(ecs: &Ecs, r: IdRecord, comp: ComponentId) -> Option<&T> {
-    let table = &ecs.tables[r.table];
-    let col = table.col_map.get(&comp).map(|&i| table.column(i))?;
-    Some(unsafe { col.data.row_ptr(r.row).cast().as_ref() })
-}
-
-pub(crate) unsafe fn get_mut<T: 'static>(ecs: &mut Ecs, r: IdRecord, comp: ComponentId) -> Option<&mut T> {
-    let table = &ecs.tables[r.table];
-    let col = table.col_map.get(&comp).map(|&i| table.column(i))?;
-    Some(unsafe { col.data.row_ptr(r.row).cast().as_mut() })
+pub struct ComponentConfig {
+    pub path: Option<Path>,
+    pub meta: TypeMeta,
 }
 
 /// Sorted list of component ids in a [Table](crate::storage::table::Table)
@@ -167,11 +92,6 @@ impl std::ops::Deref for Signature {
 
 impl Signature {
     #[inline]
-    pub fn ids(&self) -> &[ComponentId] {
-        &self.0
-    }
-
-    #[inline]
     pub fn find_id(&self, id: &ComponentId) -> Option<usize> {
         self.binary_search(id).ok()
     }
@@ -210,4 +130,60 @@ impl Signature {
             Err(_) => None,
         }
     }
+}
+
+/// Inserts the value of a component for an id.
+/// Returns the previously held value, if any.
+///
+/// # Safety
+/// - Caller must ensure that `T` is the component data type.
+pub(crate) unsafe fn insert<T>(ecs: &mut Ecs, id: Id, comp: ComponentId, val: T) -> Result<Option<T>, NotAlive> {
+    let r = ecs.ids.get(id)?;
+
+    // SAFETY: Caller ensures the val is the component data type
+    unsafe {
+        let table = &ecs.tables[r.table];
+        Ok(match table.col_map.get(comp) {
+            Some(idx) => {
+                let col = table.column(idx);
+                let row = col.data.row_ptr(r.row);
+                Some(row.cast().replace(val))
+            }
+            None => {
+                let dst_table_id = find_add_table(ecs, r.table, comp).unwrap();
+                let dst_row = move_id(ecs, id, r.table, r.row, dst_table_id);
+                let dst_table = &ecs.tables[dst_table_id];
+                let dst_col = dst_table.col_map.get(comp).unwrap();
+                let dst_row = dst_table.column(dst_col).data.row_ptr(dst_row);
+                dst_row.cast().write(val);
+                None
+            }
+        })
+    }
+}
+
+pub(crate) unsafe fn remove(ecs: &mut Ecs, id: Id, comp: ComponentId) -> Result<(), NotAlive> {
+    let r = ecs.ids.get(id)?;
+    if ecs.tables[r.table].col_map.contains(comp) {
+        let dst_table = find_remove_table(ecs, r.table, comp).unwrap();
+        unsafe { move_id(ecs, id, r.table, r.row, dst_table) };
+    }
+    Ok(())
+}
+
+#[inline(always)]
+pub(crate) fn has(ecs: &Ecs, r: IdRecord, comp: ComponentId) -> bool {
+    ecs.tables[r.table].col_map.contains(comp)
+}
+
+pub(crate) unsafe fn get<T>(ecs: &Ecs, r: IdRecord, comp: ComponentId) -> Option<&T> {
+    let table = &ecs.tables[r.table];
+    let column = table.col_map.get(comp).map(|i| table.column(i))?;
+    Some(unsafe { column.data.row_ptr(r.row).cast().as_ref() })
+}
+
+pub(crate) unsafe fn get_mut<T>(ecs: &mut Ecs, r: IdRecord, comp: ComponentId) -> Option<&mut T> {
+    let table = &ecs.tables[r.table];
+    let column = table.col_map.get(comp).map(|i| table.column(i))?;
+    Some(unsafe { column.data.row_ptr(r.row).cast().as_mut() })
 }

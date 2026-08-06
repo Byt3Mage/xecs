@@ -1,10 +1,8 @@
 use std::{
-    alloc::{self, Layout, LayoutError},
+    alloc::{self, Layout},
     cmp::Ordering,
     ptr::NonNull,
 };
-
-use ahash::AHashMap;
 
 use crate::{
     component::{Signature, id::ComponentId},
@@ -16,13 +14,11 @@ use crate::{
 };
 
 /// [Id] must not require drop, i.e., must be a plain identifier
-const _: () = const { assert!(!std::mem::needs_drop::<Id>()) };
+const _: () = const { assert!(!std::mem::needs_drop::<Id>(), "Id must not require drop") };
 
 #[inline(always)]
-const fn ids_layout(cap: u32) -> Result<Layout, LayoutError> {
-    const SIZE: usize = std::mem::size_of::<Id>();
-    const ALIGN: usize = std::mem::align_of::<Id>();
-    Layout::from_size_align(cap as usize * SIZE, ALIGN)
+fn ids_layout(cap: u32) -> Layout {
+    Layout::array::<Id>(cap as usize).expect("capacity overflow")
 }
 
 pub(crate) struct Column {
@@ -60,10 +56,10 @@ impl TableData {
 
         if req > cap {
             unsafe {
-                let new = ids_layout(req).unwrap();
+                let new = ids_layout(req);
                 let ptr = match cap == 0 {
                     true => std::alloc::alloc(new),
-                    false => alloc::realloc(self.ids.as_ptr().cast(), ids_layout(cap).unwrap(), new.size()),
+                    false => alloc::realloc(self.ids.as_ptr().cast(), ids_layout(cap), new.size()),
                 };
 
                 self.ids = match NonNull::new(ptr) {
@@ -72,7 +68,7 @@ impl TableData {
                 };
 
                 for col in self.columns.iter_mut() {
-                    // SAFETY: required > capacity; old_cap is current capacity.
+                    // SAFETY: req > cap; old_cap is current capacity.
                     col.data.realloc(cap as usize, req as usize)
                 }
             }
@@ -105,12 +101,11 @@ impl TableData {
     /// out (e.g. table moves) must use [`swap_remove_row_no_drop`] instead.
     pub(crate) unsafe fn swap_remove_row(&mut self, row: u32) -> Option<Id> {
         debug_assert!(row < self.num_rows());
-        // Drop the outgoing row's data in every column.
-        for col in self.columns.iter() {
+        unsafe {
             // SAFETY: row is valid and initialized.
-            unsafe { col.data.drop_row(row) };
+            self.columns.iter().for_each(|c| c.data.drop_row(row));
+            self.swap_remove_row_no_drop(row)
         }
-        unsafe { self.swap_remove_row_no_drop(row) }
     }
 
     /// Like [`swap_remove_row`] but assumes the row's data has ALREADY been
@@ -130,7 +125,7 @@ impl TableData {
                 let swapped = src.read();
 
                 src.copy_to_nonoverlapping(dst, 1);
-                self.columns.iter().for_each(|col| col.data.copy_row(last, row));
+                self.columns.iter().for_each(|c| c.data.copy_row(last, row));
                 self.len -= 1;
                 Some(swapped)
             }
@@ -143,26 +138,52 @@ impl TableData {
 
 impl Drop for TableData {
     fn drop(&mut self) {
-        if self.cap == 0 {
+        if self.cap != 0 {
             return;
         }
 
+        let cap = self.cap;
+        let len = self.len;
         unsafe {
-            let layout = ids_layout(self.cap).unwrap();
-            alloc::dealloc(self.ids.as_ptr().cast(), layout);
-
-            for col in self.columns.iter_mut() {
-                col.data.destroy(self.len, self.cap)
-            }
+            alloc::dealloc(self.ids.as_ptr().cast(), ids_layout(cap));
+            self.columns.iter_mut().for_each(|c| c.data.drop(len, cap));
         }
+    }
+}
+
+pub(crate) struct ColumnMap {
+    values: Vec<usize>,
+}
+
+impl ColumnMap {
+    pub(crate) fn new() -> Self {
+        Self { values: vec![] }
+    }
+
+    pub(crate) fn insert(&mut self, id: ComponentId, value: usize) {
+        let idx = id.index();
+        if idx >= self.values.len() {
+            self.values.resize(idx + 1, usize::MAX);
+        }
+        self.values[idx] = value;
+    }
+
+    pub(crate) fn get(&self, id: ComponentId) -> Option<usize> {
+        self.values
+            .get(id.index())
+            .and_then(|&v| (v != usize::MAX).then_some(v))
+    }
+
+    pub(crate) fn contains(&self, id: ComponentId) -> bool {
+        self.values.get(id.index()).is_some_and(|&v| v != usize::MAX)
     }
 }
 
 pub struct Table {
     pub(crate) sig: Signature,
     pub(crate) data: TableData,
-    pub(crate) col_map: AHashMap<ComponentId, usize>,
-    pub(crate) graph_node: GraphNode,
+    pub(crate) col_map: ColumnMap,
+    pub(crate) node: GraphNode,
 }
 
 impl Table {
@@ -208,20 +229,20 @@ pub(crate) unsafe fn move_id(ecs: &mut Ecs, id: Id, src_table: TableId, src_row:
     let mut di = 0;
 
     while si < src.num_cols() && di < dst.num_cols() {
-        let src_col = src.column(si);
-        let dst_col = dst.column(di);
+        let Column { id: src_id, data: src_data } = src.column(si);
+        let Column { id: dst_id, data: dst_data } = dst.column(di);
 
-        match src_col.id.cmp(&dst_col.id) {
+        match src_id.cmp(dst_id) {
             Ordering::Equal => {
                 // SAFETY: same component id ⇒ same type; rows valid.
-                unsafe { src_col.data.move_row_to(src_row, &dst_col.data, dst_row) };
+                unsafe { src_data.move_row_to(src_row, dst_data, dst_row) };
                 si += 1;
                 di += 1;
             }
             Ordering::Less => {
                 // Component removed: drop the src value.
                 // SAFETY: src_row valid and initialized.
-                unsafe { src_col.data.drop_row(src_row) };
+                unsafe { src_data.drop_row(src_row) };
                 si += 1;
             }
             Ordering::Greater => {
@@ -231,19 +252,17 @@ pub(crate) unsafe fn move_id(ecs: &mut Ecs, id: Id, src_table: TableId, src_row:
         }
     }
 
-    // Remaining src columns are removed components: drop each.
-    for i in si..src.num_cols() {
-        // SAFETY: src_row valid and initialized.
-        unsafe { src.column(i).data.drop_row(src_row) };
-    }
+    // Remaining src columns are removed components, drop all.
+    // SAFETY: src_row valid and initialized.
+    (si..src.num_cols()).for_each(|i| unsafe { src.column(i).data.drop_row(src_row) });
 
-    // Src data at src_row is fully moved-out / dropped, so use the no-drop variant.
+    // Src data at src_row is fully moved-out or dropped, so use the no-drop variant.
     // SAFETY: src_row valid; its columns are all moved out or dropped above.
     if let Some(swapped) = unsafe { src.data.swap_remove_row_no_drop(src_row) } {
         ecs.ids.set_location(swapped, src_table, src_row);
     }
 
-    // Update the moved id's record to point to dst.
+    // Update the moved id's record to point to new table and row.
     ecs.ids.set_location(id, dst_table, dst_row);
     dst_row
 }

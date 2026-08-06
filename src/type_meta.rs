@@ -2,11 +2,7 @@ use std::{alloc::Layout, any::TypeId, ptr::NonNull};
 
 #[inline]
 const fn dtor<T>() -> Option<unsafe fn(ptr: NonNull<u8>)> {
-    if std::mem::needs_drop::<T>() {
-        Some(|ptr: NonNull<u8>| unsafe { ptr.cast::<T>().drop_in_place() })
-    } else {
-        None
-    }
+    if std::mem::needs_drop::<T>() { Some(|p| unsafe { p.cast::<T>().drop_in_place() }) } else { None }
 }
 
 #[derive(Debug, Clone, Copy)]

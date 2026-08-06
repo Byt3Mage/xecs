@@ -2,16 +2,15 @@ use std::sync::atomic::AtomicU32;
 
 use crate::{
     component::{
-        self, ComponentConfig, Path,
+        self, ComponentConfig, ComponentInfo,
         id::{ComponentId, StaticId, TypedStaticId},
         registry::{ComponentRegistry, Unregistered},
     },
     error::{EcsError, EcsResult},
     id::{
         Id,
-        allocator::{IdAllocator, IdRecord, NotAlive},
+        allocator::{IdAllocator, IdRecord},
     },
-    query::logical::Relation,
     relation::{RelationId, RelationRegistry},
     storage::table::{self},
     table_index::TableIndex,
@@ -59,9 +58,8 @@ impl Ecs {
         self.components.find(id)
     }
 
-    #[inline(always)]
-    pub fn relation_id(&self) -> Result<Relation, Unregistered> {
-        todo!()
+    pub fn component<T: HasMeta>(&self, id: &'static StaticId<T>) -> Result<&ComponentInfo, Unregistered> {
+        self.components.find(id).map(|id| self.components.get(id))
     }
 
     #[inline(always)]
@@ -78,7 +76,7 @@ impl Ecs {
     ///
     /// Useful for creating "newtype" runtime components.
     #[inline(always)]
-    pub fn new_component<T: Into<Path>>(&mut self, config: ComponentConfig<T>) -> ComponentId {
+    pub fn new_component(&mut self, config: ComponentConfig) -> ComponentId {
         self.components.new_component(config)
     }
 

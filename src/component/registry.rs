@@ -1,5 +1,4 @@
 use std::{
-    collections::hash_map::Entry,
     ops::{Index, IndexMut},
     sync::Arc,
 };
@@ -8,7 +7,7 @@ use ahash::AHashMap;
 
 use crate::{
     StaticId, UntypedStaticId,
-    component::{ComponentConfig, Path, id},
+    component::{ComponentConfig, id},
     type_meta::HasMeta,
 };
 
@@ -44,27 +43,22 @@ impl ComponentRegistry {
         match self.statics[slot] {
             Some(id) => id,
             None => {
-                let config = ComponentConfig::new().name(component.path()).meta(*component.meta());
-                let id = self.new_component(config);
+                let id = self.new_component(ComponentConfig {
+                    path: Some(component.path().into()),
+                    meta: *component.meta(),
+                });
                 self.statics[slot] = Some(id);
                 id
             }
         }
     }
 
-    pub fn new_component<T: Into<Path>>(&mut self, config: ComponentConfig<T>) -> ComponentId {
+    pub fn new_component(&mut self, ComponentConfig { path, meta }: ComponentConfig) -> ComponentId {
+        debug_assert!(self.infos.len() <= (u32::MAX as usize), "too many components");
         let id = ComponentId::from_raw(self.infos.len() as u32);
-        let name = config.name.map(Into::into);
-        let meta = config.meta;
-
-        if let Some(name) = name.clone() {
-            match self.names.entry(name) {
-                Entry::Occupied(e) => panic!("duplicate component name: {}", e.get()),
-                Entry::Vacant(e) => e.insert(id),
-            };
-        }
-
-        self.infos.push(ComponentInfo { name, meta, tables: vec![] });
+        let path = path.map(Into::into);
+        path.clone().map(|p| self.names.entry(p).or_insert(id));
+        self.infos.push(ComponentInfo { path, meta, tables: vec![] });
         id
     }
 

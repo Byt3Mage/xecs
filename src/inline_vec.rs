@@ -124,12 +124,12 @@ impl<T, const N: usize> InlineVec<T, N> {
 
     #[inline(always)]
     pub fn get(&self, i: usize) -> Option<&T> {
-        if i < self.len { Some(unsafe { self.get_unchecked(i) }) } else { None }
+        (i < self.len).then(|| unsafe { self.get_unchecked(i) })
     }
 
     #[inline(always)]
     pub fn get_mut(&mut self, i: usize) -> Option<&mut T> {
-        if i < self.len { Some(unsafe { self.get_unchecked_mut(i) }) } else { None }
+        (i < self.len).then(|| unsafe { self.get_unchecked_mut(i) })
     }
 
     #[inline(always)]
@@ -145,14 +145,7 @@ impl<T, const N: usize> InlineVec<T, N> {
 
     #[inline(always)]
     pub fn pop(&mut self) -> Option<T> {
-        if self.len == 0 {
-            None
-        } else {
-            unsafe {
-                self.len -= 1;
-                Some(ptr::read(self.as_ptr().add(self.len)))
-            }
-        }
+        (self.len != 0).then(|| unsafe { self.pop_unchecked() })
     }
 
     /// # Safety
@@ -261,8 +254,7 @@ impl<T, const N: usize> InlineVec<T, N> {
                 p
             };
 
-            let Some(ptr) = NonNull::new(new_ptr as *mut T) else { alloc::handle_alloc_error(new_layout) };
-
+            let ptr = NonNull::new(new_ptr as *mut T).unwrap_or_else(|| alloc::handle_alloc_error(new_layout));
             self.data.heap = ptr;
             self.cap = new_cap;
         }

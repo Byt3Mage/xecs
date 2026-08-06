@@ -69,11 +69,11 @@ impl Block {
     /// - `self` and `dst` store the same type (equal `meta`).
     /// - `src_row` valid in `self`, `dst_row` valid in `dst`.
     #[inline(always)]
-    pub(crate) unsafe fn move_row_to(&self, src_row: u32, dst: &Block, dst_row: u32) {
-        debug_assert_eq!(self.stride(), dst.stride());
+    pub(crate) unsafe fn move_row_to(&self, src_row: u32, dest: &Block, dst_row: u32) {
+        debug_assert_eq!(self.stride(), dest.stride());
         unsafe {
             let src = self.row_ptr(src_row);
-            let dst = dst.row_ptr(dst_row);
+            let dst = dest.row_ptr(dst_row);
             dst.copy_from_nonoverlapping(src, self.stride());
         }
     }
@@ -119,7 +119,7 @@ impl Block {
     /// # Safety
     /// - `len` must be the actual number of initialized elements.
     /// - `cap` must be the current allocation capacity.
-    pub(crate) unsafe fn destroy(&mut self, len: u32, cap: u32) {
+    pub(crate) unsafe fn drop(&mut self, len: u32, cap: u32) {
         unsafe {
             if let Some(drop) = self.drop {
                 // self.drop is set to None for unwind safety.

@@ -9,7 +9,7 @@ use ahash::AHashMap;
 use crate::{
     component::Signature,
     graph::GraphNode,
-    storage::table::{Table, TableData},
+    storage::table::{ColumnMap, Table, TableData},
 };
 
 /// Stable, non-recycled handle into [TableIndex].
@@ -40,10 +40,10 @@ impl TableIndex {
         Self {
             root: TableId(0),
             tables: vec![Table {
-                sig: Signature::from(vec![]),
+                sig: Signature::from([]),
                 data: TableData::new(Box::new([])),
-                col_map: AHashMap::new(),
-                graph_node: GraphNode::new(),
+                col_map: ColumnMap::new(),
+                node: GraphNode::new(),
             }],
             table_ids: AHashMap::new(),
         }
@@ -105,8 +105,8 @@ impl TableIndex {
         unsafe { [&mut *(ptr.add(a)), &mut *(ptr.add(b))] }
     }
 
-    pub(crate) fn iter(&self) -> impl Iterator<Item = &Table> {
-        self.tables.iter()
+    pub(crate) fn ids(&self) -> impl Iterator<Item = TableId> {
+        (0..self.tables.len() as u32).map(TableId)
     }
 }
 

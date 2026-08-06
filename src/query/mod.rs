@@ -5,8 +5,9 @@ use crate::{
     query::{
         access::{Follows, Select},
         context::{Binds, QueryCtx},
-        logical::{LogicalPlan, ScopeId, validate_scope},
-        physical::{Fan, MatchedTable, PhysicalPlan, PhysicalScope},
+        logical::{FollowId, LogicalPlan, ScopeId, validate_access},
+        lowering::lower_plan,
+        physical::{Fan, PhysicalPlan, PhysicalScope},
     },
 };
 
@@ -14,6 +15,7 @@ pub(crate) mod access;
 pub(crate) mod context;
 pub(crate) mod error;
 pub(crate) mod logical;
+pub(crate) mod lowering;
 pub(crate) mod physical;
 
 #[derive(Debug, Clone)]
@@ -24,15 +26,14 @@ pub struct Query {
 
 impl Query {
     pub fn new(ecs: &Ecs, logical: LogicalPlan) -> Self {
-        let physical = logical.lower(ecs);
-        Self { logical, physical }
+        Self { physical: lower_plan(ecs, &logical), logical }
     }
 
     /// Re-evaluate the physical plan if out of sync with current ecs state.
     /// `force` triggers re-evaluation regardless of sync status.
     pub fn rematch(&mut self, ecs: &Ecs, force: bool) {
         if force || self.physical.resolved_at != ecs.generation() {
-            self.physical = self.logical.lower(ecs);
+            self.physical = lower_plan(ecs, &self.logical);
         }
     }
 
@@ -49,156 +50,107 @@ impl Query {
     /// Converts [Query] to a typed [TQuery] with access validation performed.
     #[inline]
     pub fn typed<S: Select, F: Follows>(self, ecs: &Ecs) -> Result<TQuery<S, F>, ValidationError> {
-        validate_scope::<S, F>(ecs, &self.logical, 0)?;
+        validate_access::<S>(ecs, &self.logical)?;
         Ok(TQuery { query: self, marker: PhantomData })
-    }
-
-    /// Clones [Query] to a typed [TQuery] with access validation performed.
-    #[inline(always)]
-    pub fn clone_typed<C: Select, F: Follows>(self, ecs: &Ecs) -> Result<TQuery<C, F>, ValidationError> {
-        self.clone().typed(ecs)
     }
 }
 
-pub struct TQuery<S: Select, F: Follows = ()> {
+pub struct TQuery<S: Select, F: Follows> {
     query: Query,
     marker: PhantomData<(S, F)>,
 }
 
 impl<S: Select, F: Follows> TQuery<S, F> {
-    #[inline(always)]
-    pub fn new(ecs: &Ecs, query: Query) -> Result<Self, ValidationError> {
-        query.typed(ecs)
-    }
-
     pub fn each(&mut self, ecs: &mut Ecs, params: &[Id], mut f: impl FnMut(Id, S::Row<'_>, F::Get<'_>)) {
-        let driver = &self.query.physical.scopes[0];
         let ctx = self.query.make_ctx(ecs, params);
+        let plan = &self.query.physical;
+        let scope = &self.query.physical.scopes[0];
 
-        for mt in &driver.matched_tables {
-            let table = &ctx.ecs.tables[mt.id];
-            let num_rows = table.num_rows();
-
-            if num_rows == 0 {
-                continue;
-            }
-
-            let ids = table.ids();
-            let columns = S::columns(table, &mt.columns);
-
-            for row in 0..num_rows {
-                // SAFETY: `row` is in bounds for this table
-                unsafe {
-                    let id = ids.add(row as usize).read();
-                    if driver.passes_relation_checks(id, &ctx) {
-                        f(id, S::row(columns, row), F::get(&ctx, 0, id));
-                    }
-                }
-            }
-        }
-    }
-}
-
-impl<S: Select> TQuery<S, ()> {
-    pub fn each_row(&mut self, ecs: &mut Ecs, params: &[Id], mut f: impl FnMut(Id, S::Row<'_>)) {
-        let driver = &self.query.physical.scopes[0];
-        let ctx = self.query.make_ctx(ecs, params);
-
-        for mt in &driver.matched_tables {
+        for mt in plan.tables.iter() {
             let table = &ecs.tables[mt.id];
-            let num_rows = table.num_rows();
+            let rows = table.num_rows();
 
-            if num_rows == 0 {
+            if rows == 0 {
                 continue;
             }
 
             let ids = table.ids();
             let columns = S::columns(table, &mt.columns);
 
-            for row in 0..num_rows {
+            'table: for row in 0..rows {
                 // SAFETY: `row` is in bounds for this table
                 unsafe {
                     let id = ids.add(row as usize).read();
-                    if driver.passes_relation_checks(id, &ctx) {
-                        f(id, S::row(columns, row));
+
+                    if !scope.check_relations(id, &ctx) {
+                        continue 'table;
                     }
+
+                    f(id, S::row(columns, row), F::get(&ctx, 0, id, &scope.follows));
                 }
             }
         }
     }
 }
 
-pub struct Follow<'w, S: Select = (), F: Follows = ()> {
+pub struct Follow<'w, F: Follows> {
     ctx: &'w QueryCtx<'w>,
-    index: usize,
     from: Id,
-    marker: PhantomData<(S, F)>,
+    index: FollowId,
+    marker: PhantomData<F>,
 }
 
-impl<'w, S: Select, F: Follows> Follow<'w, S, F> {
+impl<'w, F: Follows> Follow<'w, F> {
     #[inline(always)]
-    pub(crate) fn new(ctx: &'w QueryCtx<'w>, index: usize, from: Id) -> Self {
-        Self { ctx, index, from, marker: PhantomData }
+    pub(crate) fn new(ctx: &'w QueryCtx<'w>, from: Id, index: usize) -> Self {
+        Self { ctx, from, index, marker: PhantomData }
     }
 
     #[inline(always)]
-    pub fn iter(&mut self) -> FollowIter<'w, S, F> {
-        let join = &self.ctx.plan.follows[self.index];
+    pub fn iter(&mut self) -> FollowIter<'w, F> {
+        let follow = &self.ctx.plan.follows[self.index];
         FollowIter {
             ctx: self.ctx,
-            fan: join.fan(self.from, self.ctx),
-            scope: &self.ctx.plan.scopes[join.scope],
-            scope_id: join.scope,
+            fan: follow.fan(self.from, self.ctx),
+            scope: &self.ctx.plan.scopes[follow.scope],
+            scope_id: follow.scope,
             marker: PhantomData,
         }
     }
 
     /// Iterate all follow targets to completion.
     #[inline(always)]
-    pub fn each(&mut self, mut func: impl FnMut(Id, S::Row<'w>, F::Get<'w>)) {
-        self.iter().for_each(|(i, r, f)| func(i, r, f));
+    pub fn each(&mut self, func: impl FnMut((Id, F::Get<'_>))) {
+        self.iter().for_each(func);
     }
 
     /// The zero-or-one fast path.
     #[inline(always)]
-    pub fn get(&mut self) -> Option<(Id, S::Row<'w>, F::Get<'w>)> {
+    pub fn get(&mut self) -> Option<(Id, F::Get<'_>)> {
         self.iter().next()
     }
 }
 
-pub struct FollowIter<'w, S: Select, F: Follows> {
+pub struct FollowIter<'w, F: Follows> {
     fan: Fan<'w>,
     ctx: &'w QueryCtx<'w>,
     scope: &'w PhysicalScope,
     scope_id: ScopeId,
-    marker: PhantomData<(S, F)>,
+    marker: PhantomData<F>,
 }
 
-impl<'w, S: Select, F: Follows> Iterator for FollowIter<'w, S, F> {
-    type Item = (Id, S::Row<'w>, F::Get<'w>);
+impl<'w, F: Follows> Iterator for FollowIter<'w, F> {
+    type Item = (Id, F::Get<'w>);
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.fan
-            .find_map(|id| match_follow(self.ctx, self.scope, id))
-            .map(|(id, row, mt)| {
-                // SAFETY: row is from a live record; element types were
-                // checked against the plan at dispatch; aliasing was proven
-                // at lowering or guarded in bind().
-                let cols = S::columns(&self.ctx.ecs.tables[mt.id], &mt.columns);
-                (id, unsafe { S::row(cols, row) }, F::get(self.ctx, self.scope_id, id))
-            })
+        let ctx = self.ctx;
+        let scope = self.scope;
+        let scope_id = self.scope_id;
+        self.fan.find_map(
+            |id| match scope.check_relations(id, ctx) && scope.passes_filter(ctx, id) {
+                true => Some((id, F::get(ctx, scope_id, id, &scope.follows))),
+                false => None,
+            },
+        )
     }
-}
-
-#[inline]
-pub fn match_follow<'p>(ctx: &QueryCtx<'_>, scope: &'p PhysicalScope, id: Id) -> Option<(Id, u32, &'p MatchedTable)> {
-    let record = ctx.ecs.ids.get(id).expect("edge to dead id: purge broken");
-    let matched = scope.resolve(record.table)?;
-
-    // Run relationship and guard checks
-    if !scope.passes_relation_checks(id, ctx) || !scope.passes_scope_guards(id, ctx) {
-        return None;
-    }
-
-    Some((id, record.row, matched))
 }

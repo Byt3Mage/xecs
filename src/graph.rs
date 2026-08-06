@@ -5,7 +5,7 @@ use crate::{
     ecs::Ecs,
     storage::{
         block::Block,
-        table::{Column, Table, TableData},
+        table::{Column, ColumnMap, Table, TableData},
     },
     table_index::TableId,
 };
@@ -21,23 +21,23 @@ impl GraphNode {
     }
 }
 
-fn new_table(ecs: &mut Ecs, ids: Signature) -> TableId {
-    ecs.tables.add_with_id(|table_id| {
-        let mut col_map = AHashMap::new();
-        let mut cols = Vec::new();
+fn new_table(ecs: &mut Ecs, sig: Signature) -> TableId {
+    ecs.tables.add_with_id(|tid| {
+        let mut col_map = ColumnMap::new();
+        let mut columns = Vec::with_capacity(sig.len());
 
-        for &id in ids.iter() {
+        for (i, &id) in sig.iter().enumerate() {
             let ci = &mut ecs.components[id];
-            col_map.insert(id, cols.len());
-            ci.insert_table(table_id);
-            cols.push(Column { id, data: Block::new(ci.meta.layout, ci.meta.dtor) });
+            ci.insert_table(tid);
+            col_map.insert(id, i);
+            columns.push(Column { id, data: Block::new(ci.meta.layout, ci.meta.dtor) })
         }
 
         Table {
-            sig: ids,
-            data: TableData::new(cols.into()),
+            sig,
             col_map,
-            graph_node: GraphNode::new(),
+            data: TableData::new(columns.into()),
+            node: GraphNode::new(),
         }
     })
 }
@@ -47,24 +47,16 @@ fn new_table(ecs: &mut Ecs, ids: Signature) -> TableId {
 /// Returns `None` if the component is already present in the table.
 pub fn find_add_table(ecs: &mut Ecs, from: TableId, with: ComponentId) -> Option<TableId> {
     let from_table = &ecs.tables[from];
-
-    if let Some(&to) = from_table.graph_node.add.get(&with) {
-        return Some(to);
+    match from_table.node.add.get(&with) {
+        Some(&to) => Some(to),
+        None => {
+            let ids = from_table.sig.try_extend(with)?;
+            let to = ecs.tables.get_id(&ids).unwrap_or_else(|| new_table(ecs, ids));
+            ecs.tables[from].node.add.insert(with, to); // Insert add edge From -> To
+            ecs.tables[to].node.remove.insert(with, from); // Insert remove edge To -> From
+            Some(to)
+        }
     }
-
-    let ids = from_table.sig.try_extend(with)?;
-
-    let to = match ecs.tables.get_id(&ids) {
-        Some(id) => id,
-        None => new_table(ecs, ids),
-    };
-
-    // Insert add edge From -> To
-    ecs.tables[from].graph_node.add.insert(with, to);
-    // Insert remove edge To -> From
-    ecs.tables[to].graph_node.remove.insert(with, from);
-
-    Some(to)
 }
 
 /// Traverse the table graph to find the destination table for a removed component.
@@ -72,22 +64,14 @@ pub fn find_add_table(ecs: &mut Ecs, from: TableId, with: ComponentId) -> Option
 /// Returns `None` if the component is not present in the table.
 pub fn find_remove_table(ecs: &mut Ecs, from: TableId, without: ComponentId) -> Option<TableId> {
     let from_table = &ecs.tables[from];
-
-    if let Some(&to) = from_table.graph_node.remove.get(&without) {
-        return Some(to);
+    match from_table.node.remove.get(&without) {
+        Some(&to) => Some(to),
+        None => {
+            let ids = from_table.sig.try_shrink(without)?;
+            let to = ecs.tables.get_id(&ids).unwrap_or_else(|| new_table(ecs, ids));
+            ecs.tables[from].node.remove.insert(without, to); // Insert remove edge From -> To
+            ecs.tables[to].node.add.insert(without, from); // Insert add edge To -> From
+            Some(to)
+        }
     }
-
-    let ids = from_table.sig.try_shrink(without)?;
-
-    let to = match ecs.tables.get_id(&ids) {
-        Some(id) => id,
-        None => new_table(ecs, ids),
-    };
-
-    // Insert remove edge From -> To
-    ecs.tables[from].graph_node.remove.insert(without, to);
-    // Insert add edge To -> From
-    ecs.tables[to].graph_node.add.insert(without, from);
-
-    Some(to)
 }

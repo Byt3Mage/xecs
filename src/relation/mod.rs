@@ -4,7 +4,7 @@ use ahash::AHashMap;
 
 use crate::{
     TypeMeta,
-    relation::index::{RelationIndex, RelationProperties, SymmetryError},
+    relation::index::{RelationIndex, Topology},
 };
 
 pub mod index;
@@ -22,7 +22,7 @@ impl std::fmt::Display for RelationId {
 pub struct RelationInfo {
     name: Option<Rc<str>>,
     index: RelationIndex,
-    edge_meta: Option<Rc<TypeMeta>>,
+    meta: TypeMeta,
 }
 
 pub struct RelationRegistry {
@@ -35,29 +35,23 @@ impl RelationRegistry {
         Self { infos: vec![], names: AHashMap::new() }
     }
 
-    pub fn register(
-        &mut self,
-        name: Option<Rc<str>>,
-        props: RelationProperties,
-        edge_meta: Option<Rc<TypeMeta>>,
-    ) -> Result<RelationId, SymmetryError> {
+    pub fn register(&mut self, name: Option<Rc<str>>, topo: Topology, meta: TypeMeta) -> RelationId {
         let id = RelationId(self.infos.len() as u32);
 
-        let info = RelationInfo {
-            name: name.clone(),
-            index: RelationIndex::select(props)?,
-            edge_meta,
-        };
-
-        if let Some(name) = name {
+        if let Some(name) = name.clone() {
             match self.names.entry(name) {
                 Entry::Vacant(e) => e.insert(id),
                 Entry::Occupied(e) => panic!("duplicate relation name `{}`", e.key()),
             };
         }
 
-        self.infos.push(info);
-        Ok(id)
+        self.infos.push(RelationInfo {
+            name: name,
+            index: RelationIndex::select(topo),
+            meta,
+        });
+
+        id
     }
 
     pub fn get(&self, id: RelationId) -> &RelationInfo {

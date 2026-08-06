@@ -2,7 +2,7 @@ use crate::{Id, inline_vec::InlineVec};
 
 type Ids = InlineVec<Id, 4>;
 
-pub(crate) const SPARSE_NONE: u32 = u32::MAX;
+const NONE: u32 = u32::MAX;
 
 #[inline(always)]
 fn ix(id: Id) -> usize {
@@ -12,54 +12,30 @@ fn ix(id: Id) -> usize {
 /// How edges relate their two ends.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Topology {
-    /// Directed, forward-only. Reversed queries are plan-time errors;
-    /// purge scans the forward shape.
-    Directed,
     /// Directed with a derived reverse index: both directions queryable.
-    DirectedIndexed,
-    /// Undirected: one edge, endpoints equivalent, stored canonically
-    /// (min, max). The secondary index is the mirror half of traversal.
-    Symmetric,
+    Directed {
+        /// A source appears at most once in this relationship's edges.
+        unique_source: bool,
+        /// A target appears at most once in this relationship's edges.
+        unique_target: bool,
+        /// Rejects cyclical relationships.
+        acyclic: bool,
+        /// Creates a reverse index for (target, source) lookups.
+        reverse: bool,
+    },
+    /// Endpoints are equivalent, which means:
+    /// - One edge, stored canonically (min, max),
+    /// reachable from both ends, so the secondary is the mirror half of
+    /// traversal.
+    /// - Acyclicity is unrepresentable: {a, b} is a 2-cycle.
+    /// - Uniqueness is one property because the ends are.
+    Symmetric { unique: bool },
 }
 
 impl Topology {
     #[inline]
     pub fn is_symmetric(&self) -> bool {
-        matches!(self, Self::Symmetric)
-    }
-}
-
-/// Declaration-time validation. Invalid combinations are rejected here;
-/// storage selection below is total over what passes.
-#[derive(thiserror::Error, Debug)]
-pub enum SymmetryError {
-    #[error("symmetric relation cannot be acyclic: any edge {{a, b}} is a 2-cycle")]
-    IsAcyclic,
-    #[error("symmetric relation requires unique_source == unique_target")]
-    UniquenessMismatch,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct RelationProperties {
-    /// A source appears at most once in this relationship's edges.
-    pub unique_source: bool,
-    /// A target appears at most once in this relationship's edges.
-    pub unique_target: bool,
-    pub topology: Topology,
-    pub acyclic: bool,
-}
-
-impl RelationProperties {
-    pub fn validate(&self) -> Result<(), SymmetryError> {
-        if self.topology == Topology::Symmetric {
-            if self.unique_source != self.unique_target {
-                return Err(SymmetryError::UniquenessMismatch);
-            }
-            if self.acyclic {
-                return Err(SymmetryError::IsAcyclic);
-            }
-        }
-        Ok(())
+        matches!(self, Self::Symmetric { .. })
     }
 }
 
@@ -77,15 +53,13 @@ impl ToOne {
     }
 
     fn get_slot(&self, id: Id) -> Option<usize> {
-        self.sparse
-            .get(ix(id))
-            .and_then(|&s| (s != SPARSE_NONE).then_some(s as usize))
+        self.sparse.get(ix(id)).and_then(|&s| (s != NONE).then_some(s as usize))
     }
 
     fn set_slot(&mut self, id: Id, slot: u32) {
         let idx = ix(id);
         if idx >= self.sparse.len() {
-            self.sparse.resize(idx + 1, SPARSE_NONE);
+            self.sparse.resize(idx + 1, NONE);
         }
 
         self.sparse[idx] = slot;
@@ -98,7 +72,7 @@ impl ToOne {
 
     #[inline(always)]
     pub fn contains(&self, source: Id, target: Id) -> bool {
-        self.get(source) == Some(target)
+        self.get(source).is_some_and(|id| id == target)
     }
 
     /// Insert or retarget. Returns the previous target on retarget —
@@ -119,7 +93,7 @@ impl ToOne {
     /// Remove source's edge. Returns its target if edge existed.
     pub(crate) fn remove(&mut self, source: Id) -> Option<Id> {
         let slot = self.get_slot(source)? as usize;
-        self.sparse[ix(source)] = SPARSE_NONE;
+        self.sparse[ix(source)] = NONE;
         let target = self.target.swap_remove(slot);
         self.source.swap_remove(slot);
         if slot < self.source.len() {
@@ -143,17 +117,14 @@ impl ToMany {
     }
 
     fn get_slot(&self, id: Id) -> Option<usize> {
-        self.sparse
-            .get(ix(id))
-            .and_then(|&s| (s != SPARSE_NONE).then_some(s as usize))
+        self.sparse.get(ix(id)).and_then(|&s| (s != NONE).then_some(s as usize))
     }
 
     fn set_slot(&mut self, id: Id, slot: u32) {
         let idx = ix(id);
         if idx >= self.sparse.len() {
-            self.sparse.resize(idx + 1, SPARSE_NONE);
+            self.sparse.resize(idx + 1, NONE);
         }
-
         self.sparse[idx] = slot;
     }
 
@@ -199,7 +170,7 @@ impl ToMany {
         list.swap_remove(at);
 
         if list.is_empty() {
-            self.sparse[ix(source)] = SPARSE_NONE;
+            self.sparse[ix(source)] = NONE;
             self.source.swap_remove(slot);
             self.targets.swap_remove(slot);
             if slot < self.source.len() {
@@ -213,7 +184,7 @@ impl ToMany {
     pub(crate) fn remove_all(&mut self, source: Id) -> Ids {
         let Some(slot) = self.get_slot(source) else { return Ids::new() };
         let slot = slot as usize;
-        self.sparse[ix(source)] = SPARSE_NONE;
+        self.sparse[ix(source)] = NONE;
         self.source.swap_remove(slot);
         let list = self.targets.swap_remove(slot);
         if slot < self.source.len() {
@@ -290,35 +261,35 @@ impl Index {
     }
 }
 
-#[derive(Default)]
-pub(crate) struct TreeExtras {
-    depth: Vec<u16>, // per dense slot
-    topo: Vec<Id>,   // parents-before-children, lazy
-    topo_dirty: bool,
-}
+use Topology as Topo;
 
 pub(crate) struct RelationIndex {
-    props: RelationProperties,
+    topology: Topology,
     primary: Index,
     secondary: Option<Index>,
+    scratch: CycleScratch,
 }
 
 impl RelationIndex {
-    pub(crate) fn select(props: RelationProperties) -> Result<Self, SymmetryError> {
-        props.validate()?;
-
-        let primary = Index::new(props.unique_source);
-        let secondary = match props.topology {
-            Topology::Directed => None,
-            Topology::DirectedIndexed | Topology::Symmetric => Some(Index::new(props.unique_target)),
+    pub(crate) fn select(topology: Topology) -> Self {
+        let (primary, secondary) = match topology {
+            Topo::Directed { reverse, unique_source, unique_target, .. } => {
+                (Index::new(unique_source), reverse.then(|| Index::new(unique_target)))
+            }
+            Topo::Symmetric { unique } => (Index::new(unique), Some(Index::new(unique))),
         };
 
-        Ok(Self { props, primary, secondary })
+        Self {
+            topology,
+            primary,
+            secondary,
+            scratch: CycleScratch::default(),
+        }
     }
 
     #[inline(always)]
-    pub fn props(&self) -> RelationProperties {
-        self.props
+    pub fn topology(&self) -> Topology {
+        self.topology
     }
 
     #[inline(always)]
@@ -330,7 +301,7 @@ impl RelationIndex {
     /// (source, target) is (min, max) by index. Directed: identity.
     #[inline(always)]
     fn canon(&self, a: Id, b: Id) -> (Id, Id) {
-        if self.props.topology == Topology::Symmetric && ix(b) < ix(a) { (b, a) } else { (a, b) }
+        if matches!( self.topology, Topo::Symmetric { .. } if ix(b) < ix(a)) { (b, a) } else { (a, b) }
     }
 
     /// Outgoing targets of `id`. Symmetric: canonical half of id's
@@ -352,17 +323,17 @@ impl RelationIndex {
 
     #[inline]
     pub(crate) fn has_outgoing(&self, source: Id) -> bool {
-        match self.props.topology {
-            Topology::Symmetric => self.has_edges(source),
-            _ => !self.primary.is_empty(source),
+        match self.topology {
+            Topo::Directed { .. } => !self.primary.is_empty(source),
+            Topo::Symmetric { .. } => self.has_edges(source),
         }
     }
 
     #[inline(always)]
     pub(crate) fn has_incoming(&self, e: Id) -> bool {
-        match self.props.topology {
-            Topology::Symmetric => self.has_edges(e),
-            _ => !self
+        match self.topology {
+            Topo::Symmetric { .. } => self.has_edges(e),
+            Topo::Directed { .. } => !self
                 .secondary
                 .as_ref()
                 .expect("incoming probe without secondary index: lowering bug")
@@ -389,25 +360,21 @@ impl RelationIndex {
     pub(crate) fn relate(&mut self, source: Id, target: Id) {
         let (src, tgt) = self.canon(source, target);
 
-        if self.props.topology == Topology::Symmetric {
-            assert!(src != tgt, "self-edge on symmetric relation");
-        }
-
-        if self.props.acyclic {
-            if let Index::One(chain) = &self.primary {
-                let mut cur = tgt;
-                loop {
-                    assert!(cur != src, "cycle: relating {src} -> {tgt} closes a loop");
-                    match chain.get(cur) {
-                        Some(next) => cur = next,
-                        None => break,
-                    }
+        match self.topology {
+            Topo::Symmetric { .. } => assert!(src != tgt, "self-edge on symmetric relation"),
+            Topo::Directed { acyclic, .. } => {
+                if acyclic {
+                    let cycle = match &self.primary {
+                        Index::One(one) => Self::chain_reaches(one, tgt, src),
+                        Index::Many(many) => Self::dfs_reaches(many, &mut self.scratch, tgt, src),
+                    };
+                    assert!(!cycle, "cycle: relating {src} -> {tgt} closes a loop");
                 }
             }
         }
 
         // symmetric exclusive: displace old pairings
-        if self.props.topology == Topology::Symmetric && self.props.unique_source {
+        if matches!(self.topology, Topo::Symmetric { unique: true }) {
             if self.contains(src, tgt) {
                 return;
             }
@@ -429,12 +396,6 @@ impl RelationIndex {
                         sec.add(tgt, src);
                     }
                 }
-
-                // unique_target on a to-one primary: displace tgt's old
-                // source (if different) via the secondary.
-                if self.props.unique_target {
-                    self.displace_incoming(tgt, src);
-                }
             }
             // To-many: insert() dedups per-pair internally.
             Index::Many(p) => {
@@ -444,11 +405,56 @@ impl RelationIndex {
                 if let Some(sec) = &mut self.secondary {
                     sec.add(tgt, src);
                 }
-                if self.props.unique_target {
-                    self.displace_incoming(tgt, src);
-                }
             }
         }
+
+        match self.topology {
+            Topo::Symmetric { unique: true } | Topo::Directed { unique_target: true, .. } => {
+                self.displace_incoming(tgt, src)
+            }
+            _ => {}
+        }
+    }
+
+    /// Chain walk for `unique_source` primaries: one successor per node,
+    /// so the path is linear and cannot revisit — a repeat would already
+    /// be a cycle, which the invariant forbids.
+    ///
+    /// O(depth). No scratch.
+    fn chain_reaches(chain: &ToOne, from: Id, goal: Id) -> bool {
+        let mut cur = from;
+        loop {
+            if cur == goal {
+                return true;
+            }
+            match chain.get(cur) {
+                Some(next) => cur = next,
+                None => return false,
+            }
+        }
+    }
+
+    /// DFS for to-many primaries. O(V + E) over the subgraph reachable
+    /// from `from` — the descendant set, not the whole relation.
+    ///
+    /// `seen` is required: a DAG can reach the same node by several paths,
+    /// and without it a diamond re-traverses exponentially.
+    fn dfs_reaches(primary: &ToMany, scratch: &mut CycleScratch, from: Id, goal: Id) -> bool {
+        let CycleScratch { stack, seen } = scratch;
+        stack.clear();
+        seen.begin();
+        stack.push(from);
+
+        while let Some(cur) = stack.pop() {
+            if cur == goal {
+                return true;
+            }
+            if !seen.visit(cur) {
+                continue;
+            }
+            stack.extend_from_slice(primary.get(cur));
+        }
+        false
     }
 
     /// Remove tgt's incoming edge from any source other than `keep`.
@@ -546,4 +552,48 @@ impl RelationIndex {
 pub(crate) enum Edges<'a> {
     One(Option<Id>),
     Many(&'a [Id]),
+}
+
+/// Generation-stamped membership. Reset is a counter bump, not a clear,
+/// so repeated DFS from a hot node costs nothing between runs.
+#[derive(Default)]
+struct VisitSet {
+    stamp: Vec<u32>,
+    version: u32,
+}
+
+impl VisitSet {
+    /// Begin a traversal. Wrapping the counter would alias stale stamps
+    /// with the new generation, so zero the array on the (astronomically
+    /// rare) wrap and start over.
+    fn begin(&mut self) {
+        self.version = match self.version.checked_add(1) {
+            Some(g) => g,
+            None => {
+                self.stamp.fill(0);
+                1
+            }
+        };
+    }
+
+    /// Mark `id` visited. Returns true if it was not already.
+    #[inline]
+    fn visit(&mut self, id: Id) -> bool {
+        let i = id.index() as usize;
+        if i >= self.stamp.len() {
+            self.stamp.resize(i + 1, 0);
+        }
+        let slot = &mut self.stamp[i];
+        let new = *slot != self.version;
+        *slot = self.version;
+        new
+    }
+}
+
+/// Scratch shared by cycle checks. Lives on the index so `relate` never
+/// allocates.
+#[derive(Default)]
+struct CycleScratch {
+    stack: Vec<Id>,
+    seen: VisitSet,
 }

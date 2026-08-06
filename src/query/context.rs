@@ -28,7 +28,7 @@ impl Binds {
     }
 
     #[inline(always)]
-    pub(crate) fn get(&self, scope: ScopeId) -> Id {
-        self.0[scope].get()
+    pub(crate) fn get(&self, depth: u8) -> Id {
+        self.0[depth as usize].get()
     }
 }

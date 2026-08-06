@@ -12,3 +12,4 @@ xecs_macros = { path = "xecs_macros" }
 const-assert = { git = "https://github.com/aquarius2019/const-assert.git" }
 thiserror = "2.0.19"
 ahash = "0.8.12"
+simple-ternary = "0.3.0"
