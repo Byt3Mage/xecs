@@ -1,81 +1,84 @@
 use std::{
+    collections::hash_map::Entry,
     ops::{Index, IndexMut},
-    sync::Arc,
 };
 
 use ahash::AHashMap;
 
 use crate::{
-    StaticId, UntypedStaticId,
-    component::{ComponentConfig, id},
+    ComponentId, ComponentKey,
+    component::{ComponentConfig, ComponentInfo, ComponentRegisterError, ID_PREFIX, Path},
+    key::component_key_count,
     type_meta::HasMeta,
 };
 
-use super::{ComponentId, ComponentInfo};
-
-#[derive(Debug, thiserror::Error)]
-#[error("unregistered static component: {0}")]
-pub struct Unregistered(&'static UntypedStaticId);
-
-impl Unregistered {
-    pub fn path(&self) -> &'static str {
-        self.0.path()
-    }
-}
-
 pub struct ComponentRegistry {
     infos: Vec<ComponentInfo>,
-    names: AHashMap<Arc<str>, ComponentId>,
-    statics: Box<[Option<ComponentId>]>,
+    paths: AHashMap<Path, ComponentId>,
+    keys: Box<[Option<ComponentId>]>,
 }
 
 impl ComponentRegistry {
     pub fn new() -> Self {
         Self {
             infos: Vec::new(),
-            names: AHashMap::new(),
-            statics: vec![None; id::static_id_count()].into_boxed_slice(),
+            paths: AHashMap::new(),
+            keys: vec![None; component_key_count()].into_boxed_slice(),
         }
     }
 
-    pub fn register<T: HasMeta>(&mut self, component: &StaticId<T>) -> ComponentId {
-        let slot = component.slot() as usize;
-        match self.statics[slot] {
+    pub fn register<T: HasMeta>(&mut self, key: &ComponentKey<T>) -> Result<ComponentId, ComponentRegisterError> {
+        let slot = key.slot() as usize;
+        Ok(match self.keys[slot] {
             Some(id) => id,
             None => {
-                let id = self.new_component(ComponentConfig {
-                    path: Some(component.path().into()),
-                    meta: *component.meta(),
-                });
-                self.statics[slot] = Some(id);
+                let config = ComponentConfig { path: Some(key.path().into()), meta: *T::META };
+                let id = self.new_component(config)?;
+                self.keys[slot] = Some(id);
                 id
             }
-        }
+        })
     }
 
-    pub fn new_component(&mut self, ComponentConfig { path, meta }: ComponentConfig) -> ComponentId {
+    pub fn new_component(&mut self, config: ComponentConfig) -> Result<ComponentId, ComponentRegisterError> {
         debug_assert!(self.infos.len() <= (u32::MAX as usize), "too many components");
         let id = ComponentId::from_raw(self.infos.len() as u32);
-        let path = path.map(Into::into);
-        path.clone().map(|p| self.names.entry(p).or_insert(id));
-        self.infos.push(ComponentInfo { path, meta, tables: vec![] });
-        id
+        let path = match config.path {
+            None => id.to_string().into(),
+            Some(p) => {
+                if p.starts_with(ID_PREFIX) {
+                    return Err(ComponentRegisterError::ReservedPrefix(p));
+                }
+                match self.paths.entry(p.clone()) {
+                    Entry::Vacant(e) => e.insert(id),
+                    Entry::Occupied(_) => return Err(ComponentRegisterError::DuplicatePath(p)),
+                };
+                p
+            }
+        };
+
+        self.infos
+            .push(ComponentInfo { path, meta: config.meta, tables: vec![] });
+        Ok(id)
     }
 
     pub fn get(&self, id: ComponentId) -> &ComponentInfo {
         &self.infos[id.index()]
     }
 
-    pub fn get_mut(&mut self, id: ComponentId) -> &mut ComponentInfo {
-        &mut self.infos[id.index()]
-    }
-
     pub fn find_by_name(&self, name: &str) -> Option<ComponentId> {
-        self.names.get(name).copied()
+        match name.strip_prefix(ID_PREFIX) {
+            Some(n) => {
+                let id = n.parse().ok()?;
+                ((id as usize) < self.infos.len()).then(|| ComponentId::from_raw(id))
+            }
+            None => self.paths.get(name).copied(),
+        }
     }
 
-    pub fn find<T: HasMeta>(&self, id: &'static StaticId<T>) -> Result<ComponentId, Unregistered> {
-        self.statics[id.slot() as usize].ok_or_else(|| Unregistered(id.untyped()))
+    #[inline(always)]
+    pub fn find<T: HasMeta>(&self, key: &ComponentKey<T>) -> Option<ComponentId> {
+        self.keys[key.slot() as usize]
     }
 }
 

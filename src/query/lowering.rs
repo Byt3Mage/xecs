@@ -1,16 +1,14 @@
 use std::rc::Rc;
 
-use simple_ternary::tnr;
-
 use crate::{
     ComponentId, Ecs, LogicalPlan,
     component::Signature,
     query::{
         access::Access,
-        logical::{Filter, IdSource, LogicalCheck, LogicalFollow, LogicalScope, Relation},
-        physical::{Direction, MatchedTable, PhysicalCheck, PhysicalFollow, PhysicalPlan, PhysicalScope},
+        logical::{Direction, Filter, IdSource, LogicalCheck, LogicalFollow, LogicalScope, Relation},
+        physical::{MatchedTable, PhysicalCheck, PhysicalFollow, PhysicalPlan, PhysicalScope},
     },
-    relation::index::Topology,
+    relation::storage::Shape,
     table_index::TableId,
 };
 
@@ -20,7 +18,7 @@ pub fn lower_plan(ecs: &Ecs, plan: &LogicalPlan) -> PhysicalPlan {
         resolved_at: ecs.generation(),
         tables: lower_tables(ecs, access, &scopes[0]),
         scopes: scopes.iter().map(|s| lower_scope(ecs, s)).collect(),
-        follows: follows.iter().map(|f| lower_follow(ecs, f)).collect(),
+        follows: follows.iter().map(lower_follow).collect(),
         all_follows_injective: follows.iter().all(|f| injective(ecs, &f.relation)),
     }
 }
@@ -69,12 +67,8 @@ fn lower_scope(ecs: &Ecs, scope: &LogicalScope) -> PhysicalScope {
 /// answerable from the primary in either direction, so pinning needs no
 /// reverse index. An unpinned reversed follow has to walk the secondary,
 /// so it demands one.
-fn lower_follow(ecs: &Ecs, follow: &LogicalFollow) -> PhysicalFollow {
-    let Relation { id: relation, target, reversed } = follow.relation;
-    let direction = match ecs.relations.index(relation).topology() {
-        Topology::Symmetric { .. } => Direction::Symmetric,
-        Topology::Directed { .. } => tnr! {reversed =>  Direction::Reverse : Direction::Forward },
-    };
+fn lower_follow(follow: &LogicalFollow) -> PhysicalFollow {
+    let Relation { id: relation, target, direction } = follow.relation;
     PhysicalFollow { relation, direction, target, scope: follow.scope }
 }
 
@@ -86,13 +80,13 @@ fn lower_follow(ecs: &Ecs, follow: &LogicalFollow) -> PhysicalFollow {
 /// at me") need the secondary, and `check_capabilities` rejects those
 /// upfront when it's absent.
 fn lower_check(c: &LogicalCheck) -> PhysicalCheck {
-    let Relation { id: rel, target, reversed } = c.relation;
+    let Relation { id: rel, target, direction } = c.relation;
     let neg = c.negated;
-    match (target, reversed) {
-        (None, false) => PhysicalCheck::AnyForward { rel, neg },
-        (None, true) => PhysicalCheck::AnyReverse { rel, neg },
-        (Some(tgt), false) => PhysicalCheck::EdgeForward { rel, tgt, neg },
-        (Some(tgt), true) => PhysicalCheck::EdgeReverse { rel, tgt, neg },
+    match (target, direction) {
+        (None, Direction::Forward) => PhysicalCheck::AnyForward { rel, neg },
+        (None, Direction::Reverse) => PhysicalCheck::AnyReverse { rel, neg },
+        (Some(tgt), Direction::Forward) => PhysicalCheck::EdgeForward { rel, tgt, neg },
+        (Some(tgt), Direction::Reverse) => PhysicalCheck::EdgeReverse { rel, tgt, neg },
     }
 }
 
@@ -104,14 +98,14 @@ fn matches_signature(sig: &Signature, c: &Filter) -> bool {
     c.with.iter().all(|id| sig.has_id(id)) && !c.without.iter().any(|id| sig.has_id(id))
 }
 
-fn match_filter(ecs: &Ecs, c: &Filter) -> Option<Box<[TableId]>> {
-    if c.empty() {
+fn match_filter(ecs: &Ecs, f: &Filter) -> Option<Box<[TableId]>> {
+    if f.with.is_empty() && f.without.is_empty() {
         return None;
     }
 
-    let filter = |id: &TableId| matches_signature(&ecs.tables[*id].sig, c);
+    let filter = |id: &TableId| matches_signature(&ecs.tables[*id].sig, f);
 
-    Some(match seed(ecs, c.with.iter()) {
+    Some(match seed(ecs, f.with.iter()) {
         Some(c) => ecs.components[c].tables.iter().copied().filter(filter).collect(),
         None => ecs.tables.ids().filter(filter).collect(),
     })
@@ -125,11 +119,13 @@ fn injective(ecs: &Ecs, relation: &Relation) -> bool {
         Some(IdSource::Scope(_)) => true,
         // Every row binds the same id: maximal fan-in.
         Some(IdSource::Fixed(_) | IdSource::Param(_)) => false,
-        None => match ecs.relations.index(relation.id).topology() {
-            Topology::Symmetric { unique } => unique,
-            Topology::Directed { unique_source, unique_target, .. } => {
-                tnr! {relation.reversed => unique_source : unique_target}
-            }
+        None => match ecs.relations[relation.id].shape() {
+            Shape::Hierarchical => todo!(),
+            Shape::Symmetric { unique } => unique,
+            Shape::Directed { unique_source, unique_target, .. } => match relation.direction {
+                Direction::Forward => unique_target,
+                Direction::Reverse => unique_source,
+            },
         },
     }
 }

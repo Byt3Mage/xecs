@@ -1,13 +1,15 @@
-use std::{alloc::Layout, any::TypeId, ptr::NonNull};
+use std::{alloc::Layout, any::TypeId, mem, ptr::NonNull};
+
+pub type DropFn = Option<unsafe fn(ptr: NonNull<u8>)>;
 
 #[inline]
-const fn dtor<T>() -> Option<unsafe fn(ptr: NonNull<u8>)> {
-    if std::mem::needs_drop::<T>() { Some(|p| unsafe { p.cast::<T>().drop_in_place() }) } else { None }
+const fn dtor<T>() -> DropFn {
+    if mem::needs_drop::<T>() { Some(|p| unsafe { p.cast::<T>().drop_in_place() }) } else { None }
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct TypeMeta {
-    pub dtor: Option<unsafe fn(ptr: NonNull<u8>)>,
+    pub dtor: DropFn,
     pub layout: Layout,
     pub type_id: Option<fn() -> TypeId>,
     pub type_name: Option<fn() -> &'static str>,

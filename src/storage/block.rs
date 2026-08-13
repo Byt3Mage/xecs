@@ -21,7 +21,7 @@ impl Block {
         Self { data, drop, elem_layout }
     }
 
-    /// Whether this column stores ZSTs.
+    /// Whether this block stores ZSTs.
     #[inline(always)]
     pub(crate) fn is_zst(&self) -> bool {
         self.elem_layout.size() == 0
@@ -95,18 +95,18 @@ impl Block {
     /// # Safety
     /// - `new_cap > old_cap`.
     /// - `old_cap` is this column's current capacity.
-    pub(crate) unsafe fn realloc(&mut self, old_cap: usize, new_cap: usize) {
+    pub(crate) unsafe fn realloc(&mut self, old_cap: u32, new_cap: u32) {
         if self.is_zst() {
             return;
         }
 
-        let new_layout = self.elem_layout.repeat_packed(new_cap).unwrap();
+        let new_layout = self.elem_layout.repeat_packed(new_cap as usize).unwrap();
 
         let ptr = unsafe {
             if old_cap == 0 {
                 alloc::alloc(new_layout)
             } else {
-                let layout = self.elem_layout.repeat_packed(old_cap).unwrap();
+                let layout = self.elem_layout.repeat_packed(old_cap as usize).unwrap();
                 alloc::realloc(self.data.as_ptr(), layout, new_layout.size())
             }
         };

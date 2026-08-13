@@ -1,17 +1,22 @@
 use std::sync::atomic::AtomicU32;
 
 use crate::{
+    ComponentKey, RelationKey,
     component::{
-        self, ComponentConfig, ComponentInfo,
-        id::{ComponentId, StaticId, TypedStaticId},
-        registry::{ComponentRegistry, Unregistered},
+        self, ComponentConfig, ComponentRegisterError,
+        id::{ComponentId, IntoComponentId},
+        registry::ComponentRegistry,
     },
     error::{EcsError, EcsResult},
     id::{
         Id,
         allocator::{IdAllocator, IdRecord},
     },
-    relation::{RelationId, RelationRegistry},
+    key::unregistered,
+    relation::{
+        RelationRegisterError, RelationRegistry,
+        id::{IntoRelationId, RelationId},
+    },
     storage::table::{self},
     table_index::TableIndex,
     type_meta::HasMeta,
@@ -54,29 +59,30 @@ impl Ecs {
     }
 
     #[inline(always)]
-    pub fn component_id<T: HasMeta>(&self, id: &'static StaticId<T>) -> Result<ComponentId, Unregistered> {
-        self.components.find(id)
-    }
-
-    pub fn component<T: HasMeta>(&self, id: &'static StaticId<T>) -> Result<&ComponentInfo, Unregistered> {
-        self.components.find(id).map(|id| self.components.get(id))
+    pub fn component_id<T: IntoComponentId>(&self, key: T) -> Option<ComponentId> {
+        key.into_id(self)
     }
 
     #[inline(always)]
-    pub fn component_id_t<T: TypedStaticId>(&self) -> Result<ComponentId, Unregistered> {
-        self.component_id(T::id())
+    pub fn relation_id<T: IntoRelationId>(&self, key: T) -> Option<RelationId> {
+        key.into_id(self)
     }
 
     #[inline(always)]
-    pub fn register<T: HasMeta>(&mut self, component: &StaticId<T>) -> ComponentId {
-        self.components.register(component)
+    pub fn component<T: HasMeta>(&mut self, key: &ComponentKey<T>) -> Result<ComponentId, ComponentRegisterError> {
+        self.components.register(key)
+    }
+
+    #[inline(always)]
+    pub fn relation<T: HasMeta>(&mut self, key: &RelationKey<T>) -> Result<RelationId, RelationRegisterError> {
+        self.relations.register(key)
     }
 
     /// Creates a new component and returns its [Id].
     ///
     /// Useful for creating "newtype" runtime components.
     #[inline(always)]
-    pub fn new_component(&mut self, config: ComponentConfig) -> ComponentId {
+    pub fn new_component(&mut self, config: ComponentConfig) -> Result<ComponentId, ComponentRegisterError> {
         self.components.new_component(config)
     }
 
@@ -98,72 +104,63 @@ impl Ecs {
 
     /// Checks if `id` has the `component`.
     #[inline(always)]
-    pub fn has<T: HasMeta>(&self, id: Id, component: &'static StaticId<T>) -> EcsResult<bool> {
+    pub fn has<T: HasMeta>(&self, id: Id, key: &ComponentKey<T>) -> EcsResult<bool> {
         let r = self.ids.get(id)?;
-        let component = self.components.find(component).unwrap();
-        Ok(component::has(self, r, component))
-    }
-
-    /// Checks if `id` has the typed component `T`.
-    #[inline(always)]
-    pub fn has_t<T: TypedStaticId>(&self, id: Id) -> EcsResult<bool> {
-        self.has(id, T::id())
+        let c = self.components.find(key).ok_or_else(|| unregistered(key.untyped()))?;
+        Ok(component::has(self, r, c))
     }
 
     #[inline]
-    pub fn insert<T: HasMeta>(&mut self, id: Id, component: &'static StaticId<T>, value: T) -> EcsResult<Option<T>> {
-        let component = self.components.find(component)?;
-        Ok(unsafe { component::insert(self, id, component, value)? })
+    pub fn insert<T: HasMeta>(&mut self, id: Id, key: &ComponentKey<T>, value: T) -> EcsResult<Option<T>> {
+        let c = self.components.find(key).ok_or_else(|| unregistered(key.untyped()))?;
+        Ok(unsafe { component::insert(self, id, c, value)? })
     }
 
     #[inline]
-    pub fn insert_t<T: TypedStaticId>(&mut self, id: Id, value: T) -> EcsResult<Option<T>> {
-        self.insert(id, T::id(), value)
+    pub fn add<T: HasMeta + Default>(&mut self, id: Id, key: &ComponentKey<T>) -> EcsResult<Option<T>> {
+        self.insert(id, key, T::default())
     }
 
     #[inline]
-    pub fn remove<T: HasMeta>(&mut self, id: Id, component: &'static StaticId<T>) -> EcsResult<()> {
-        let component = self.components.find(component)?;
-        Ok(unsafe { component::remove(self, id, component)? })
+    pub fn remove<T: HasMeta>(&mut self, id: Id, key: &ComponentKey<T>) -> EcsResult<()> {
+        let c = self.components.find(key).ok_or_else(|| unregistered(key.untyped()))?;
+        unsafe { component::remove(self, id, c)? };
+        Ok(())
     }
 
     #[inline]
-    pub fn remove_t<T: TypedStaticId>(&mut self, id: Id) -> EcsResult<()> {
-        self.remove(id, T::id())
-    }
-
-    #[inline]
-    pub fn get<T: HasMeta>(&self, id: Id, component: &'static StaticId<T>) -> EcsResult<&T> {
+    pub fn get<T: HasMeta>(&self, id: Id, key: &ComponentKey<T>) -> EcsResult<&T> {
         let r = self.ids.get(id)?;
-        let component = self.components.find(component)?;
-        unsafe { component::get(self, r, component) }.ok_or(EcsError::MissingComponent { id, component })
+        let c = self.components.find(key).ok_or_else(|| unregistered(key.untyped()))?;
+        unsafe { component::get(self, r, c) }.ok_or(EcsError::MissingComponent(id, c))
     }
 
     #[inline]
-    pub fn get_mut<T: HasMeta>(&mut self, id: Id, component: &'static StaticId<T>) -> EcsResult<&mut T> {
+    pub fn get_mut<T: HasMeta>(&mut self, id: Id, key: &ComponentKey<T>) -> EcsResult<&mut T> {
         let r = self.ids.get(id)?;
-        let component = self.components.find(component)?;
-        unsafe { component::get_mut(self, r, component) }.ok_or(EcsError::MissingComponent { id, component })
+        let c = self.components.find(key).ok_or_else(|| unregistered(key.untyped()))?;
+        unsafe { component::get_mut(self, r, c) }.ok_or(EcsError::MissingComponent(id, c))
     }
 
     #[inline]
-    pub fn get_t<T: TypedStaticId>(&self, id: Id) -> EcsResult<&T> {
-        self.get(id, T::id())
+    pub fn relate<T: HasMeta>(&mut self, id: Id, key: &RelationKey<T>, target: Id, payload: T) -> EcsResult<()> {
+        let r = self.relations.find(key).ok_or_else(|| unregistered(key.untyped()))?;
+        unsafe { self.relations[r].relate(id, target, payload)? };
+        Ok(())
     }
 
     #[inline]
-    pub fn get_mut_t<T: TypedStaticId>(&mut self, id: Id) -> EcsResult<&mut T> {
-        self.get_mut(id, T::id())
+    pub fn unrelate<T: HasMeta>(&mut self, id: Id, key: &RelationKey<T>, target: Id) -> EcsResult<()> {
+        let r = self.relations.find(key).ok_or_else(|| unregistered(key.untyped()))?;
+        self.relations[r].unrelate(id, target);
+        Ok(())
     }
 
     #[inline]
-    pub fn relate(&mut self, id: Id, relation: RelationId, target: Id) {
-        self.relations.index_mut(relation).relate(id, target);
-    }
-
-    #[inline]
-    pub fn unrelate(&mut self, id: Id, relation: RelationId, target: Id) {
-        self.relations.index_mut(relation).unrelate(id, target);
+    pub fn remove_relation<T: HasMeta>(&mut self, id: Id, key: &RelationKey<T>) -> EcsResult<()> {
+        let r = self.relations.find(key).ok_or_else(|| unregistered(key.untyped()))?;
+        self.relations[r].purge(id);
+        Ok(())
     }
 
     #[inline(always)]
@@ -179,5 +176,11 @@ impl Ecs {
     #[inline(always)]
     pub fn dead_count(&self) -> usize {
         self.ids.num_dead()
+    }
+}
+
+impl Default for Ecs {
+    fn default() -> Self {
+        Self::new()
     }
 }

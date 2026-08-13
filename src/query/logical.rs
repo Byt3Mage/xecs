@@ -8,7 +8,7 @@ use crate::{
         context::Binds,
         error::ValidationError,
     },
-    relation::RelationId,
+    relation::id::RelationId,
 };
 
 pub(crate) type ScopeId = usize;
@@ -40,25 +40,20 @@ pub struct Filter {
     pub without: Vec<ComponentId>,
 }
 
-impl Filter {
-    #[inline]
-    pub fn empty(&self) -> bool {
-        self.with.is_empty() && self.without.is_empty()
-    }
-}
-
 #[derive(Copy, Clone, Debug)]
 pub struct Relation {
     pub id: RelationId,
     pub target: Option<IdSource>,
-    pub reversed: bool,
+    pub direction: Direction,
 }
 
-impl Relation {
-    #[inline(always)]
-    pub fn as_reversed(&self) -> Option<Self> {
-        self.reversed.then(|| *self)
-    }
+/// How this follow walks the index. Fixed at lowering: `Symmetric` is
+/// selected from the relation's declared topology, and `Reverse` has
+/// already been proven to have a secondary index.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum Direction {
+    Forward,
+    Reverse,
 }
 
 /// Where a comparison entity comes from at row time. Shared by probes
@@ -96,6 +91,12 @@ pub struct PlanBuilder {
     follows: Vec<LogicalFollow>,
     labels: HashMap<Rc<str>, ScopeId>,
     current: ScopeId,
+}
+
+impl Default for PlanBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PlanBuilder {
@@ -153,11 +154,11 @@ impl PlanBuilder {
     }
 }
 
-pub fn validate_access<C>(ecs: &Ecs, plan: &LogicalPlan) -> Result<(), ValidationError>
+pub fn validate_access<S>(ecs: &Ecs, plan: &LogicalPlan) -> Result<(), ValidationError>
 where
-    C: Select,
+    S: Select,
 {
-    let requests = C::describe();
+    let requests = S::describe();
     let declared = &plan.access;
 
     if requests.len() != declared.len() {
@@ -181,10 +182,9 @@ where
         }
 
         let meta = &ecs.components.get(dec.id).meta;
-        if !meta.type_id().is_some_and(|id| id == req.type_id) {
+        if meta.type_id().is_none_or(|id| id == req.type_id) {
             return Err(ValidationError::TypeMismatch { index });
         }
     }
-
     Ok(())
 }

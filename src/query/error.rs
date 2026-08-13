@@ -1,4 +1,4 @@
-use crate::relation::RelationId;
+use crate::relation::id::RelationId;
 
 /// Errors produced while lowering a logical plan against a world.
 /// All of these are programming errors in the query or a missing

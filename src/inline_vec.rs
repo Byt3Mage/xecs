@@ -484,7 +484,7 @@ impl<T, const N: usize> Drop for IntoIter<T, N> {
     fn drop(&mut self) {
         unsafe {
             let base = self.vec.as_mut_ptr();
-            let remaining: *mut [T] = std::slice::from_raw_parts_mut(base.add(self.head), self.tail - self.head);
+            let remaining: *mut [T] = std::ptr::slice_from_raw_parts_mut(base.add(self.head), self.tail - self.head);
             // Neutralize the vec's element drop; its Drop still frees the buffer.
             self.vec.len = 0;
             ptr::drop_in_place(remaining);

@@ -69,7 +69,7 @@ impl TableData {
 
                 for col in self.columns.iter_mut() {
                     // SAFETY: req > cap; old_cap is current capacity.
-                    col.data.realloc(cap as usize, req as usize)
+                    col.data.realloc(cap, req)
                 }
             }
             self.cap = req;
@@ -138,7 +138,7 @@ impl TableData {
 
 impl Drop for TableData {
     fn drop(&mut self) {
-        if self.cap != 0 {
+        if self.cap == 0 {
             return;
         }
 

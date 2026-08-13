@@ -13,6 +13,7 @@ use crate::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum AccessMode {
     Read,
     Write,
@@ -29,12 +30,12 @@ pub struct Access {
 impl Access {
     #[inline]
     pub fn writes(&self) -> bool {
-        matches!(self.mode, AccessMode::Write)
+        self.mode == AccessMode::Write
     }
 
     #[inline]
     pub fn reads(&self) -> bool {
-        matches!(self.mode, AccessMode::Read)
+        self.mode == AccessMode::Read
     }
 }
 

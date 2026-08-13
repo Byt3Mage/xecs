@@ -15,20 +15,52 @@ use crate::{
 
 pub mod id;
 pub mod registry;
-pub mod traits;
-
-#[derive(Default)]
-pub struct ComponentHooks {
-    pub on_insert: Option<Box<dyn FnMut(Id, *mut u8)>>,
-    pub on_remove: Option<Box<dyn FnMut(Id, *mut u8)>>,
-    pub clone: Option<Box<dyn FnMut(*const u8, *mut u8)>>,
-    pub default: Option<Box<dyn FnMut(*mut u8)>>,
-}
 
 pub type Path = Arc<str>;
 
-pub struct ComponentInfo {
+/// Reserved: `C#<n>` addresses a component by id in string queries,
+/// and is the display form of an unnamed component.
+pub const ID_PREFIX: &str = "C#";
+
+#[derive(Debug, thiserror::Error)]
+pub enum ComponentRegisterError {
+    #[error("component path `{0}` is already registered")]
+    DuplicatePath(Path),
+    #[error("component path `{0}` uses the reserved `{ID_PREFIX}` prefix")]
+    ReservedPrefix(Path),
+}
+
+#[derive(Debug, Clone)]
+pub struct ComponentConfig {
     pub path: Option<Path>,
+    pub meta: TypeMeta,
+}
+
+impl ComponentConfig {
+    pub fn new() -> Self {
+        Self { path: None, meta: TypeMeta::of::<()>() }
+    }
+
+    pub fn named(path: impl Into<Path>) -> Self {
+        Self {
+            path: Some(path.into()),
+            meta: TypeMeta::of::<()>(),
+        }
+    }
+
+    pub fn path(mut self, path: impl Into<Path>) -> Self {
+        self.path = Some(path.into());
+        self
+    }
+
+    pub fn meta(mut self, meta: TypeMeta) -> Self {
+        self.meta = meta;
+        self
+    }
+}
+
+pub struct ComponentInfo {
+    pub path: Path,
     pub meta: TypeMeta,
     pub(crate) tables: Vec<TableId>,
 }
@@ -39,14 +71,6 @@ impl ComponentInfo {
             self.tables.insert(pos, table);
         }
     }
-}
-
-pub const ANONYMOUS: &'static str = "<anonymous>";
-
-#[derive(Debug, Clone)]
-pub struct ComponentConfig {
-    pub path: Option<Path>,
-    pub meta: TypeMeta,
 }
 
 /// Sorted list of component ids in a [Table](crate::storage::table::Table)
@@ -69,7 +93,7 @@ impl Clone for Signature {
 impl From<Vec<ComponentId>> for Signature {
     fn from(mut value: Vec<ComponentId>) -> Self {
         Self({
-            value.sort();
+            value.sort_unstable();
             value.dedup();
             value.into()
         })

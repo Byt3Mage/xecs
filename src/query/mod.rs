@@ -7,8 +7,9 @@ use crate::{
         context::{Binds, QueryCtx},
         logical::{FollowId, LogicalPlan, ScopeId, validate_access},
         lowering::lower_plan,
-        physical::{Fan, PhysicalPlan, PhysicalScope},
+        physical::{PhysicalPlan, PhysicalScope},
     },
+    relation::storage::EdgeIter,
 };
 
 pub(crate) mod access;
@@ -16,12 +17,13 @@ pub(crate) mod context;
 pub(crate) mod error;
 pub(crate) mod logical;
 pub(crate) mod lowering;
+pub(crate) mod parallel;
 pub(crate) mod physical;
 
 #[derive(Debug, Clone)]
 pub struct Query {
-    physical: PhysicalPlan,
     logical: LogicalPlan,
+    physical: PhysicalPlan,
 }
 
 impl Query {
@@ -55,12 +57,17 @@ impl Query {
     }
 }
 
-pub struct TQuery<S: Select, F: Follows> {
+pub struct TQuery<S: Select = (), F: Follows = ()> {
     query: Query,
     marker: PhantomData<(S, F)>,
 }
 
 impl<S: Select, F: Follows> TQuery<S, F> {
+    pub fn new(ecs: &Ecs, plan: LogicalPlan) -> Result<Self, ValidationError> {
+        validate_access::<S>(ecs, &plan)?;
+        Ok(Self { query: Query::new(ecs, plan), marker: PhantomData })
+    }
+
     pub fn each(&mut self, ecs: &mut Ecs, params: &[Id], mut f: impl FnMut(Id, S::Row<'_>, F::Get<'_>)) {
         let ctx = self.query.make_ctx(ecs, params);
         let plan = &self.query.physical;
@@ -111,7 +118,7 @@ impl<'w, F: Follows> Follow<'w, F> {
         let follow = &self.ctx.plan.follows[self.index];
         FollowIter {
             ctx: self.ctx,
-            fan: follow.fan(self.from, self.ctx),
+            edges: follow.fan(self.from, self.ctx),
             scope: &self.ctx.plan.scopes[follow.scope],
             scope_id: follow.scope,
             marker: PhantomData,
@@ -132,7 +139,7 @@ impl<'w, F: Follows> Follow<'w, F> {
 }
 
 pub struct FollowIter<'w, F: Follows> {
-    fan: Fan<'w>,
+    edges: EdgeIter<'w>,
     ctx: &'w QueryCtx<'w>,
     scope: &'w PhysicalScope,
     scope_id: ScopeId,
@@ -146,7 +153,7 @@ impl<'w, F: Follows> Iterator for FollowIter<'w, F> {
         let ctx = self.ctx;
         let scope = self.scope;
         let scope_id = self.scope_id;
-        self.fan.find_map(
+        self.edges.find_map(
             |id| match scope.check_relations(id, ctx) && scope.passes_filter(ctx, id) {
                 true => Some((id, F::get(ctx, scope_id, id, &scope.follows))),
                 false => None,

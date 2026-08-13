@@ -4,9 +4,12 @@ use crate::{
     Id,
     query::{
         context::QueryCtx,
-        logical::{FollowId, IdSource, ScopeId},
+        logical::{Direction, FollowId, IdSource, ScopeId},
     },
-    relation::{RelationId, index::Edges},
+    relation::{
+        id::RelationId,
+        storage::{EdgeIter, Edges},
+    },
     table_index::TableId,
 };
 
@@ -76,22 +79,21 @@ pub(crate) struct PhysicalFollow {
 }
 
 impl PhysicalFollow {
-    pub(crate) fn fan<'w>(&self, from: Id, ctx: &QueryCtx<'w>) -> Fan<'w> {
-        let index = ctx.ecs.relations.index(self.relation);
-
-        if let Some(pin) = self.target {
-            let pin = pin.resolve(&ctx.binds, ctx.params);
-            let has = match self.direction {
-                Direction::Reverse => index.contains(pin, from),
-                Direction::Forward | Direction::Symmetric => index.contains(from, pin),
-            };
-            return Fan::One(has.then_some(pin));
-        }
-
-        match self.direction {
-            Direction::Forward => Fan::from(index.outgoing(from)),
-            Direction::Reverse => Fan::from(index.incoming(from)),
-            Direction::Symmetric => Fan::Both(index.outgoing(from), index.incoming(from)),
+    pub(crate) fn fan<'w>(&self, from: Id, ctx: &QueryCtx<'w>) -> EdgeIter<'w> {
+        let rel = &ctx.ecs.relations[self.relation];
+        match self.target {
+            Some(pin) => {
+                let pin = pin.resolve(&ctx.binds, ctx.params);
+                EdgeIter::One(match self.direction {
+                    Direction::Forward => rel.contains(from, pin).then_some(pin),
+                    Direction::Reverse => rel.contains(pin, from).then_some(pin),
+                })
+            }
+            None => match self.direction {
+                Direction::Forward => rel.outgoing(from),
+                Direction::Reverse => rel.incoming(from),
+            }
+            .map_or_else(EdgeIter::empty, Edges::into_iter),
         }
     }
 }
@@ -110,7 +112,7 @@ pub(crate) enum PhysicalCheck {
     /// flipped at lowering (contains(me, X, rev) == contains(X, me, fwd)),
     /// so execution has exactly one containment orientation.
     EdgeForward { rel: RelationId, tgt: IdSource, neg: bool },
-    /// Edge X -> scope_entity exists. The flipped form of [CheckMode::EdgeTo].
+    /// Edge X -> scope_entity exists. The flipped form of [Self::EdgeForward].
     EdgeReverse { rel: RelationId, tgt: IdSource, neg: bool },
 }
 
@@ -119,71 +121,16 @@ impl PhysicalCheck {
     pub(crate) fn eval(&self, src: Id, QueryCtx { ecs, binds, params, .. }: &QueryCtx) -> bool {
         let rels = &ecs.relations;
         match *self {
-            PhysicalCheck::AnyForward { rel, neg } => rels.index(rel).has_outgoing(src) != neg,
-            PhysicalCheck::AnyReverse { rel, neg } => rels.index(rel).has_incoming(src) != neg,
+            PhysicalCheck::AnyForward { rel, neg } => rels[rel].has_outgoing(src) != neg,
+            PhysicalCheck::AnyReverse { rel, neg } => rels[rel].has_incoming(src) != neg,
             PhysicalCheck::EdgeForward { rel, tgt, neg } => {
                 let tgt = tgt.resolve(binds, params);
-                rels.index(rel).contains(src, tgt) != neg
+                rels[rel].contains(src, tgt) != neg
             }
             PhysicalCheck::EdgeReverse { rel, tgt, neg } => {
                 let tgt = tgt.resolve(binds, params);
-                rels.index(rel).contains(tgt, src) != neg
+                rels[rel].contains(tgt, src) != neg
             }
         }
-    }
-}
-
-/// How this follow walks the index. Fixed at lowering: `Symmetric` is
-/// selected from the relation's declared topology, and `Reverse` has
-/// already been proven to have a secondary index.
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub(crate) enum Direction {
-    Forward,
-    Reverse,
-    Symmetric,
-}
-
-/// One join's edge run for a single `from` entity.
-/// Empty fans are values , not errors.
-pub(crate) enum Fan<'w> {
-    One(Option<Id>),
-    Many(std::slice::Iter<'w, Id>),
-    Both(Edges<'w>, Edges<'w>),
-}
-
-impl<'w> Fan<'w> {
-    #[inline(always)]
-    fn from(e: Edges<'w>) -> Self {
-        match e {
-            Edges::One(id) => Self::One(id),
-            Edges::Many(ids) => Self::Many(ids.iter()),
-        }
-    }
-}
-
-impl Iterator for Fan<'_> {
-    type Item = Id;
-
-    #[inline(always)]
-    fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            Fan::One(v) => v.take(),
-            Fan::Many(it) => it.next().copied(),
-            Fan::Both(a, b) => next_edge(a).or_else(|| next_edge(b)),
-        }
-    }
-}
-
-#[inline(always)]
-fn next_edge(e: &mut Edges<'_>) -> Option<Id> {
-    match e {
-        Edges::One(v) => v.take(),
-        Edges::Many(ids) => match ids {
-            [first, rest @ ..] => {
-                *ids = rest;
-                Some(*first)
-            }
-            _ => None,
-        },
     }
 }
