@@ -334,7 +334,7 @@ pub(crate) enum Storage {
 impl Storage {
     pub fn select(shape: Shape, meta: &TypeMeta) -> Self {
         match shape {
-            Shape::Hierarchical => Storage::Hierarchy(Hierarchy::new(meta)),
+            Shape::Hierarchical => Storage::Hierarchy(Hierarchy::new()),
             Shape::Symmetric { unique } => Storage::Symmetry(Symmetry::new(unique, meta)),
             Shape::Directed { unique_source, unique_target, acyclic, reverse } => {
                 Storage::Directed(Directed::new(unique_source, unique_target, acyclic, reverse, meta))

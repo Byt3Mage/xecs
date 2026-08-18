@@ -50,7 +50,7 @@ impl RelationInfo {
             match &mut self.storage {
                 Storage::Directed(s) => s.relate(source, target, payload),
                 Storage::Symmetry(s) => s.relate(source, target, payload),
-                Storage::Hierarchy(s) => s.relate(source, target, payload),
+                Storage::Hierarchy(s) => s.relate(source, target),
             }
         }
     }
