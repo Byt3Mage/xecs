@@ -1,4 +1,4 @@
-use std::{any::TypeId, ptr::NonNull};
+use std::{any::TypeId, marker::PhantomData, ptr::NonNull};
 
 use crate::{
     ComponentId, Follow, Id,
@@ -9,7 +9,7 @@ use crate::{
         context::QueryCtx,
         logical::{FollowId, ScopeId},
     },
-    storage::table::Table,
+    table::Table,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +36,46 @@ impl Access {
     #[inline]
     pub fn reads(&self) -> bool {
         self.mode == AccessMode::Read
+    }
+}
+
+/// A base pointer to one table column, tagged with the borrow of the
+/// table it came from.
+pub struct ColumnPtr<'a, T> {
+    ptr: NonNull<T>,
+    marker: PhantomData<&'a [T]>,
+}
+
+impl<T> Clone for ColumnPtr<'_, T> {
+    #[inline(always)]
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T> Copy for ColumnPtr<'_, T> {}
+
+impl<'a, T> ColumnPtr<'a, T> {
+    #[inline(always)]
+    fn new(table: &'a Table, index: usize) -> Self {
+        Self {
+            ptr: table.column_ptr(index).cast(),
+            marker: PhantomData,
+        }
+    }
+
+    /// # Safety
+    /// `row` is within the source table's row count.
+    #[inline(always)]
+    unsafe fn get(self, row: usize) -> &'a T {
+        unsafe { &*self.ptr.add(row).as_ptr() }
+    }
+
+    /// # Safety
+    /// `row` is within the source table's row count, and no other
+    /// reference to this row is live.
+    #[inline(always)]
+    unsafe fn get_mut(self, row: usize) -> &'a mut T {
+        unsafe { &mut *self.ptr.add(row).as_ptr() }
     }
 }
 
@@ -70,18 +110,21 @@ impl<T> SealedFetch for Option<&mut T> {}
 
 pub trait TypedAccess: SealedFetch {
     type Row<'a>;
-    type Column: Copy;
+    type Column<'a>: Copy;
     type ColumnIndex;
 
     fn describe() -> TypedAccessDesc;
     fn column_index(raw: usize) -> Self::ColumnIndex;
-    fn column(table: &Table, index: Self::ColumnIndex) -> Self::Column;
-    unsafe fn row<'a>(column: Self::Column, row: u32) -> Self::Row<'a>;
+    fn column(table: &Table, index: Self::ColumnIndex) -> Self::Column<'_>;
+
+    /// # Safety
+    /// `row` is within the row count of the table `column` came from.
+    unsafe fn row<'a>(column: Self::Column<'a>, row: usize) -> Self::Row<'a>;
 }
 
 impl<T: 'static> TypedAccess for &T {
     type Row<'a> = &'a T;
-    type Column = NonNull<T>;
+    type Column<'a> = ColumnPtr<'a, T>;
     type ColumnIndex = usize;
 
     fn describe() -> TypedAccessDesc {
@@ -89,24 +132,24 @@ impl<T: 'static> TypedAccess for &T {
     }
 
     #[inline(always)]
-    fn column_index(raw: usize) -> Self::ColumnIndex {
+    fn column_index(raw: usize) -> usize {
         raw
     }
 
     #[inline(always)]
-    fn column(table: &Table, index: Self::ColumnIndex) -> Self::Column {
-        table.column(index).data.ptr().cast()
+    fn column(table: &Table, index: usize) -> Self::Column<'_> {
+        ColumnPtr::new(table, index)
     }
 
     #[inline(always)]
-    unsafe fn row<'a>(column: Self::Column, row: u32) -> Self::Row<'a> {
-        unsafe { column.add(row as usize).as_ref() }
+    unsafe fn row<'a>(column: Self::Column<'a>, row: usize) -> Self::Row<'a> {
+        unsafe { column.get(row) }
     }
 }
 
 impl<T: 'static> TypedAccess for &mut T {
     type Row<'a> = &'a mut T;
-    type Column = NonNull<T>;
+    type Column<'a> = NonNull<T>;
     type ColumnIndex = usize;
 
     fn describe() -> TypedAccessDesc {
@@ -119,19 +162,19 @@ impl<T: 'static> TypedAccess for &mut T {
     }
 
     #[inline(always)]
-    fn column(table: &Table, index: Self::ColumnIndex) -> Self::Column {
-        table.column(index).data.ptr().cast()
+    fn column(table: &Table, index: Self::ColumnIndex) -> Self::Column<'_> {
+        table.column_ptr(index).cast()
     }
 
     #[inline(always)]
-    unsafe fn row<'a>(column: Self::Column, row: u32) -> Self::Row<'a> {
-        unsafe { column.add(row as usize).as_mut() }
+    unsafe fn row<'a>(column: Self::Column<'a>, row: usize) -> Self::Row<'a> {
+        unsafe { column.add(row).as_mut() }
     }
 }
 
 impl<T: 'static> TypedAccess for Option<&T> {
     type Row<'a> = Option<&'a T>;
-    type Column = Option<NonNull<T>>;
+    type Column<'a> = Option<ColumnPtr<'a, T>>;
     type ColumnIndex = Option<usize>;
 
     fn describe() -> TypedAccessDesc {
@@ -142,18 +185,18 @@ impl<T: 'static> TypedAccess for Option<&T> {
         (raw != usize::MAX).then_some(raw)
     }
 
-    fn column(table: &Table, index: Self::ColumnIndex) -> Self::Column {
-        index.map(|i| table.column(i).data.ptr().cast())
+    fn column(table: &Table, index: Self::ColumnIndex) -> Self::Column<'_> {
+        index.map(|i| ColumnPtr::new(table, i))
     }
 
-    unsafe fn row<'a>(column: Self::Column, row: u32) -> Self::Row<'a> {
-        column.map(|c| unsafe { c.add(row as usize).as_ref() })
+    unsafe fn row<'a>(column: Self::Column<'a>, row: usize) -> Self::Row<'a> {
+        column.map(|c| unsafe { c.get(row) })
     }
 }
 
 impl<T: 'static> TypedAccess for Option<&mut T> {
     type Row<'a> = Option<&'a mut T>;
-    type Column = Option<NonNull<T>>;
+    type Column<'a> = Option<ColumnPtr<'a, T>>;
     type ColumnIndex = Option<usize>;
 
     fn describe() -> TypedAccessDesc {
@@ -164,26 +207,28 @@ impl<T: 'static> TypedAccess for Option<&mut T> {
         (raw != usize::MAX).then_some(raw)
     }
 
-    fn column(table: &Table, index: Self::ColumnIndex) -> Self::Column {
-        index.map(|i| table.column(i).data.ptr().cast())
+    fn column(table: &Table, index: Self::ColumnIndex) -> Self::Column<'_> {
+        index.map(|i| ColumnPtr::new(table, i))
     }
 
-    unsafe fn row<'a>(column: Self::Column, row: u32) -> Self::Row<'a> {
-        column.map(|c| unsafe { c.add(row as usize).as_mut() })
+    unsafe fn row<'a>(column: Self::Column<'a>, row: usize) -> Self::Row<'a> {
+        column.map(|c| unsafe { c.get_mut(row) })
     }
 }
 
 pub trait Select {
-    type Columns: Copy;
+    type Columns<'a>: Copy;
     type Row<'a>;
 
     fn describe() -> InlineVec<TypedAccessDesc, 4>;
-    fn columns(table: &Table, column_indices: &[usize]) -> Self::Columns;
-    unsafe fn row<'a>(columns: Self::Columns, row: u32) -> Self::Row<'a>;
+    fn columns<'a>(table: &'a Table, column_indices: &[usize]) -> Self::Columns<'a>;
+    /// # Safety
+    /// `row` is within the row count of the table `columns` came from.
+    unsafe fn row<'a>(columns: Self::Columns<'a>, row: usize) -> Self::Row<'a>;
 }
 
 impl Select for () {
-    type Columns = ();
+    type Columns<'a> = ();
     type Row<'a> = ();
 
     fn describe() -> InlineVec<TypedAccessDesc, 4> {
@@ -191,14 +236,14 @@ impl Select for () {
     }
 
     #[inline(always)]
-    fn columns(_: &Table, _: &[usize]) -> Self::Columns {}
+    fn columns<'a>(_: &'a Table, _: &[usize]) -> Self::Columns<'a> {}
 
     #[inline(always)]
-    unsafe fn row<'a>(_: Self::Columns, _: u32) -> Self::Row<'a> {}
+    unsafe fn row<'a>(_: Self::Columns<'a>, _: usize) -> Self::Row<'a> {}
 }
 
 impl<T: TypedAccess> Select for T {
-    type Columns = T::Column;
+    type Columns<'a> = T::Column<'a>;
     type Row<'a> = T::Row<'a>;
 
     fn describe() -> InlineVec<TypedAccessDesc, 4> {
@@ -206,12 +251,12 @@ impl<T: TypedAccess> Select for T {
     }
 
     #[inline(always)]
-    fn columns(table: &Table, column_indices: &[usize]) -> Self::Columns {
+    fn columns<'a>(table: &'a Table, column_indices: &[usize]) -> Self::Columns<'a> {
         T::column(table, T::column_index(column_indices[0]))
     }
 
     #[inline(always)]
-    unsafe fn row<'a>(columns: Self::Columns, row: u32) -> Self::Row<'a> {
+    unsafe fn row<'a>(columns: Self::Columns<'a>, row: usize) -> Self::Row<'a> {
         unsafe { T::row(columns, row) }
     }
 }
@@ -238,7 +283,7 @@ impl<F: Follows> Follows for Follow<'_, F> {
 macro_rules! impl_column_tuple {
     ($($T:ident),+ $(,)?) => {
         impl<$($T: TypedAccess),+ > Select for ($($T,)+) {
-            type Columns = ($($T::Column,)+);
+            type Columns<'a> = ($($T::Column<'a>,)+);
             type Row<'a> = ($($T::Row<'a>,)+);
 
             fn describe() -> InlineVec<TypedAccessDesc, 4> {
@@ -246,15 +291,16 @@ macro_rules! impl_column_tuple {
             }
 
             #[inline(always)]
-            fn columns(table: &Table, column_indices: &[usize]) -> Self::Columns {
+            fn columns<'a>(table: &'a Table, column_indices: &[usize]) -> Self::Columns<'a> {
                 let mut i = 0usize;
                 ($(
                     #[allow(unused_assignments)]
-                    { let col =  $T::column(table, $T::column_index(column_indices[i])); i += 1; col },
+                    { let col = $T::column(table, $T::column_index(column_indices[i])); i += 1; col },
                 )+)
             }
 
-            unsafe fn row<'a>(columns: Self::Columns, row: u32) -> Self::Row<'a> {
+            #[inline(always)]
+            unsafe fn row<'a>(columns: Self::Columns<'a>, row: usize) -> Self::Row<'a> {
                 #[allow(non_snake_case)]
                 let ($($T,)+) = columns;
                 unsafe { ($($T::row($T, row),)+) }

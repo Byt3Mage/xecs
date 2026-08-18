@@ -1,6 +1,7 @@
 use std::{rc::Rc, sync::Arc};
 
 use crate::{
+    ComponentKey,
     component::id::ComponentId,
     ecs::Ecs,
     graph::{find_add_table, find_remove_table},
@@ -8,9 +9,10 @@ use crate::{
         Id,
         allocator::{IdRecord, NotAlive},
     },
-    storage::table::move_id,
+    key::{UnregisteredKey, unregistered},
+    table::move_id,
     table_index::TableId,
-    type_meta::TypeMeta,
+    type_meta::{HasMeta, TypeMeta},
 };
 
 pub mod id;
@@ -156,6 +158,18 @@ impl Signature {
     }
 }
 
+/// Resolve `key` to the id it registered under.
+///
+/// This is the sole bridge between a typed key and an untyped column,
+/// and the sole justification for the `*_raw` calls below: the slot →
+/// id mapping is written once, at registration, from `T::META` of this
+/// same key type. A `ComponentId` obtained any other way (`new_component`,
+/// `find_by_name`) cannot reach these functions, because they take a key.
+#[inline(always)]
+pub fn resolve<T: HasMeta>(ecs: &Ecs, key: &ComponentKey<T>) -> Result<ComponentId, UnregisteredKey> {
+    ecs.components.find(key).ok_or_else(|| unregistered(key.untyped()))
+}
+
 /// Inserts the value of a component for an id.
 /// Returns the previously held value, if any.
 ///
@@ -170,7 +184,7 @@ pub(crate) unsafe fn insert<T>(ecs: &mut Ecs, id: Id, comp: ComponentId, val: T)
         Ok(match table.col_map.get(comp) {
             Some(idx) => {
                 let col = table.column(idx);
-                let row = col.data.row_ptr(r.row);
+                let row = col.row_ptr(r.row);
                 Some(row.cast().replace(val))
             }
             None => {
@@ -178,7 +192,7 @@ pub(crate) unsafe fn insert<T>(ecs: &mut Ecs, id: Id, comp: ComponentId, val: T)
                 let dst_row = move_id(ecs, id, r.table, r.row, dst_table_id);
                 let dst_table = &ecs.tables[dst_table_id];
                 let dst_col = dst_table.col_map.get(comp).unwrap();
-                let dst_row = dst_table.column(dst_col).data.row_ptr(dst_row);
+                let dst_row = dst_table.column(dst_col).row_ptr(dst_row);
                 dst_row.cast().write(val);
                 None
             }
@@ -203,11 +217,11 @@ pub(crate) fn has(ecs: &Ecs, r: IdRecord, comp: ComponentId) -> bool {
 pub(crate) unsafe fn get<T>(ecs: &Ecs, r: IdRecord, comp: ComponentId) -> Option<&T> {
     let table = &ecs.tables[r.table];
     let column = table.col_map.get(comp).map(|i| table.column(i))?;
-    Some(unsafe { column.data.row_ptr(r.row).cast().as_ref() })
+    Some(unsafe { column.row_ptr(r.row).cast().as_ref() })
 }
 
 pub(crate) unsafe fn get_mut<T>(ecs: &mut Ecs, r: IdRecord, comp: ComponentId) -> Option<&mut T> {
     let table = &ecs.tables[r.table];
     let column = table.col_map.get(comp).map(|i| table.column(i))?;
-    Some(unsafe { column.data.row_ptr(r.row).cast().as_mut() })
+    Some(unsafe { column.row_ptr(r.row).cast().as_mut() })
 }

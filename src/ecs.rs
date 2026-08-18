@@ -6,6 +6,7 @@ use crate::{
         self, ComponentConfig, ComponentRegisterError,
         id::{ComponentId, IntoComponentId},
         registry::ComponentRegistry,
+        resolve,
     },
     error::{EcsError, EcsResult},
     id::{
@@ -17,7 +18,7 @@ use crate::{
         RelationRegisterError, RelationRegistry,
         id::{IntoRelationId, RelationId},
     },
-    storage::table::{self},
+    table::{self},
     table_index::TableIndex,
     type_meta::HasMeta,
 };
@@ -106,13 +107,13 @@ impl Ecs {
     #[inline(always)]
     pub fn has<T: HasMeta>(&self, id: Id, key: &ComponentKey<T>) -> EcsResult<bool> {
         let r = self.ids.get(id)?;
-        let c = self.components.find(key).ok_or_else(|| unregistered(key.untyped()))?;
+        let c = resolve(self, key)?;
         Ok(component::has(self, r, c))
     }
 
     #[inline]
     pub fn insert<T: HasMeta>(&mut self, id: Id, key: &ComponentKey<T>, value: T) -> EcsResult<Option<T>> {
-        let c = self.components.find(key).ok_or_else(|| unregistered(key.untyped()))?;
+        let c = resolve(self, key)?;
         Ok(unsafe { component::insert(self, id, c, value)? })
     }
 
@@ -123,7 +124,7 @@ impl Ecs {
 
     #[inline]
     pub fn remove<T: HasMeta>(&mut self, id: Id, key: &ComponentKey<T>) -> EcsResult<()> {
-        let c = self.components.find(key).ok_or_else(|| unregistered(key.untyped()))?;
+        let c = resolve(self, key)?;
         unsafe { component::remove(self, id, c)? };
         Ok(())
     }
@@ -131,7 +132,7 @@ impl Ecs {
     #[inline]
     pub fn get<T: HasMeta>(&self, id: Id, key: &ComponentKey<T>) -> EcsResult<&T> {
         let r = self.ids.get(id)?;
-        let c = self.components.find(key).ok_or_else(|| unregistered(key.untyped()))?;
+        let c = resolve(self, key)?;
         unsafe { component::get(self, r, c) }.ok_or(EcsError::MissingComponent(id, c))
     }
 

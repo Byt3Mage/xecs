@@ -3,10 +3,7 @@ use ahash::AHashMap;
 use crate::{
     component::{Signature, id::ComponentId},
     ecs::Ecs,
-    storage::{
-        block::Block,
-        table::{Column, ColumnMap, Table, TableData},
-    },
+    table::{Column, ColumnMap, Table, TableData},
     table_index::TableId,
 };
 
@@ -30,7 +27,7 @@ fn new_table(ecs: &mut Ecs, sig: Signature) -> TableId {
             let ci = &mut ecs.components[id];
             ci.insert_table(tid);
             col_map.insert(id, i);
-            columns.push(Column { id, data: Block::new(ci.meta.layout, ci.meta.dtor) })
+            columns.push(Column::new(id, &ci.meta))
         }
 
         Table {

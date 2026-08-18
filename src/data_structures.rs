@@ -72,6 +72,14 @@ impl<T> VecIdxU32<T> {
         self.0.len() as u32
     }
 
+    pub fn cap(&self) -> u32 {
+        self.0.capacity() as u32
+    }
+
+    pub fn reserve(&mut self, additional: u32) {
+        self.0.reserve(additional as usize);
+    }
+
     pub fn push(&mut self, value: T) {
         debug_assert!(self.len() < u32::MAX, "too many elements");
         self.0.push(value);

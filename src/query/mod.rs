@@ -71,30 +71,27 @@ impl<S: Select, F: Follows> TQuery<S, F> {
     pub fn each(&mut self, ecs: &mut Ecs, params: &[Id], mut f: impl FnMut(Id, S::Row<'_>, F::Get<'_>)) {
         let ctx = self.query.make_ctx(ecs, params);
         let plan = &self.query.physical;
-        let scope = &self.query.physical.scopes[0];
+        let scope = &plan.scopes[0];
 
-        for mt in plan.tables.iter() {
+        'matches: for mt in plan.tables.iter() {
             let table = &ecs.tables[mt.id];
-            let rows = table.num_rows();
+            let ids = table.ids();
 
-            if rows == 0 {
-                continue;
+            if ids.is_empty() {
+                continue 'matches;
             }
 
-            let ids = table.ids();
-            let columns = S::columns(table, &mt.columns);
+            let cols = S::columns(table, &mt.columns);
 
-            'table: for row in 0..rows {
-                // SAFETY: `row` is in bounds for this table
-                unsafe {
-                    let id = ids.add(row as usize).read();
-
-                    if !scope.check_relations(id, &ctx) {
-                        continue 'table;
-                    }
-
-                    f(id, S::row(columns, row), F::get(&ctx, 0, id, &scope.follows));
+            'table: for (row, &id) in table.ids().iter().enumerate() {
+                if !scope.check_relations(id, &ctx) {
+                    continue 'table;
                 }
+
+                // SAFETY: `row` indexes `ids`, whose length is this
+                // table's row count, and `columns` was taken from this
+                // same table.
+                f(id, unsafe { S::row(cols, row) }, F::get(&ctx, 0, id, &scope.follows));
             }
         }
     }

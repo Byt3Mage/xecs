@@ -9,7 +9,7 @@ use ahash::AHashMap;
 use crate::{
     component::Signature,
     graph::GraphNode,
-    storage::table::{ColumnMap, Table, TableData},
+    table::{ColumnMap, Table, TableData},
 };
 
 /// Stable, non-recycled handle into [TableIndex].

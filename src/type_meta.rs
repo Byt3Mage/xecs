@@ -1,6 +1,6 @@
-use std::{alloc::Layout, any::TypeId, mem, ptr::NonNull};
+use std::{alloc::Layout, any::TypeId, mem};
 
-pub type DropFn = Option<unsafe fn(ptr: NonNull<u8>)>;
+use crate::memory::DropFn;
 
 #[inline]
 const fn dtor<T>() -> DropFn {
@@ -9,7 +9,7 @@ const fn dtor<T>() -> DropFn {
 
 #[derive(Debug, Clone, Copy)]
 pub struct TypeMeta {
-    pub dtor: DropFn,
+    pub drop: DropFn,
     pub layout: Layout,
     pub type_id: Option<fn() -> TypeId>,
     pub type_name: Option<fn() -> &'static str>,
@@ -19,7 +19,7 @@ impl TypeMeta {
     #[inline]
     pub const fn of<T: 'static>() -> Self {
         Self {
-            dtor: dtor::<T>(),
+            drop: dtor::<T>(),
             layout: Layout::new::<T>(),
             type_id: Some(TypeId::of::<T>),
             type_name: Some(std::any::type_name::<T>),

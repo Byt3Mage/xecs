@@ -7,10 +7,11 @@ mod id;
 mod inline_vec;
 mod key;
 mod macros;
+mod memory;
 mod proto;
 mod query;
 mod relation;
-mod storage;
+mod table;
 mod table_index;
 mod type_meta;
 

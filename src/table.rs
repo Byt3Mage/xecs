@@ -1,46 +1,62 @@
-use std::{
-    alloc::{self, Layout},
-    cmp::Ordering,
-    ptr::NonNull,
-};
+use std::{cmp::Ordering, ptr::NonNull};
 
 use crate::{
+    TypeMeta,
     component::{Signature, id::ComponentId},
     ecs::Ecs,
     graph::GraphNode,
     id::Id,
-    storage::block::Block,
+    memory::{RawBlock, RowMeta},
     table_index::TableId,
 };
 
-/// [Id] must not require drop, i.e., must be a plain identifier
-const _: () = const { assert!(!std::mem::needs_drop::<Id>(), "Id must not require drop") };
-
-#[inline(always)]
-fn ids_layout(cap: u32) -> Layout {
-    Layout::array::<Id>(cap as usize).expect("capacity overflow")
+pub(crate) struct Column {
+    id: ComponentId,
+    meta: RowMeta,
+    data: RawBlock,
 }
 
-pub(crate) struct Column {
-    pub(crate) id: ComponentId,
-    pub(crate) data: Block,
+impl Column {
+    pub(crate) fn new(id: ComponentId, meta: &TypeMeta) -> Self {
+        let meta = RowMeta::new(meta.layout, meta.drop);
+        Self { id, meta, data: RawBlock::new(meta) }
+    }
+
+    pub(crate) fn row_ptr(&self, row: u32) -> NonNull<u8> {
+        self.data.row(self.meta, row)
+    }
+
+    /// Drop all elements in the block and deallocate.
+    ///
+    /// The block is dead afterwards: `self.drop` is cleared, so a second
+    /// call is a no-op rather than a double free. Values are dropped
+    /// before the deallocation, so an unwinding element destructor
+    /// leaks the allocation rather than freeing live memory.
+    ///
+    /// # Safety
+    /// - `len` is the number of initialized elements.
+    /// - `cap` is the current allocation capacity.
+    pub(crate) unsafe fn drop(&mut self, len: u32, cap: u32) {
+        unsafe {
+            self.data.drop_rows(self.meta, 0..len);
+            self.data.dealloc(self.meta, cap);
+        }
+    }
 }
 
 pub(crate) struct TableData {
+    ids: Vec<Id>,
     columns: Box<[Column]>,
-    ids: NonNull<Id>,
-    len: u32,
-    cap: u32,
 }
 
 impl TableData {
     pub(crate) fn new(columns: Box<[Column]>) -> Self {
-        Self { ids: NonNull::dangling(), columns, len: 0, cap: 0 }
+        Self { ids: vec![], columns }
     }
 
     #[inline(always)]
-    pub(crate) fn num_rows(&self) -> u32 {
-        self.len
+    pub(crate) fn len(&self) -> u32 {
+        self.ids.len() as u32
     }
 
     #[inline(always)]
@@ -50,29 +66,16 @@ impl TableData {
 
     /// Ensure all columns have capacity for at least `additional` more rows.
     #[inline(always)]
-    pub(crate) fn reserve(&mut self, additional: u32) {
-        let cap = self.cap;
-        let req = self.len.checked_add(additional).unwrap();
+    pub(crate) fn reserve(&mut self, additional: usize) {
+        let old = self.ids.capacity() as u32;
+        self.ids.reserve(additional);
+        let new = self.ids.capacity() as u32;
 
-        if req > cap {
-            unsafe {
-                let new = ids_layout(req);
-                let ptr = match cap == 0 {
-                    true => std::alloc::alloc(new),
-                    false => alloc::realloc(self.ids.as_ptr().cast(), ids_layout(cap), new.size()),
-                };
-
-                self.ids = match NonNull::new(ptr) {
-                    Some(ptr) => ptr.cast(),
-                    None => alloc::handle_alloc_error(new),
-                };
-
-                for col in self.columns.iter_mut() {
-                    // SAFETY: req > cap; old_cap is current capacity.
-                    col.data.realloc(cap, req)
-                }
+        if new > old {
+            for col in self.columns.iter_mut() {
+                // SAFETY: new > old, and old is the current capacity.
+                unsafe { col.data.grow(col.meta, old, new) }
             }
-            self.cap = req;
         }
     }
 
@@ -84,70 +87,60 @@ impl TableData {
     /// Caller must initialize every column at the returned row before any read.
     pub(crate) unsafe fn alloc_row(&mut self, id: Id) -> u32 {
         self.reserve(1);
-        let row = self.len;
-        self.len += 1;
-        unsafe { self.ids.add(row as usize).write(id) };
+        let row = self.len();
+        self.ids.push(id);
         row
     }
 
-    /// Swap-remove the row at `row`: drops every column's value at `row`, then
-    /// moves the last row's bytes into the hole and truncates.
+    /// Swap-remove the row at `row`: drops every column's value at `row`,
+    /// then moves the last row's bytes into the hole.
     ///
     /// Returns the entity swapped into `row`, if any.
     ///
     /// # Safety
-    /// `row` must be a valid row index. Unlike the previous design, this DROPS
-    /// the row's data itself. Callers that have already moved a column's bytes
-    /// out (e.g. table moves) must use [`swap_remove_row_no_drop`] instead.
+    /// `row` must be a valid row index. This DROPS the row's data.
+    /// Callers that have already moved a column's bytes out must use
+    /// [`swap_remove_row_no_drop`].
     pub(crate) unsafe fn swap_remove_row(&mut self, row: u32) -> Option<Id> {
-        debug_assert!(row < self.num_rows());
+        debug_assert!(row < self.len());
         unsafe {
             // SAFETY: row is valid and initialized.
-            self.columns.iter().for_each(|c| c.data.drop_row(row));
+            self.columns.iter().for_each(|c| c.data.drop_row(c.meta, row));
             self.swap_remove_row_no_drop(row)
         }
     }
 
     /// Like [`swap_remove_row`] but assumes the row's data has ALREADY been
-    /// dropped or moved out by the caller. Only relocates the last row.
+    /// dropped or moved out.
     ///
     /// # Safety
     /// - `row` valid.
     /// - Every column's slot at `row` is already dropped or moved out.
     pub(crate) unsafe fn swap_remove_row_no_drop(&mut self, row: u32) -> Option<Id> {
-        debug_assert!(row < self.num_rows());
-        let last = self.num_rows() - 1;
+        debug_assert!(row < self.len());
+        let last = self.len() - 1;
 
-        if row != last {
-            unsafe {
-                let src = self.ids.add(last as usize);
-                let dst = self.ids.add(row as usize);
-                let swapped = src.read();
+        self.ids.swap_remove(row as usize);
 
-                src.copy_to_nonoverlapping(dst, 1);
-                self.columns.iter().for_each(|c| c.data.copy_row(last, row));
-                self.len -= 1;
-                Some(swapped)
-            }
-        } else {
-            self.len -= 1;
-            None
+        if row == last {
+            return None;
         }
+
+        for col in self.columns.iter_mut() {
+            unsafe { col.data.shift(col.meta, last, row, 1) };
+        }
+
+        Some(self.ids[row as usize])
     }
 }
 
 impl Drop for TableData {
     fn drop(&mut self) {
-        if self.cap == 0 {
-            return;
-        }
-
-        let cap = self.cap;
-        let len = self.len;
-        unsafe {
-            alloc::dealloc(self.ids.as_ptr().cast(), ids_layout(cap));
-            self.columns.iter_mut().for_each(|c| c.data.drop(len, cap));
-        }
+        let len = self.ids.len() as u32;
+        let cap = self.ids.capacity() as u32;
+        // SAFETY: rows `0..len` are initialized; `cap` is the columns'
+        // capacity. The id vector releases itself.
+        self.columns.iter_mut().for_each(|c| unsafe { c.drop(len, cap) });
     }
 }
 
@@ -189,7 +182,7 @@ pub struct Table {
 impl Table {
     #[inline]
     pub fn num_rows(&self) -> u32 {
-        self.data.num_rows()
+        self.data.len()
     }
 
     #[inline]
@@ -198,14 +191,19 @@ impl Table {
     }
 
     #[inline(always)]
-    pub(crate) fn ids(&self) -> NonNull<Id> {
-        self.data.ids
+    pub(crate) fn ids(&self) -> &[Id] {
+        &self.data.ids
     }
 
     /// Borrow a column by index.
     #[inline(always)]
     pub(crate) fn column(&self, col: usize) -> &Column {
         &self.data.columns[col]
+    }
+
+    #[inline(always)]
+    pub(crate) fn column_ptr(&self, col: usize) -> NonNull<u8> {
+        self.data.columns[col].data.ptr()
     }
 }
 
@@ -229,20 +227,20 @@ pub(crate) unsafe fn move_id(ecs: &mut Ecs, id: Id, src_table: TableId, src_row:
     let mut di = 0;
 
     while si < src.num_cols() && di < dst.num_cols() {
-        let Column { id: src_id, data: src_data } = src.column(si);
-        let Column { id: dst_id, data: dst_data } = dst.column(di);
+        let src = src.column(si);
+        let dst = dst.column(di);
 
-        match src_id.cmp(dst_id) {
+        match src.id.cmp(&dst.id) {
             Ordering::Equal => {
                 // SAFETY: same component id ⇒ same type; rows valid.
-                unsafe { src_data.move_row_to(src_row, dst_data, dst_row) };
+                unsafe { src.data.move_row(src.meta, src_row, &dst.data, dst_row, 1) };
                 si += 1;
                 di += 1;
             }
             Ordering::Less => {
                 // Component removed: drop the src value.
                 // SAFETY: src_row valid and initialized.
-                unsafe { src_data.drop_row(src_row) };
+                unsafe { src.data.drop_row(src.meta, src_row) };
                 si += 1;
             }
             Ordering::Greater => {
@@ -254,7 +252,9 @@ pub(crate) unsafe fn move_id(ecs: &mut Ecs, id: Id, src_table: TableId, src_row:
 
     // Remaining src columns are removed components, drop all.
     // SAFETY: src_row valid and initialized.
-    (si..src.num_cols()).for_each(|i| unsafe { src.column(i).data.drop_row(src_row) });
+    for col in &mut src.data.columns[si..] {
+        unsafe { col.data.drop_row(col.meta, src_row) };
+    }
 
     // Src data at src_row is fully moved-out or dropped, so use the no-drop variant.
     // SAFETY: src_row valid; its columns are all moved out or dropped above.

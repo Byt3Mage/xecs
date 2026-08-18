@@ -13,6 +13,7 @@ use crate::{
 };
 
 pub mod directed;
+mod edges;
 pub mod hierarchy;
 pub mod id;
 pub mod storage;

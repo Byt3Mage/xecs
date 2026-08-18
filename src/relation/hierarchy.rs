@@ -3,8 +3,8 @@ use std::alloc::Layout;
 use crate::{
     Id, TypeMeta,
     data_structures::{Sparse, VecIdxU32},
-    relation::storage::{RelateError, Rows},
-    type_meta::DropFn,
+    memory::{RawBlock, RowMeta},
+    relation::storage::RelateError,
 };
 
 const NONE: u32 = u32::MAX;
@@ -41,29 +41,34 @@ struct Tree {
     order: VecIdxU32<Id>,
     parent: VecIdxU32<u32>,
     exit: VecIdxU32<u32>,
-    rows: Rows,
+    payload: RawBlock,
 }
 
 impl Drop for Tree {
     fn drop(&mut self) {
         // SAFETY: row 0 (root) holds nothing.
-        unsafe { self.rows.dispose(1..self.len()) };
+        unsafe { self.payload.drop_rows(1..self.len()) };
     }
 }
 
 impl Tree {
-    fn new(layout: Layout, drop: DropFn) -> Self {
+    fn new(meta: RowMeta) -> Self {
         Self {
             order: VecIdxU32::new(),
             parent: VecIdxU32::new(),
             exit: VecIdxU32::new(),
-            rows: Rows::new(layout, drop),
+            payload: RawBlock::new(meta),
         }
     }
 
     #[inline]
     fn len(&self) -> u32 {
         self.order.len()
+    }
+
+    #[inline]
+    fn cap(&self) -> u32 {
+        self.order.cap()
     }
 
     /// Tests if the `child` has a parent. A child has a parent when its
@@ -132,12 +137,12 @@ impl Tree {
     /// least `at`. Their `parent` shifts only when it too lay at or
     /// past `at`; a parent below `at` did not move.
     fn open(&mut self, at: u32, n: u32) {
-        let old = self.len();
-        self.rows.reserve(old + n);
+        let old = self.cap();
+        self.payload.grow(old + n);
 
         // SAFETY: capacity now covers old + n. The tail's values move
         // up; `[at, at + n)` is vacated and the caller fills it.
-        unsafe { self.rows.move_within(at, at + n, old - at) };
+        unsafe { self.payload.move_within(at, at + n, old - at) };
 
         let (a, k) = (at as usize, n as usize);
         self.order.splice(a..a, std::iter::repeat_n(Id::NULL, k));
@@ -161,7 +166,7 @@ impl Tree {
     /// `open`. A parent inside `[s, e)` is impossible: such a node
     /// would be a descendant of the node at `s`, and descendants are
     /// confined to `s..e`.
-    fn close(&mut self, s: u32, e: u32) {
+    fn close(&mut self, meta: RowMeta, s: u32, e: u32) {
         let n = e - s;
         let len = self.len();
 
@@ -174,7 +179,7 @@ impl Tree {
 
         // SAFETY: `[s, e)` was moved out by the caller, so the
         // destination holds nothing live.
-        unsafe { self.rows.move_within(e, s, len - e) };
+        unsafe { self.payload.shift(meta, e, s, len - e) };
 
         let (s, e) = (s as usize, e as usize);
         self.order.drain(s..e);
@@ -219,7 +224,7 @@ struct Scratch {
 
 impl Drop for Scratch {
     fn drop(&mut self) {
-        unsafe { self.rows.dispose(1..self.order.len()) };
+        unsafe { self.rows.drop_range(1..self.order.len()) };
     }
 }
 
@@ -260,9 +265,9 @@ impl Hierarchy {
         Self {
             trees: VecIdxU32::new(),
             locate: Sparse::new(),
-            scratch: Scratch::new(meta.layout, meta.dtor),
+            scratch: Scratch::new(meta.layout, meta.drop),
             elem_layout: meta.layout,
-            drop: meta.dtor,
+            drop: meta.drop,
         }
     }
 
@@ -307,7 +312,7 @@ impl Hierarchy {
         if tree.has_parent(s) {
             // SAFETY: `s` is in bounds and, having a parent, holds a
             // live value that nothing else will drop.
-            unsafe { tree.rows.drop_row(s) };
+            unsafe { tree.payload.drop_row(s) };
         }
 
         // Move rows 1..n only. Row 0 is dead either way — it was just
@@ -316,7 +321,7 @@ impl Hierarchy {
         // SAFETY: distinct blocks, same stride, both ranges reserved.
         // The source rows are dead after this and `close` will shift
         // over them without dropping.
-        unsafe { tree.rows.move_to(s + 1, &mut scratch.rows, 1, n - 1) };
+        unsafe { tree.payload.move_to(s + 1, &mut scratch.rows, 1, n - 1) };
     }
 
     /// Attach the staged fragment under `p` in tree `t`, as its last
@@ -350,7 +355,7 @@ impl Hierarchy {
         // SAFETY: `open` reserved and vacated `[at, at + n)`. Rows move
         // in, so neither side drops them; row `at` stays uninitialised
         // until the caller writes the new edge.
-        unsafe { scratch.rows.move_to(1, &mut tree.rows, at + 1, n - 1) };
+        unsafe { scratch.rows.move_to(1, &mut tree.payload, at + 1, n - 1) };
 
         scratch.order.clear();
         scratch.parent.clear();
@@ -366,13 +371,13 @@ impl Hierarchy {
         let n = self.scratch.order.len();
 
         let mut tree = Tree::new(self.elem_layout, self.drop);
-        tree.rows.reserve(n);
+        tree.payload.reserve(n);
         tree.order.extend_from_slice(&self.scratch.order);
         tree.parent.extend_from_slice(&self.scratch.parent);
         tree.exit.extend_from_slice(&self.scratch.exit);
 
         // SAFETY: capacity reserved above; rows move in.
-        unsafe { self.scratch.rows.move_to(1, &mut tree.rows, 1, n - 1) };
+        unsafe { self.scratch.rows.move_to(1, &mut tree.payload, 1, n - 1) };
 
         self.scratch.order.clear();
         self.scratch.parent.clear();
@@ -432,7 +437,7 @@ impl Hierarchy {
 
         let t = self.trees.len();
         let mut tree = Tree::new(self.elem_layout, self.drop);
-        tree.rows.reserve(1);
+        tree.payload.reserve(1);
         tree.order.push(id);
         tree.parent.push(NONE);
         tree.exit.push(1);
@@ -522,7 +527,7 @@ impl Hierarchy {
             let l = self.locate[child];
             // SAFETY: `child` has a parent, so by invariant 4
             // the row is live and this is the only reference to it.
-            unsafe { self.trees[l.tree].rows.replace(l.slot, payload) };
+            unsafe { self.trees[l.tree].payload.replace(l.slot, payload) };
             return Ok(());
         }
 
@@ -539,7 +544,7 @@ impl Hierarchy {
 
         let l = self.locate[child];
         // SAFETY: the row was reserved by `open` and never written.
-        unsafe { self.trees[l.tree].rows.write(l.slot, payload) };
+        unsafe { self.trees[l.tree].payload.write(l.slot, payload) };
 
         Ok(())
     }
@@ -616,7 +621,7 @@ impl Hierarchy {
         //
         // SAFETY: `[s, e)` is within `len` and nothing else references
         // these values.
-        unsafe { self.trees[t].rows.drop_range(s..e) };
+        unsafe { self.trees[t].payload.drop_range(s..e) };
 
         let p = self.trees[t].parent[s];
         let old_parent = self.trees[t].order[p];

@@ -214,14 +214,14 @@ impl Directed {
             // `unique_source`: one successor per node, so the path is
             // linear and cannot revisit — a repeat would already be a
             // cycle, which the invariant forbids. O(depth), no scratch.
-            Target::One { targets, .. } => {
+            Target::One(e) => {
                 let mut cur = from;
                 loop {
                     if cur == goal {
                         return true;
                     }
                     match self.forward.sparse.get(cur) {
-                        Some(&next) => cur = targets[next],
+                        Some(&next) => cur = e.target(next),
                         None => return false,
                     }
                 }
@@ -232,7 +232,7 @@ impl Directed {
             // `seen` is required rather than an optimisation: a DAG can
             // reach one node by several paths, and a diamond without it
             // re-traverses exponentially.
-            Target::Many { targets, .. } => {
+            Target::Many(e) => {
                 let Scratch { stack, seen, .. } = &mut self.scratch;
                 stack.clear();
                 seen.begin();
@@ -246,7 +246,7 @@ impl Directed {
                         continue;
                     }
                     if let Some(&slot) = self.forward.sparse.get(cur) {
-                        stack.extend_from_slice(&targets[slot]);
+                        stack.extend_from_slice(e[slot].targets());
                     }
                 }
                 false

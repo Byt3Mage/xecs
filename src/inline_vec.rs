@@ -244,7 +244,7 @@ impl<T, const N: usize> InlineVec<T, N> {
 
         unsafe {
             let new_ptr = if self.cap > N {
-                let old_layout = Layout::array::<T>(self.cap).unwrap_unchecked();
+                let old_layout = Layout::array::<T>(self.cap).expect("layout was valid at allocation");
                 alloc::realloc(self.data.heap.as_ptr() as *mut u8, old_layout, new_layout.size())
             } else {
                 let p = alloc::alloc(new_layout);
