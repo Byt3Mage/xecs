@@ -3,8 +3,9 @@ use std::{collections::hash_map::Entry, sync::Arc};
 use ahash::AHashMap;
 
 use crate::{
-    Id, RelationKey, Shape, TypeMeta,
-    key::relation_key_count,
+    Ecs, Id, RelationKey, Shape, TypeMeta,
+    key::{UnregisteredKey, relation_key_count, unregistered},
+    macros::impl_registry,
     relation::{
         id::RelationId,
         storage::{Edges, RelateError, Storage},
@@ -113,25 +114,27 @@ impl RelationInfo {
 }
 pub struct RelationRegistry {
     infos: Vec<RelationInfo>,
-    paths: AHashMap<Path, RelationId>,
     keys: Box<[Option<RelationId>]>,
+    id_by_path: AHashMap<Path, RelationId>,
 }
+
+impl_registry!(RelationRegistry[RelationId] -> RelationInfo);
 
 impl RelationRegistry {
     pub fn new() -> Self {
         Self {
             infos: vec![],
-            paths: AHashMap::new(),
+            id_by_path: AHashMap::new(),
             keys: vec![None; relation_key_count()].into_boxed_slice(),
         }
     }
 
-    pub fn register<T: HasMeta>(&mut self, key: &RelationKey<T>) -> Result<RelationId, RelationRegisterError> {
+    pub fn register<T: HasMeta>(&mut self, key: &RelationKey) -> Result<RelationId, RelationRegisterError> {
         let slot = key.slot() as usize;
         Ok(match self.keys[slot] {
             Some(id) => id,
             None => {
-                let id = self.new_relation(Some(key.path().into()), key.topo(), *T::META)?;
+                let id = self.new_relation(Some(key.path().into()), key.shape(), *T::META)?;
                 self.keys[slot] = Some(id);
                 id
             }
@@ -144,7 +147,7 @@ impl RelationRegistry {
         shape: Shape,
         meta: TypeMeta,
     ) -> Result<RelationId, RelationRegisterError> {
-        debug_assert!(self.infos.len() <= (u32::MAX as usize), "too many relations");
+        debug_assert!(self.infos.len() < (u32::MAX as usize), "too many relations");
         let id = RelationId::from_raw(self.infos.len() as u32);
         let path = match path {
             None => id.to_string().into(),
@@ -152,7 +155,7 @@ impl RelationRegistry {
                 if p.starts_with(ID_PREFIX) {
                     return Err(RelationRegisterError::ReservedPrefix(p));
                 }
-                match self.paths.entry(p.clone()) {
+                match self.id_by_path.entry(p.clone()) {
                     Entry::Vacant(e) => e.insert(id),
                     Entry::Occupied(_) => return Err(RelationRegisterError::DuplicatePath(p)),
                 };
@@ -164,33 +167,30 @@ impl RelationRegistry {
         Ok(id)
     }
 
-    pub fn find_by_name(&self, name: &str) -> Option<RelationId> {
-        match name.strip_prefix(ID_PREFIX) {
+    pub fn find_by_path(&self, path: &str) -> Option<RelationId> {
+        match path.strip_prefix(ID_PREFIX) {
             Some(n) => {
                 let id = n.parse().ok()?;
                 ((id as usize) < self.infos.len()).then(|| RelationId::from_raw(id))
             }
-            None => self.paths.get(name).copied(),
+            None => self.id_by_path.get(path).copied(),
         }
     }
 
     #[inline(always)]
-    pub fn find<T: HasMeta>(&self, key: &RelationKey<T>) -> Option<RelationId> {
+    pub fn find(&self, key: &RelationKey) -> Option<RelationId> {
         self.keys[key.slot() as usize]
     }
 }
 
-impl std::ops::Index<RelationId> for RelationRegistry {
-    type Output = RelationInfo;
-    #[inline]
-    fn index(&self, index: RelationId) -> &Self::Output {
-        &self.infos[index.index()]
-    }
-}
-
-impl std::ops::IndexMut<RelationId> for RelationRegistry {
-    #[inline]
-    fn index_mut(&mut self, index: RelationId) -> &mut Self::Output {
-        &mut self.infos[index.index()]
-    }
+/// Resolve `key` to the id it registered under.
+///
+/// This is the sole bridge between a typed key and an untyped column,
+/// and the sole justification for the `*_raw` calls below: the slot →
+/// id mapping is written once, at registration, from `T::META` of this
+/// same key type. A `ComponentId` obtained any other way (`new_component`,
+/// `find_by_name`) cannot reach these functions, because they take a key.
+#[inline(always)]
+pub fn resolve(ecs: &Ecs, key: &RelationKey) -> Result<RelationId, UnregisteredKey> {
+    ecs.relations.find(key).ok_or_else(|| unregistered(key.untyped()))
 }

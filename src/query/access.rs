@@ -56,7 +56,7 @@ impl<T> Copy for ColumnPtr<'_, T> {}
 
 impl<'a, T> ColumnPtr<'a, T> {
     #[inline(always)]
-    fn new(table: &'a Table, index: usize) -> Self {
+    fn new(table: &'a Table, index: u32) -> Self {
         Self {
             ptr: table.column_ptr(index).cast(),
             marker: PhantomData,
@@ -125,19 +125,19 @@ pub trait TypedAccess: SealedFetch {
 impl<T: 'static> TypedAccess for &T {
     type Row<'a> = &'a T;
     type Column<'a> = ColumnPtr<'a, T>;
-    type ColumnIndex = usize;
+    type ColumnIndex = u32;
 
     fn describe() -> TypedAccessDesc {
         TypedAccessDesc::of::<T>(AccessMode::Read, false)
     }
 
     #[inline(always)]
-    fn column_index(raw: usize) -> usize {
-        raw
+    fn column_index(raw: usize) -> Self::ColumnIndex {
+        raw as u32
     }
 
     #[inline(always)]
-    fn column(table: &Table, index: usize) -> Self::Column<'_> {
+    fn column(table: &Table, index: Self::ColumnIndex) -> Self::Column<'_> {
         ColumnPtr::new(table, index)
     }
 
@@ -150,7 +150,7 @@ impl<T: 'static> TypedAccess for &T {
 impl<T: 'static> TypedAccess for &mut T {
     type Row<'a> = &'a mut T;
     type Column<'a> = NonNull<T>;
-    type ColumnIndex = usize;
+    type ColumnIndex = u32;
 
     fn describe() -> TypedAccessDesc {
         TypedAccessDesc::of::<T>(AccessMode::Write, false)
@@ -158,7 +158,7 @@ impl<T: 'static> TypedAccess for &mut T {
 
     #[inline(always)]
     fn column_index(raw: usize) -> Self::ColumnIndex {
-        raw
+        raw as u32
     }
 
     #[inline(always)]
@@ -175,14 +175,14 @@ impl<T: 'static> TypedAccess for &mut T {
 impl<T: 'static> TypedAccess for Option<&T> {
     type Row<'a> = Option<&'a T>;
     type Column<'a> = Option<ColumnPtr<'a, T>>;
-    type ColumnIndex = Option<usize>;
+    type ColumnIndex = Option<u32>;
 
     fn describe() -> TypedAccessDesc {
         TypedAccessDesc::of::<T>(AccessMode::Read, true)
     }
 
     fn column_index(raw: usize) -> Self::ColumnIndex {
-        (raw != usize::MAX).then_some(raw)
+        (raw != usize::MAX).then_some(raw as u32)
     }
 
     fn column(table: &Table, index: Self::ColumnIndex) -> Self::Column<'_> {
@@ -197,14 +197,14 @@ impl<T: 'static> TypedAccess for Option<&T> {
 impl<T: 'static> TypedAccess for Option<&mut T> {
     type Row<'a> = Option<&'a mut T>;
     type Column<'a> = Option<ColumnPtr<'a, T>>;
-    type ColumnIndex = Option<usize>;
+    type ColumnIndex = Option<u32>;
 
     fn describe() -> TypedAccessDesc {
         TypedAccessDesc::of::<T>(AccessMode::Write, true)
     }
 
     fn column_index(raw: usize) -> Self::ColumnIndex {
-        (raw != usize::MAX).then_some(raw)
+        (raw != usize::MAX).then_some(raw as u32)
     }
 
     fn column(table: &Table, index: Self::ColumnIndex) -> Self::Column<'_> {

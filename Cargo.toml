@@ -5,6 +5,8 @@ version = "0.1.0"
 edition = "2024"
 description = "eXtended ecs"
 
+[lib]
+doctest = false
 
 [dependencies]
 linkme = "0.3.37"

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, rc::Rc};
+use std::rc::Rc;
 
 use crate::{
     Ecs, Id,
@@ -89,7 +89,6 @@ pub struct PlanBuilder {
     access: Vec<Access>,
     scopes: Vec<LogicalScope>,
     follows: Vec<LogicalFollow>,
-    labels: HashMap<Rc<str>, ScopeId>,
     current: ScopeId,
 }
 
@@ -105,7 +104,6 @@ impl PlanBuilder {
             access: vec![],
             scopes: vec![],
             follows: vec![],
-            labels: HashMap::new(),
             current: 0,
         }
     }

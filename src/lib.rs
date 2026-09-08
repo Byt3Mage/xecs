@@ -1,24 +1,27 @@
+mod bundle;
 mod component;
 mod data_structures;
 mod ecs;
 mod error;
-mod graph;
 mod id;
 mod inline_vec;
 mod key;
 mod macros;
 mod memory;
-mod proto;
 mod query;
 mod relation;
 mod table;
-mod table_index;
+mod table_registry;
 mod type_meta;
 
 #[doc(hidden)]
 pub use linkme as __linkme;
 
-pub use component::{ComponentRegisterError, id::ComponentId};
+pub use component::{
+    ComponentRegisterError,
+    id::{ComponentId, IntoComponentId},
+    signature::Signature,
+};
 pub use ecs::Ecs;
 pub use error::EcsError;
 pub use id::Id;
@@ -30,5 +33,9 @@ pub use query::{
     error::{PlanValidationError, ValidationError},
     logical::{LogicalPlan, PlanBuilder},
 };
-pub use relation::{RelationRegisterError, id::RelationId, storage::Shape};
+pub use relation::{
+    RelationRegisterError,
+    id::{IntoRelationId, RelationId},
+    storage::Shape,
+};
 pub use type_meta::TypeMeta;

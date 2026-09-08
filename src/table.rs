@@ -1,29 +1,31 @@
-use std::{cmp::Ordering, ptr::NonNull};
+use std::ptr::NonNull;
 
 use crate::{
     TypeMeta,
-    component::{Signature, id::ComponentId},
+    bundle::{Bundle, InsertEdge, RemoveEdge},
+    component::{id::ComponentId, registry::ComponentRegistry, signature::Signature},
     ecs::Ecs,
-    graph::GraphNode,
-    id::Id,
-    memory::{RawBlock, RowMeta},
-    table_index::TableId,
+    id::{
+        Id,
+        allocator::{IdAllocator, IdRecord},
+    },
+    memory::{RawBlock, RowLayout},
+    table_registry::{TableId, TableRegistry},
 };
 
 pub(crate) struct Column {
-    id: ComponentId,
-    meta: RowMeta,
     data: RawBlock,
+    layout: RowLayout,
 }
 
 impl Column {
-    pub(crate) fn new(id: ComponentId, meta: &TypeMeta) -> Self {
-        let meta = RowMeta::new(meta.layout, meta.drop);
-        Self { id, meta, data: RawBlock::new(meta) }
+    pub(crate) fn new(meta: &TypeMeta) -> Self {
+        let layout = RowLayout::from_meta(meta);
+        Self { data: RawBlock::new(layout), layout }
     }
 
     pub(crate) fn row_ptr(&self, row: u32) -> NonNull<u8> {
-        self.data.row(self.meta, row)
+        self.data.row(self.layout.size(), row)
     }
 
     /// Drop all elements in the block and deallocate.
@@ -36,10 +38,10 @@ impl Column {
     /// # Safety
     /// - `len` is the number of initialized elements.
     /// - `cap` is the current allocation capacity.
-    pub(crate) unsafe fn drop(&mut self, len: u32, cap: u32) {
+    unsafe fn drop(&mut self, len: u32, cap: u32) {
         unsafe {
-            self.data.drop_rows(self.meta, 0..len);
-            self.data.dealloc(self.meta, cap);
+            self.data.drop_rows(self.layout, 0..len);
+            self.data.dealloc(self.layout, cap);
         }
     }
 }
@@ -74,7 +76,7 @@ impl TableData {
         if new > old {
             for col in self.columns.iter_mut() {
                 // SAFETY: new > old, and old is the current capacity.
-                unsafe { col.data.grow(col.meta, old, new) }
+                unsafe { col.data.grow(col.layout, old, new) }
             }
         }
     }
@@ -105,7 +107,7 @@ impl TableData {
         debug_assert!(row < self.len());
         unsafe {
             // SAFETY: row is valid and initialized.
-            self.columns.iter().for_each(|c| c.data.drop_row(c.meta, row));
+            self.columns.iter().for_each(|c| c.data.drop_row(c.layout, row));
             self.swap_remove_row_no_drop(row)
         }
     }
@@ -127,7 +129,7 @@ impl TableData {
         }
 
         for col in self.columns.iter_mut() {
-            unsafe { col.data.shift(col.meta, last, row, 1) };
+            unsafe { col.data.shift(col.layout, last, row, 1) };
         }
 
         Some(self.ids[row as usize])
@@ -145,7 +147,7 @@ impl Drop for TableData {
 }
 
 pub(crate) struct ColumnMap {
-    values: Vec<usize>,
+    values: Vec<u32>,
 }
 
 impl ColumnMap {
@@ -153,22 +155,20 @@ impl ColumnMap {
         Self { values: vec![] }
     }
 
-    pub(crate) fn insert(&mut self, id: ComponentId, value: usize) {
+    pub(crate) fn insert(&mut self, id: ComponentId, value: u32) {
         let idx = id.index();
         if idx >= self.values.len() {
-            self.values.resize(idx + 1, usize::MAX);
+            self.values.resize(idx + 1, u32::MAX);
         }
         self.values[idx] = value;
     }
 
-    pub(crate) fn get(&self, id: ComponentId) -> Option<usize> {
-        self.values
-            .get(id.index())
-            .and_then(|&v| (v != usize::MAX).then_some(v))
+    pub(crate) fn try_get(&self, id: ComponentId) -> Option<u32> {
+        self.values.get(id.index()).and_then(|&v| (v != u32::MAX).then_some(v))
     }
 
     pub(crate) fn contains(&self, id: ComponentId) -> bool {
-        self.values.get(id.index()).is_some_and(|&v| v != usize::MAX)
+        self.values.get(id.index()).is_some_and(|&v| v != u32::MAX)
     }
 }
 
@@ -176,7 +176,6 @@ pub struct Table {
     pub(crate) sig: Signature,
     pub(crate) data: TableData,
     pub(crate) col_map: ColumnMap,
-    pub(crate) node: GraphNode,
 }
 
 impl Table {
@@ -197,78 +196,153 @@ impl Table {
 
     /// Borrow a column by index.
     #[inline(always)]
-    pub(crate) fn column(&self, col: usize) -> &Column {
-        &self.data.columns[col]
+    pub(crate) fn column(&self, col: u32) -> &Column {
+        &self.data.columns[col as usize]
     }
 
     #[inline(always)]
-    pub(crate) fn column_ptr(&self, col: usize) -> NonNull<u8> {
-        self.data.columns[col].data.ptr()
+    pub(crate) fn column_ptr(&self, col: u32) -> NonNull<u8> {
+        self.data.columns[col as usize].data.ptr()
     }
 }
 
-/// Moves an entity from one table to another. Returns the new row for the id.
-///
-/// - For columns present in both tables, data is moved (memcpy + no drop on src).
-/// - For columns only in src, data is dropped.
-/// - For columns only in dst, the data is left uninitialized for caller to fill.
+pub(crate) fn new_table(id: TableId, components: &mut ComponentRegistry, sig: Signature) -> Table {
+    let mut col_map = ColumnMap::new();
+    let mut columns = Vec::with_capacity(sig.len());
+
+    for (i, &cid) in sig.iter().enumerate() {
+        let ci = &mut components[cid];
+        ci.insert_table(id);
+        col_map.insert(cid, i as u32);
+        columns.push(Column::new(&ci.meta))
+    }
+
+    Table { sig, col_map, data: TableData::new(columns.into()) }
+}
+
+/// Moves `id`'s row from `r.table` to `edge.dst` under `bundle`, leaving every
+/// destination column initialized.
 ///
 /// # Safety
-/// - `src_row` must be valid in src table.
-/// - caller must initialize all uninitialized columns.
-pub(crate) unsafe fn move_id(ecs: &mut Ecs, id: Id, src_table: TableId, src_row: u32, dst_table: TableId) -> u32 {
-    let [src, dst] = ecs.tables.get_2_mut(src_table, dst_table);
-
-    // SAFETY: caller initializes dst-only columns below / after.
-    let dst_row = unsafe { dst.data.alloc_row(id) };
-
-    // Merge-walk both column arrays by component id (both sorted by id).
-    let mut si = 0;
-    let mut di = 0;
-
-    while si < src.num_cols() && di < dst.num_cols() {
-        let src = src.column(si);
-        let dst = dst.column(di);
-
-        match src.id.cmp(&dst.id) {
-            Ordering::Equal => {
-                // SAFETY: same component id ⇒ same type; rows valid.
-                unsafe { src.data.move_row(src.meta, src_row, &dst.data, dst_row, 1) };
-                si += 1;
-                di += 1;
-            }
-            Ordering::Less => {
-                // Component removed: drop the src value.
-                // SAFETY: src_row valid and initialized.
-                unsafe { src.data.drop_row(src.meta, src_row) };
-                si += 1;
-            }
-            Ordering::Greater => {
-                // Component added: dst slot stays uninitialized (caller fills).
-                di += 1;
+/// - `id` is live at `r`, and `dst_row` was allocated in `edge.dst` for `id`
+///   (or is `r.row` when `edge.dst` is `r.table`).
+/// - `edge` was built by `plan` for this source table and this bundle.
+/// - `bundle`'s fields are ascending by component id and each payload is a
+///   valid value of its column's type; ownership transfers to the table.
+/// - Component drop glue does not unwind.
+pub(crate) unsafe fn insert(
+    tables: &mut TableRegistry,
+    ids: &mut IdAllocator,
+    id: Id,
+    r: IdRecord,
+    edge: &InsertEdge,
+    bundle: impl Bundle,
+) {
+    match edge {
+        InsertEdge::InPlace { writes } => {
+            let table = &tables[r.table];
+            let mut i = 0;
+            // SAFETY: `write` yields one payload per id, in `cols` order.
+            unsafe {
+                bundle.write(&mut |src| {
+                    let col = table.column(writes[i].col);
+                    let row = col.data.row(col.layout.size(), r.row);
+                    col.layout.drop(row);
+                    row.copy_from_nonoverlapping(src, col.layout.size());
+                    i += 1;
+                });
             }
         }
-    }
+        InsertEdge::Moved { dst: dst_id, drops, moves, writes } => {
+            let (src, dst) = tables.get_2_mut(r.table, *dst_id);
+            // SAFETY: every destination column is filled below.
+            let dst_row = unsafe { dst.data.alloc_row(id) };
 
-    // Remaining src columns are removed components, drop all.
-    // SAFETY: src_row valid and initialized.
-    for col in &mut src.data.columns[si..] {
-        unsafe { col.data.drop_row(col.meta, src_row) };
-    }
+            // Components a payload replaces. Dropped before the row is vacated so
+            // the vacate itself has nothing left to release.
+            for d in drops.iter() {
+                let c = src.column(d.col);
+                // SAFETY: `r.row` is live and initialized in this column.
+                unsafe { c.data.drop_row(c.layout, r.row) };
+            }
 
-    // Src data at src_row is fully moved-out or dropped, so use the no-drop variant.
-    // SAFETY: src_row valid; its columns are all moved out or dropped above.
-    if let Some(swapped) = unsafe { src.data.swap_remove_row_no_drop(src_row) } {
-        ecs.ids.set_location(swapped, src_table, src_row);
-    }
+            for m in moves.iter() {
+                let s = src.column(m.src);
+                let d = dst.column(m.dst);
+                // SAFETY: the pair comes from the plan, so both columns hold
+                // the same component and therefore the same type; both rows
+                // are valid, and the source slot is left dead.
+                unsafe { s.data.move_row(s.layout, r.row, &d.data, dst_row, 1) };
+            }
 
-    // Update the moved id's record to point to new table and row.
-    ecs.ids.set_location(id, dst_table, dst_row);
-    dst_row
+            let mut i = 0;
+            // SAFETY: `write` yields one payload per id, in `cols` order.
+            unsafe {
+                bundle.write(&mut |src| {
+                    let col = dst.column(writes[i].col);
+                    let row = col.data.row(col.layout.size(), r.row);
+                    col.layout.drop(row);
+                    row.copy_from_nonoverlapping(src, col.layout.size());
+                    i += 1;
+                });
+            }
+
+            // SAFETY: every column of `r.row` has been moved out or dropped.
+            if let Some(moved) = unsafe { src.data.swap_remove_row_no_drop(r.row) } {
+                ids.set_location(moved, IdRecord { table: r.table, row: r.row });
+            }
+
+            ids.set_location(id, IdRecord { table: *dst_id, row: dst_row });
+        }
+    }
 }
 
-pub(crate) unsafe fn remove_id(ecs: &mut Ecs, table: TableId, row: u32) {
-    if let Some(swapped) = unsafe { ecs.tables[table].data.swap_remove_row(row) } {
-        ecs.ids.set_location(swapped, table, row);
+/// Moves `id`'s row from `r.table` to `edge.dst` under `bundle`, leaving every
+/// destination column initialized.
+///
+/// # Safety
+/// - `id` is live at `r`, and `dst_row` was allocated in `edge.dst` for `id`
+///   (or is `r.row` when `edge.dst` is `r.table`).
+/// - `edge` was built by `plan` for this source table and this bundle.
+/// - `bundle`'s fields are ascending by component id and each payload is a
+///   valid value of its column's type; ownership transfers to the table.
+/// - Component drop glue does not unwind.
+pub(crate) unsafe fn remove(tables: &mut TableRegistry, ids: &mut IdAllocator, id: Id, r: IdRecord, edge: &RemoveEdge) {
+    let RemoveEdge::Moved { dst: dst_id, drops, moves } = edge else { return };
+
+    let (src, dst) = tables.get_2_mut(r.table, *dst_id);
+
+    // SAFETY: every destination column is filled by `moves` below. The
+    // destination signature is the source's minus the dropped components.
+    let dst_row = unsafe { dst.data.alloc_row(id) };
+
+    // Components removed from `src`.
+    for d in drops {
+        let col = src.column(d.col);
+        // SAFETY: The row comes from a live id record and
+        // the data is no longer read from since the id is
+        // moved across tables.
+        unsafe { col.data.drop_row(col.layout, r.row) };
+    }
+
+    // Components transfered from `src` to `dst`.
+    for mov in moves {
+        let s = src.column(mov.src);
+        let d = dst.column(mov.dst);
+        // SAFETY: the pair comes from `plan`, so both columns hold the same
+        // component and therefore the same type. Both rows are valid.
+        unsafe { s.data.move_row(s.layout, r.row, &d.data, dst_row, 1) };
+    }
+
+    if let Some(moved) = unsafe { src.data.swap_remove_row_no_drop(r.row) } {
+        ids.set_location(moved, r);
+    }
+
+    ids.set_location(id, IdRecord { table: *dst_id, row: dst_row });
+}
+
+pub(crate) unsafe fn remove_id(ecs: &mut Ecs, r: IdRecord) {
+    if let Some(swapped) = unsafe { ecs.tables[r.table].data.swap_remove_row(r.row) } {
+        ecs.ids.set_location(swapped, r);
     }
 }

@@ -6,7 +6,7 @@ use std::{
     },
 };
 
-use crate::{Shape, TypeMeta, type_meta::HasMeta};
+use crate::{Shape, type_meta::HasMeta};
 
 const NULL_KEY: u32 = u32::MAX;
 
@@ -87,7 +87,7 @@ pub fn init_relation_keys() -> usize {
         for pair in ids.windows(2) {
             assert!(
                 pair[0].path != pair[1].path,
-                "duplicate component path `{}`",
+                "duplicate relation path `{}`",
                 pair[0].path
             );
         }
@@ -107,29 +107,36 @@ pub fn relation_key_count() -> usize {
 }
 
 pub struct ComponentKey<T: HasMeta> {
-    id: UntypedKey,
+    inner: &'static UntypedKey,
     marker: PhantomData<fn() -> T>,
+}
+
+impl<T: HasMeta> Copy for ComponentKey<T> {}
+impl<T: HasMeta> Clone for ComponentKey<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
 }
 
 impl<T: HasMeta> ComponentKey<T> {
     #[inline(always)]
-    pub const fn new(path: &'static str) -> Self {
-        Self { id: UntypedKey::new(path), marker: PhantomData }
+    pub const fn new(inner: &'static UntypedKey) -> Self {
+        Self { inner, marker: PhantomData }
     }
 
     #[inline(always)]
     pub const fn untyped(&self) -> &UntypedKey {
-        &self.id
+        self.inner
     }
 
     #[inline(always)]
     pub(crate) fn slot(&self) -> u32 {
-        self.id.slot()
+        self.inner.slot()
     }
 
     #[inline(always)]
     pub const fn path(&self) -> &'static str {
-        self.id.path()
+        self.inner.path()
     }
 }
 
@@ -140,17 +147,17 @@ impl<T: HasMeta> std::fmt::Display for ComponentKey<T> {
     }
 }
 
-pub struct RelationKey<T: HasMeta> {
-    id: UntypedKey,
+#[derive(Debug, Clone, Copy)]
+pub struct RelationKey {
+    inner: &'static UntypedKey,
     shape: Shape,
-    marker: PhantomData<fn() -> T>,
 }
 
-impl<T: HasMeta> RelationKey<T> {
+impl RelationKey {
     #[inline(always)]
-    pub const fn new(path: &'static str) -> Self {
+    pub const fn new(inner: &'static UntypedKey) -> Self {
         Self::new_with_shape(
-            path,
+            inner,
             Shape::Directed {
                 unique_source: false,
                 unique_target: false,
@@ -161,41 +168,32 @@ impl<T: HasMeta> RelationKey<T> {
     }
 
     #[inline(always)]
-    pub const fn new_with_shape(path: &'static str, shape: Shape) -> Self {
-        Self {
-            id: UntypedKey::new(path),
-            shape,
-            marker: PhantomData,
-        }
+    pub const fn new_with_shape(inner: &'static UntypedKey, shape: Shape) -> Self {
+        Self { inner, shape }
     }
 
     #[inline(always)]
     pub const fn untyped(&self) -> &UntypedKey {
-        &self.id
+        self.inner
     }
 
     #[inline(always)]
     pub(crate) fn slot(&self) -> u32 {
-        self.id.slot()
+        self.inner.slot()
     }
 
     #[inline(always)]
     pub const fn path(&self) -> &'static str {
-        self.id.path()
+        self.inner.path()
     }
 
     #[inline(always)]
-    pub const fn topo(&self) -> Shape {
+    pub const fn shape(&self) -> Shape {
         self.shape
-    }
-
-    #[inline(always)]
-    pub const fn meta(&self) -> &'static TypeMeta {
-        T::META
     }
 }
 
-impl<T: HasMeta> std::fmt::Display for RelationKey<T> {
+impl std::fmt::Display for RelationKey {
     #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.untyped().fmt(f)
@@ -203,13 +201,12 @@ impl<T: HasMeta> std::fmt::Display for RelationKey<T> {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("unregistered key: Key#{id}({path})")]
+#[error("unregistered ({path})")]
 pub struct UnregisteredKey {
-    pub id: u32,
     pub path: &'static str,
 }
 
 #[inline]
 pub fn unregistered(key: &UntypedKey) -> UnregisteredKey {
-    UnregisteredKey { id: key.slot(), path: key.path() }
+    UnregisteredKey { path: key.path() }
 }

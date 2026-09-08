@@ -228,7 +228,11 @@ impl<T, const N: usize> InlineVec<T, N> {
         // ZSTs have cap == usize::MAX, so len can never reach it without
         // overflowing the address space first. Unreachable in practice.
         debug_assert!(!Self::IS_ZST);
-        let new_cap = if self.cap > N { self.cap.checked_mul(2).expect("capacity overflow") } else { (N * 2).max(4) };
+        let new_cap = if self.cap > N {
+            self.cap.checked_mul(2).expect("capacity overflow")
+        } else {
+            (N * 2).max(4)
+        };
         self.grow_to(new_cap);
     }
 
@@ -240,21 +244,34 @@ impl<T, const N: usize> InlineVec<T, N> {
         debug_assert!(new_cap > self.cap);
 
         let new_layout = Layout::array::<T>(new_cap).expect("capacity overflow");
-        assert!(new_layout.size() <= isize::MAX as usize, "allocation too large");
+        assert!(
+            new_layout.size() <= isize::MAX as usize,
+            "allocation too large"
+        );
 
         unsafe {
             let new_ptr = if self.cap > N {
-                let old_layout = Layout::array::<T>(self.cap).expect("layout was valid at allocation");
-                alloc::realloc(self.data.heap.as_ptr() as *mut u8, old_layout, new_layout.size())
+                let old_layout =
+                    Layout::array::<T>(self.cap).expect("layout was valid at allocation");
+                alloc::realloc(
+                    self.data.heap.as_ptr() as *mut u8,
+                    old_layout,
+                    new_layout.size(),
+                )
             } else {
                 let p = alloc::alloc(new_layout);
                 if !p.is_null() {
-                    ptr::copy_nonoverlapping(self.data.inline.as_ptr() as *const T, p as *mut T, self.len);
+                    ptr::copy_nonoverlapping(
+                        self.data.inline.as_ptr() as *const T,
+                        p as *mut T,
+                        self.len,
+                    );
                 }
                 p
             };
 
-            let ptr = NonNull::new(new_ptr as *mut T).unwrap_or_else(|| alloc::handle_alloc_error(new_layout));
+            let ptr = NonNull::new(new_ptr as *mut T)
+                .unwrap_or_else(|| alloc::handle_alloc_error(new_layout));
             self.data.heap = ptr;
             self.cap = new_cap;
         }
@@ -273,7 +290,11 @@ impl<T, const N: usize> InlineVec<T, N> {
 
             if self.len <= N {
                 self.data.inline = ManuallyDrop::new([const { MaybeUninit::uninit() }; N]);
-                ptr::copy_nonoverlapping(heap_ptr, ptr::addr_of_mut!(self.data.inline) as *mut T, self.len);
+                ptr::copy_nonoverlapping(
+                    heap_ptr,
+                    ptr::addr_of_mut!(self.data.inline) as *mut T,
+                    self.len,
+                );
                 alloc::dealloc(heap_ptr as *mut u8, old_layout);
                 self.cap = N;
             } else if self.len < old_cap {
@@ -334,7 +355,9 @@ impl<T: Clone, const N: usize> Clone for InlineVec<T, N> {
     }
 }
 
-impl<T: PartialEq<U>, U, const N: usize, const M: usize> PartialEq<InlineVec<U, M>> for InlineVec<T, N> {
+impl<T: PartialEq<U>, U, const N: usize, const M: usize> PartialEq<InlineVec<U, M>>
+    for InlineVec<T, N>
+{
     #[inline]
     fn eq(&self, other: &InlineVec<U, M>) -> bool {
         self.as_slice() == other.as_slice()
@@ -484,7 +507,8 @@ impl<T, const N: usize> Drop for IntoIter<T, N> {
     fn drop(&mut self) {
         unsafe {
             let base = self.vec.as_mut_ptr();
-            let remaining: *mut [T] = std::ptr::slice_from_raw_parts_mut(base.add(self.head), self.tail - self.head);
+            let remaining: *mut [T] =
+                std::ptr::slice_from_raw_parts_mut(base.add(self.head), self.tail - self.head);
             // Neutralize the vec's element drop; its Drop still frees the buffer.
             self.vec.len = 0;
             ptr::drop_in_place(remaining);
@@ -498,7 +522,11 @@ impl<T, const N: usize> IntoIterator for InlineVec<T, N> {
     #[inline]
     fn into_iter(self) -> IntoIter<T, N> {
         let tail = self.len;
-        IntoIter { vec: self, head: 0, tail }
+        IntoIter {
+            vec: self,
+            head: 0,
+            tail,
+        }
     }
 }
 

@@ -1,4 +1,4 @@
-use crate::{id::Id, table_index::TableId};
+use crate::{id::Id, table_registry::TableId};
 
 /// Error returned if accessing an [IdRecord] fails
 #[derive(thiserror::Error, Debug)]
@@ -28,13 +28,13 @@ impl IdAllocator {
         Self { sparse: vec![], dense: vec![], alive: 0, max: 0 }
     }
 
-    pub(crate) fn set_location(&mut self, id: Id, table: TableId, row: u32) {
+    pub(crate) fn set_location(&mut self, id: Id, r: IdRecord) {
         if let Some(&dense) = self.sparse.get(id.index() as usize)
             && dense < self.alive
         {
             let entry = &mut self.dense[dense];
             if entry.id == id {
-                entry.record = IdRecord { table, row };
+                entry.record = r;
             }
         } else {
             debug_assert!(false, "set_location on stale id")

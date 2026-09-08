@@ -3,7 +3,7 @@ use crate::{
     data_structures::{Sparse, VecIdxU32},
     inline_vec::InlineVec,
     invec,
-    memory::RowMeta,
+    memory::RowLayout,
     relation::{
         directed::Directed,
         edges::{ManyEdges, OneEdges},
@@ -110,7 +110,7 @@ pub(super) struct Index {
     pub(super) sparse: Sparse<u32>,
     pub(super) source: VecIdxU32<Id>,
     pub(super) target: Target,
-    meta: RowMeta,
+    meta: RowLayout,
 }
 
 impl Drop for Index {
@@ -126,7 +126,7 @@ impl Drop for Index {
 
 impl Index {
     pub(crate) fn new(unique: bool, meta: &TypeMeta) -> Self {
-        let meta = RowMeta::new(meta.layout, meta.drop);
+        let meta = RowLayout::from_meta(meta);
         Self {
             sparse: Sparse::new(),
             source: VecIdxU32::new(),
@@ -165,10 +165,12 @@ impl Index {
 
     #[inline(always)]
     pub(crate) fn contains(&self, source: Id, target: Id) -> bool {
-        self.sparse.get(source).is_some_and(|&s| match &self.target {
-            Target::One(e) => e.target(s) == target,
-            Target::Many(e) => e[s].contains(target),
-        })
+        self.sparse
+            .get(source)
+            .is_some_and(|&s| match &self.target {
+                Target::One(e) => e.target(s) == target,
+                Target::Many(e) => e[s].contains(target),
+            })
     }
 
     /// Insert `(source, target)`.
@@ -219,7 +221,9 @@ impl Index {
     }
 
     pub(crate) fn remove(&mut self, source: Id, target: Id) -> bool {
-        let Some(&slot) = self.sparse.get(source) else { return false };
+        let Some(&slot) = self.sparse.get(source) else {
+            return false;
+        };
         let meta = self.meta;
 
         match &mut self.target {
@@ -234,7 +238,9 @@ impl Index {
             }
             Target::Many(e) => {
                 let list = &mut e[slot];
-                let Some(at) = list.position(target) else { return false };
+                let Some(at) = list.position(target) else {
+                    return false;
+                };
                 list.swap_remove(meta, at);
 
                 if list.len() == 0 {
@@ -253,7 +259,9 @@ impl Index {
 
     /// Remove all edges of `source`, returning all its targets.
     pub(crate) fn remove_all(&mut self, source: Id) -> Ids {
-        let Some(&slot) = self.sparse.get(source) else { return invec![] };
+        let Some(&slot) = self.sparse.get(source) else {
+            return invec![];
+        };
         let meta = self.meta;
 
         self.sparse.remove(source);
@@ -280,7 +288,9 @@ impl Index {
         let meta = self.meta;
         match &self.target {
             Target::One(e) => (e.target(slot) == target).then(|| unsafe { e.value(meta, slot) }),
-            Target::Many(e) => e[slot].position(target).map(|i| unsafe { e[slot].value(meta, i) }),
+            Target::Many(e) => e[slot]
+                .position(target)
+                .map(|i| unsafe { e[slot].value(meta, i) }),
         }
     }
 
@@ -292,8 +302,12 @@ impl Index {
         let &slot = self.sparse.get(source)?;
         let meta = self.meta;
         match &mut self.target {
-            Target::One(e) => (e.target(slot) == target).then(|| unsafe { e.value_mut(meta, slot) }),
-            Target::Many(e) => e[slot].position(target).map(|i| unsafe { e[slot].value_mut(meta, i) }),
+            Target::One(e) => {
+                (e.target(slot) == target).then(|| unsafe { e.value_mut(meta, slot) })
+            }
+            Target::Many(e) => e[slot]
+                .position(target)
+                .map(|i| unsafe { e[slot].value_mut(meta, i) }),
         }
     }
 
@@ -336,9 +350,18 @@ impl Storage {
         match shape {
             Shape::Hierarchical => Storage::Hierarchy(Hierarchy::new()),
             Shape::Symmetric { unique } => Storage::Symmetry(Symmetry::new(unique, meta)),
-            Shape::Directed { unique_source, unique_target, acyclic, reverse } => {
-                Storage::Directed(Directed::new(unique_source, unique_target, acyclic, reverse, meta))
-            }
+            Shape::Directed {
+                unique_source,
+                unique_target,
+                acyclic,
+                reverse,
+            } => Storage::Directed(Directed::new(
+                unique_source,
+                unique_target,
+                acyclic,
+                reverse,
+                meta,
+            )),
         }
     }
 }

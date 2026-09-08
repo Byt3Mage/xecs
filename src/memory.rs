@@ -3,6 +3,8 @@ use std::{
     ptr::NonNull,
 };
 
+use crate::TypeMeta;
+
 pub type DropFn = Option<unsafe fn(ptr: NonNull<u8>)>;
 
 /// How to interpret a `RawBlock`'s bytes: one element's padded layout
@@ -12,19 +14,23 @@ pub type DropFn = Option<unsafe fn(ptr: NonNull<u8>)>;
 /// a relation index, a hierarchy — rather than stored per buffer, which
 /// is what lets a per-source or per-tree block cost one pointer.
 #[derive(Copy, Clone)]
-pub(crate) struct RowMeta {
+pub(crate) struct RowLayout {
     /// Padded to alignment, so `size * n` addresses row `n`.
     layout: Layout,
     drop: DropFn,
 }
 
-impl RowMeta {
+impl RowLayout {
     pub(crate) fn new(layout: Layout, drop: DropFn) -> Self {
         Self { layout: layout.pad_to_align(), drop }
     }
 
+    pub(crate) fn from_meta(meta: &TypeMeta) -> Self {
+        Self::new(meta.layout, meta.drop)
+    }
+
     #[inline(always)]
-    pub(crate) const fn stride(&self) -> usize {
+    pub(crate) const fn size(&self) -> usize {
         self.layout.size()
     }
 
@@ -38,12 +44,19 @@ impl RowMeta {
         self.layout.size() == 0
     }
 
+    #[inline(always)]
+    pub(crate) unsafe fn drop(&self, data: NonNull<u8>) {
+        if let Some(drop) = self.drop {
+            unsafe { drop(data) };
+        }
+    }
+
     /// Layout of `n` contiguous rows.
     #[inline]
     fn array(&self, n: u32) -> Layout {
         // SAFETY: the alignment came from a valid layout, and the size
         // is a multiple of it because `layout` was padded.
-        unsafe { Layout::from_size_align_unchecked(self.stride() * n as usize, self.align()) }
+        unsafe { Layout::from_size_align_unchecked(self.size() * n as usize, self.align()) }
     }
 
     #[inline]
@@ -62,8 +75,8 @@ impl RawBlock {
     /// non-null, so zero-sized reads and writes through it are
     /// well-formed without a special case anywhere else.
     #[inline]
-    pub(crate) fn new(rm: RowMeta) -> Self {
-        Self { ptr: rm.dangling() }
+    pub(crate) fn new(layout: RowLayout) -> Self {
+        Self { ptr: layout.dangling() }
     }
 
     #[inline(always)]
@@ -77,7 +90,7 @@ impl RawBlock {
     /// - `old_cap` is this block's current capacity, from a previous
     ///   `grow`/`shrink` on the same `rm`.
     /// - `new_cap > old_cap`.
-    pub(crate) unsafe fn grow(&mut self, rm: RowMeta, old_cap: u32, new_cap: u32) {
+    pub(crate) unsafe fn grow(&mut self, rm: RowLayout, old_cap: u32, new_cap: u32) {
         debug_assert!(new_cap > old_cap);
 
         if rm.is_zst() {
@@ -108,7 +121,7 @@ impl RawBlock {
     /// - `new_cap < old_cap`.
     /// - No row at or past `new_cap` is live. Values there are lost
     ///   without being dropped.
-    pub(crate) unsafe fn shrink(&mut self, rm: RowMeta, old_cap: u32, new_cap: u32) {
+    pub(crate) unsafe fn shrink(&mut self, rm: RowLayout, old_cap: u32, new_cap: u32) {
         debug_assert!(new_cap < old_cap);
 
         if rm.is_zst() || old_cap == 0 {
@@ -137,7 +150,7 @@ impl RawBlock {
     ///
     /// # Safety
     /// `cap` is current, and no row in the block is live.
-    pub(crate) unsafe fn dealloc(&mut self, rm: RowMeta, cap: u32) {
+    pub(crate) unsafe fn dealloc(&mut self, rm: RowLayout, cap: u32) {
         if rm.is_zst() || cap == 0 {
             return;
         }
@@ -146,61 +159,49 @@ impl RawBlock {
     }
 
     #[inline(always)]
-    pub(crate) fn row(&self, rm: RowMeta, i: u32) -> NonNull<u8> {
+    pub(crate) fn row(&self, size: usize, i: u32) -> NonNull<u8> {
         // SAFETY: callers keep `i` within capacity. For a zero stride
         // this is the aligned base, which is what a ZST access wants.
-        unsafe { self.ptr.byte_add(i as usize * rm.stride()) }
+        unsafe { self.ptr.byte_add(i as usize * size) }
     }
 
     /// # Safety
     /// `i` is within capacity and holds no live value; `T` matches `rm`.
     #[inline]
-    pub(crate) unsafe fn write<T>(&mut self, rm: RowMeta, i: u32, value: T) {
-        unsafe { self.row(rm, i).cast::<T>().write(value) };
+    pub(crate) unsafe fn write<T>(&mut self, rm: RowLayout, i: u32, value: T) {
+        unsafe { self.row(rm.size(), i).cast::<T>().write(value) };
     }
 
     /// # Safety
     /// `i` holds a live value; `T` matches `rm`.
     #[inline]
-    pub(crate) unsafe fn read<T>(&self, rm: RowMeta, i: u32) -> &T {
-        unsafe { self.row(rm, i).cast::<T>().as_ref() }
+    pub(crate) unsafe fn read<T>(&self, rm: RowLayout, i: u32) -> &T {
+        unsafe { self.row(rm.size(), i).cast::<T>().as_ref() }
     }
 
     /// # Safety
     /// `i` holds a live value; `T` matches `rm`; no other reference to
     /// this row exists.
     #[inline]
-    pub(crate) unsafe fn read_mut<T>(&mut self, rm: RowMeta, i: u32) -> &mut T {
-        unsafe { self.row(rm, i).cast::<T>().as_mut() }
-    }
-
-    /// Move a value out.
-    ///
-    /// The row is dead afterwards: the caller owns the value and the
-    /// block must not drop that row again.
-    ///
-    /// # Safety
-    /// `i` holds a live value; `T` matches `rm`.
-    #[inline]
-    pub(crate) unsafe fn take<T>(&mut self, rm: RowMeta, i: u32) -> T {
-        unsafe { self.row(rm, i).cast::<T>().read() }
+    pub(crate) unsafe fn read_mut<T>(&mut self, rm: RowLayout, i: u32) -> &mut T {
+        unsafe { self.row(rm.size(), i).cast::<T>().as_mut() }
     }
 
     /// # Safety
     /// `i` is within capacity and holds a live value.
     #[inline]
-    pub(crate) unsafe fn drop_row(&self, rm: RowMeta, i: u32) {
+    pub(crate) unsafe fn drop_row(&self, rm: RowLayout, i: u32) {
         if let Some(drop) = rm.drop {
-            unsafe { drop(self.row(rm, i)) };
+            unsafe { drop(self.row(rm.size(), i)) };
         }
     }
 
     /// # Safety
     /// Every row in `range` is within capacity and live.
     #[inline]
-    pub(crate) unsafe fn drop_rows(&self, rm: RowMeta, range: std::ops::Range<u32>) {
+    pub(crate) unsafe fn drop_rows(&self, rm: RowLayout, range: std::ops::Range<u32>) {
         if let Some(drop) = rm.drop {
-            range.for_each(|i| unsafe { drop(self.row(rm, i)) });
+            range.for_each(|i| unsafe { drop(self.row(rm.size(), i)) });
         }
     }
 
@@ -211,14 +212,15 @@ impl RawBlock {
     /// rows are dead afterwards and must not be dropped, and the
     /// destination must have held nothing live.
     #[inline]
-    pub(crate) unsafe fn shift(&mut self, rm: RowMeta, src: u32, dst: u32, count: u32) {
+    pub(crate) unsafe fn shift(&mut self, rm: RowLayout, src: u32, dst: u32, count: u32) {
         if rm.is_zst() || count == 0 || src == dst {
             return;
         }
         unsafe {
-            let src = self.row(rm, src);
-            let dst = self.row(rm, dst);
-            src.copy_to(dst, (count as usize) * rm.stride());
+            let size = rm.size();
+            let src = self.row(size, src);
+            let dst = self.row(size, dst);
+            src.copy_to(dst, (count as usize) * rm.size());
         };
     }
 
@@ -229,14 +231,15 @@ impl RawBlock {
     /// the blocks are distinct allocations. Same move obligations as
     /// `shift`.
     #[inline]
-    pub(crate) unsafe fn move_row(&self, rm: RowMeta, src: u32, dest: &RawBlock, dst: u32, count: u32) {
+    pub(crate) unsafe fn move_row(&self, rm: RowLayout, src: u32, dest: &RawBlock, dst: u32, count: u32) {
         if rm.is_zst() || count == 0 {
             return;
         }
         unsafe {
-            let src = self.row(rm, src);
-            let dst = dest.row(rm, dst);
-            src.copy_to_nonoverlapping(dst, (count as usize) * rm.stride());
+            let size = rm.size();
+            let src = self.row(size, src);
+            let dst = dest.row(size, dst);
+            src.copy_to_nonoverlapping(dst, (count as usize) * rm.size());
         };
     }
 
@@ -252,7 +255,7 @@ impl RawBlock {
     /// is live. The owner's length becomes `last` on return, so that
     /// row is dead and must not be dropped again.
     #[inline]
-    pub(crate) unsafe fn swap_remove(&mut self, rm: RowMeta, at: u32, last: u32) {
+    pub(crate) unsafe fn swap_remove(&mut self, rm: RowLayout, at: u32, last: u32) {
         debug_assert!(at <= last);
         unsafe {
             self.drop_row(rm, at);

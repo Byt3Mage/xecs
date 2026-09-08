@@ -1,7 +1,7 @@
 use crate::{
     Id, InlineVec,
     data_structures::VecIdxU32,
-    memory::{RawBlock, RowMeta},
+    memory::{RawBlock, RowLayout},
 };
 
 type Ids = InlineVec<Id, 4>;
@@ -13,7 +13,7 @@ pub(super) struct ManyEdges {
 }
 
 impl ManyEdges {
-    pub(super) fn new(meta: RowMeta) -> Self {
+    pub(super) fn new(meta: RowLayout) -> Self {
         Self {
             targets: Ids::new(),
             payload: RawBlock::new(meta),
@@ -48,7 +48,7 @@ impl ManyEdges {
 
     /// # Safety
     /// `T` is the declared payload type.
-    pub(super) unsafe fn push<T>(&mut self, meta: RowMeta, target: Id, value: T) {
+    pub(super) unsafe fn push<T>(&mut self, meta: RowLayout, target: Id, value: T) {
         let old = self.capacity;
         let new = (old + 1).next_power_of_two().max(4);
 
@@ -66,7 +66,7 @@ impl ManyEdges {
     /// its place in both arrays.
     ///
     /// Safe: dropping and moving need the layout, not the type.
-    pub(super) fn swap_remove(&mut self, meta: RowMeta, at: u32) -> Id {
+    pub(super) fn swap_remove(&mut self, meta: RowLayout, at: u32) -> Id {
         let last = self.len() - 1;
         // SAFETY: `at` is live. The value moving onto it comes from
         // `last`, which the target `swap_remove` below retires.
@@ -75,7 +75,7 @@ impl ManyEdges {
     }
 
     /// Drop every value, release the buffer, and yield the targets.
-    pub(super) fn dispose(&mut self, meta: RowMeta) -> Ids {
+    pub(super) fn dispose(&mut self, meta: RowLayout) -> Ids {
         // SAFETY: rows `0..len` are exactly the live set.
         unsafe {
             self.payload.drop_rows(meta, 0..self.len());
@@ -87,14 +87,14 @@ impl ManyEdges {
     /// # Safety
     /// `at < len` and `T` is the declared payload type.
     #[inline]
-    pub(super) unsafe fn value<T>(&self, meta: RowMeta, at: u32) -> &T {
+    pub(super) unsafe fn value<T>(&self, meta: RowLayout, at: u32) -> &T {
         unsafe { self.payload.read(meta, at) }
     }
 
     /// # Safety
     /// `at < len` and `T` is the declared payload type.
     #[inline]
-    pub(super) unsafe fn value_mut<T>(&mut self, meta: RowMeta, at: u32) -> &mut T {
+    pub(super) unsafe fn value_mut<T>(&mut self, meta: RowLayout, at: u32) -> &mut T {
         unsafe { self.payload.read_mut(meta, at) }
     }
 }
@@ -116,7 +116,7 @@ pub(super) struct OneEdges {
 }
 
 impl OneEdges {
-    pub(super) fn new(meta: RowMeta) -> Self {
+    pub(super) fn new(meta: RowLayout) -> Self {
         Self {
             targets: VecIdxU32::new(),
             payload: RawBlock::new(meta),
@@ -144,7 +144,7 @@ impl OneEdges {
 
     /// # Safety
     /// `T` is the declared payload type.
-    pub(super) unsafe fn push<T>(&mut self, meta: RowMeta, target: Id, value: T) {
+    pub(super) unsafe fn push<T>(&mut self, meta: RowLayout, target: Id, value: T) {
         let old = self.cap();
         self.targets.reserve(1);
         let new = self.cap();
@@ -162,7 +162,7 @@ impl OneEdges {
     ///
     /// # Safety
     /// `slot < len` and `T` is the declared payload type.
-    pub(super) unsafe fn replace<T>(&mut self, meta: RowMeta, slot: u32, target: Id, value: T) {
+    pub(super) unsafe fn replace<T>(&mut self, meta: RowLayout, slot: u32, target: Id, value: T) {
         self.targets[slot] = target;
         // SAFETY: the slot is occupied, so its row is live.
         unsafe {
@@ -171,7 +171,7 @@ impl OneEdges {
         }
     }
 
-    pub(super) fn swap_remove(&mut self, meta: RowMeta, slot: u32) -> Id {
+    pub(super) fn swap_remove(&mut self, meta: RowLayout, slot: u32) -> Id {
         let last = self.len() - 1;
         // SAFETY: `slot` is live. The value moving onto it comes from
         // `last`, which the target `swap_remove` below retires.
@@ -185,18 +185,18 @@ impl OneEdges {
     /// # Safety
     /// `slot < len` and `T` is the declared payload type.
     #[inline]
-    pub(super) unsafe fn value<T>(&self, meta: RowMeta, slot: u32) -> &T {
+    pub(super) unsafe fn value<T>(&self, meta: RowLayout, slot: u32) -> &T {
         unsafe { self.payload.read(meta, slot) }
     }
 
     /// # Safety
     /// `slot < len` and `T` is the declared payload type.
     #[inline]
-    pub(super) unsafe fn value_mut<T>(&mut self, meta: RowMeta, slot: u32) -> &mut T {
+    pub(super) unsafe fn value_mut<T>(&mut self, meta: RowLayout, slot: u32) -> &mut T {
         unsafe { self.payload.read_mut(meta, slot) }
     }
 
-    pub(super) fn dispose(&mut self, meta: RowMeta) {
+    pub(super) fn dispose(&mut self, meta: RowLayout) {
         // SAFETY: one live row per slot.
         unsafe {
             self.payload.drop_rows(meta, 0..self.len());

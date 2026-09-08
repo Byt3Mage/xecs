@@ -2,14 +2,14 @@ use std::rc::Rc;
 
 use crate::{
     ComponentId, Ecs, LogicalPlan,
-    component::Signature,
+    component::signature::Signature,
     query::{
         access::Access,
         logical::{Direction, Filter, IdSource, LogicalCheck, LogicalFollow, LogicalScope, Relation},
         physical::{MatchedTable, PhysicalCheck, PhysicalFollow, PhysicalPlan, PhysicalScope},
     },
     relation::storage::Shape,
-    table_index::TableId,
+    table_registry::TableId,
 };
 
 pub fn lower_plan(ecs: &Ecs, plan: &LogicalPlan) -> PhysicalPlan {

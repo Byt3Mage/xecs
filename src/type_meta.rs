@@ -4,7 +4,11 @@ use crate::memory::DropFn;
 
 #[inline]
 const fn dtor<T>() -> DropFn {
-    if mem::needs_drop::<T>() { Some(|p| unsafe { p.cast::<T>().drop_in_place() }) } else { None }
+    if mem::needs_drop::<T>() {
+        Some(|p| unsafe { p.cast::<T>().drop_in_place() })
+    } else {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

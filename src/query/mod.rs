@@ -28,7 +28,10 @@ pub struct Query {
 
 impl Query {
     pub fn new(ecs: &Ecs, logical: LogicalPlan) -> Self {
-        Self { physical: lower_plan(ecs, &logical), logical }
+        Self {
+            physical: lower_plan(ecs, &logical),
+            logical,
+        }
     }
 
     /// Re-evaluate the physical plan if out of sync with current ecs state.
@@ -53,7 +56,10 @@ impl Query {
     #[inline]
     pub fn typed<S: Select, F: Follows>(self, ecs: &Ecs) -> Result<TQuery<S, F>, ValidationError> {
         validate_access::<S>(ecs, &self.logical)?;
-        Ok(TQuery { query: self, marker: PhantomData })
+        Ok(TQuery {
+            query: self,
+            marker: PhantomData,
+        })
     }
 }
 
@@ -65,10 +71,18 @@ pub struct TQuery<S: Select = (), F: Follows = ()> {
 impl<S: Select, F: Follows> TQuery<S, F> {
     pub fn new(ecs: &Ecs, plan: LogicalPlan) -> Result<Self, ValidationError> {
         validate_access::<S>(ecs, &plan)?;
-        Ok(Self { query: Query::new(ecs, plan), marker: PhantomData })
+        Ok(Self {
+            query: Query::new(ecs, plan),
+            marker: PhantomData,
+        })
     }
 
-    pub fn each(&mut self, ecs: &mut Ecs, params: &[Id], mut f: impl FnMut(Id, S::Row<'_>, F::Get<'_>)) {
+    pub fn each(
+        &mut self,
+        ecs: &mut Ecs,
+        params: &[Id],
+        mut f: impl FnMut(Id, S::Row<'_>, F::Get<'_>),
+    ) {
         let ctx = self.query.make_ctx(ecs, params);
         let plan = &self.query.physical;
         let scope = &plan.scopes[0];
@@ -91,7 +105,11 @@ impl<S: Select, F: Follows> TQuery<S, F> {
                 // SAFETY: `row` indexes `ids`, whose length is this
                 // table's row count, and `columns` was taken from this
                 // same table.
-                f(id, unsafe { S::row(cols, row) }, F::get(&ctx, 0, id, &scope.follows));
+                f(
+                    id,
+                    unsafe { S::row(cols, row) },
+                    F::get(&ctx, 0, id, &scope.follows),
+                );
             }
         }
     }
@@ -107,7 +125,12 @@ pub struct Follow<'w, F: Follows> {
 impl<'w, F: Follows> Follow<'w, F> {
     #[inline(always)]
     pub(crate) fn new(ctx: &'w QueryCtx<'w>, from: Id, index: usize) -> Self {
-        Self { ctx, from, index, marker: PhantomData }
+        Self {
+            ctx,
+            from,
+            index,
+            marker: PhantomData,
+        }
     }
 
     #[inline(always)]
@@ -150,11 +173,11 @@ impl<'w, F: Follows> Iterator for FollowIter<'w, F> {
         let ctx = self.ctx;
         let scope = self.scope;
         let scope_id = self.scope_id;
-        self.edges.find_map(
-            |id| match scope.check_relations(id, ctx) && scope.passes_filter(ctx, id) {
+        self.edges.find_map(|id| {
+            match scope.check_relations(id, ctx) && scope.passes_filter(ctx, id) {
                 true => Some((id, F::get(ctx, scope_id, id, &scope.follows))),
                 false => None,
-            },
-        )
+            }
+        })
     }
 }

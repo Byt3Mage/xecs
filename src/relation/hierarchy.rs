@@ -68,7 +68,9 @@ impl Tree {
 
     #[inline]
     fn parent(&self, child: u32) -> Option<Id> {
-        Some(self.parent[child]).filter(|&p| p != NONE).map(|p| self.order[p])
+        Some(self.parent[child])
+            .filter(|&p| p != NONE)
+            .map(|p| self.order[p])
     }
 
     /// A node has children when its first child slot falls inside its
@@ -165,7 +167,12 @@ impl Tree {
     }
 
     #[inline]
-    pub fn propagate<I, O>(&mut self, input: &[I], output: &mut [O], mut f: impl FnMut(Option<&O>, &I) -> O) {
+    pub fn propagate<I, O>(
+        &mut self,
+        input: &[I],
+        output: &mut [O],
+        mut f: impl FnMut(Option<&O>, &I) -> O,
+    ) {
         let len = self.order.len();
 
         assert_eq!(input.len(), len as usize);
@@ -174,7 +181,11 @@ impl Tree {
         for i in 0..len {
             let (done, rest) = output.split_at_mut(i as usize);
             let p = self.parent[i];
-            let parent = if p != NONE { Some(&done[p as usize]) } else { None };
+            let parent = if p != NONE {
+                Some(&done[p as usize])
+            } else {
+                None
+            };
             rest[0] = f(parent, &input[i as usize]);
         }
     }
@@ -485,7 +496,9 @@ impl Hierarchy {
     /// Drop every edge touching `id`: it leaves the forest, and each of
     /// its children becomes the root of a tree of its own.
     pub fn purge(&mut self, id: Id) {
-        let Some(&l) = self.locate.get(id) else { return };
+        let Some(&l) = self.locate.get(id) else {
+            return;
+        };
 
         // Children are collected as ids. Detaching one
         // shifts its later siblings, so slots captured now would go
@@ -521,7 +534,9 @@ impl Hierarchy {
     /// the caller can despawn them or run their own cleanup without a
     /// second traversal.
     pub fn purge_subtree(&mut self, id: Id, out: &mut Vec<Id>) {
-        let Some(&l) = self.locate.get(id) else { return };
+        let Some(&l) = self.locate.get(id) else {
+            return;
+        };
         let (t, s) = (l.tree, l.slot);
         let e = self.trees[t].exit[s];
 
@@ -561,7 +576,9 @@ impl Hierarchy {
 
     #[inline]
     pub fn parent_of(&self, id: Id) -> Option<Id> {
-        self.locate.get(id).and_then(|l| self.trees[l.tree].parent(l.slot))
+        self.locate
+            .get(id)
+            .and_then(|l| self.trees[l.tree].parent(l.slot))
     }
 
     /// The stored edge, in the relation's forward direction.
@@ -602,7 +619,9 @@ impl Hierarchy {
 
     #[inline]
     pub fn subtree(&self, id: Id) -> &[Id] {
-        self.locate.get(id).map_or(&[], |l| self.trees[l.tree].subtree(l.slot))
+        self.locate
+            .get(id)
+            .map_or(&[], |l| self.trees[l.tree].subtree(l.slot))
     }
 
     /// Transitive containment. Descendants of `a` are exactly the
@@ -641,7 +660,13 @@ impl Hierarchy {
         self.locate.get(id).map(|l| self.trees[l.tree].order[0])
     }
 
-    pub fn propagate<I, O>(&mut self, t: u32, input: &[I], output: &mut [O], f: impl FnMut(Option<&O>, &I) -> O) {
+    pub fn propagate<I, O>(
+        &mut self,
+        t: u32,
+        input: &[I],
+        output: &mut [O],
+        f: impl FnMut(Option<&O>, &I) -> O,
+    ) {
         self.trees[t].propagate(input, output, f);
     }
 

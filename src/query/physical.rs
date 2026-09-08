@@ -1,7 +1,7 @@
 use std::rc::Rc;
 
 use crate::{
-    Id,
+    id::Id,
     query::{
         context::QueryCtx,
         logical::{Direction, FollowId, IdSource, ScopeId},
@@ -10,7 +10,7 @@ use crate::{
         id::RelationId,
         storage::{EdgeIter, Edges},
     },
-    table_index::TableId,
+    table_registry::TableId,
 };
 
 /// A logical plan resolved against a concrete world. Flat, parallel to

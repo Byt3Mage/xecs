@@ -19,7 +19,9 @@ pub(crate) struct Symmetry {
 
 impl Symmetry {
     pub(super) fn new(unique: bool, meta: &TypeMeta) -> Self {
-        Self { edges: Index::new(unique, meta) }
+        Self {
+            edges: Index::new(unique, meta),
+        }
     }
 
     /// Every entity sharing an edge with `id`.
