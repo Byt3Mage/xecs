@@ -211,7 +211,7 @@ impl<T: 'static> TypedAccess for Option<&T> {
 impl<T: 'static> TypedAccess for Option<&mut T> {
     type Row<'a> = Option<&'a mut T>;
     type Column<'a> = Option<ColMut<'a, T>>;
-    const ACCESS: TAccess = TAccess::of::<T>(AccessMode::Read, true);
+    const ACCESS: TAccess = TAccess::of::<T>(AccessMode::Write, true);
 
     unsafe fn row<'a>(column: Self::Column<'a>, row: u32) -> Self::Row<'a> {
         column.map(|c| unsafe { c.get_mut(row) })

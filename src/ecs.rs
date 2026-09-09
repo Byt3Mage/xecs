@@ -27,7 +27,6 @@ pub struct Ecs {
     pub(crate) relations: RelationRegistry,
     pub(crate) bundles: BundleRegistry,
     pub(crate) tables: TableRegistry,
-    pub(crate) generation: u32,
 }
 
 impl Ecs {
@@ -38,14 +37,13 @@ impl Ecs {
             relations: RelationRegistry::new(),
             bundles: BundleRegistry::new(),
             tables: TableRegistry::new(),
-            generation: 0,
             ecs_id: ecs_id_allocate(),
         }
     }
 
     #[inline(always)]
     pub fn generation(&self) -> u32 {
-        self.generation
+        self.tables.generation()
     }
 
     #[inline(always)]

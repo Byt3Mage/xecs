@@ -25,6 +25,11 @@ macro_rules! schema {
 
 macro_rules! map {
     () => {{ ahash::AHashMap::new() }};
+    ($($key: expr => $value: expr),* $(,)?) => {{
+        let mut m = crate::macros::map![];
+        $(m.insert($key, $value);)*
+        m
+    }};
 }
 
 pub(crate) use map;

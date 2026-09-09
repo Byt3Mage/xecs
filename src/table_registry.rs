@@ -17,20 +17,28 @@ declare_id!(TableId, "T#");
 pub(crate) struct TableRegistry {
     tables: Vec<Table>,
     table_ids: AHashMap<Signature, TableId>,
+    generation: u32,
 }
 
 impl TableRegistry {
     pub const ROOT: TableId = unsafe { TableId::new_unchecked(0) };
 
     pub(crate) fn new() -> Self {
+        let sig = Signature::from([]);
         Self {
             tables: vec![Table {
-                sig: Signature::from([]),
+                sig: sig.clone(),
                 data: TableData::new(Box::new([])),
                 col_map: ColumnMap::new(),
             }],
-            table_ids: map![],
+            table_ids: map![sig => Self::ROOT],
+            generation: 0,
         }
+    }
+
+    #[inline]
+    pub(crate) fn generation(&self) -> u32 {
+        self.generation
     }
 
     pub(crate) fn get_or_create(&mut self, components: &mut ComponentRegistry, ids: Signature) -> TableId {
@@ -39,6 +47,7 @@ impl TableRegistry {
             Entry::Vacant(e) => {
                 let id = TableId::new(self.tables.len() as u32).expect("too many tables");
                 self.tables.push(table::new_table(id, components, e.key().clone()));
+                self.generation += 1;
                 *e.insert(id)
             }
         }

@@ -280,8 +280,7 @@ pub(crate) unsafe fn insert(
             unsafe {
                 bundle.write(&mut |src| {
                     let col = dst.column(writes[i].col);
-                    let row = col.data.row(col.layout.size(), r.row);
-                    col.layout.drop(row);
+                    let row = col.data.row(col.layout.size(), dst_row);
                     row.copy_from_nonoverlapping(src, col.layout.size());
                     i += 1;
                 });
