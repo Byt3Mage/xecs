@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::{
     ComponentKey,
-    component::id::ComponentId,
+    component::id::{ComponentId, PREFIX},
     ecs::Ecs,
     id::allocator::IdRecord,
     key::{UnregisteredKey, unregistered},
@@ -16,15 +16,11 @@ pub mod signature;
 
 pub type Path = Arc<str>;
 
-/// Reserved: `C#<n>` addresses a component by id in string queries,
-/// and is the display form of an unnamed component.
-pub const ID_PREFIX: &str = "C#";
-
 #[derive(Debug, thiserror::Error)]
 pub enum ComponentRegisterError {
     #[error("component path `{0}` is already registered")]
     DuplicatePath(Path),
-    #[error("component path `{0}` uses the reserved `{ID_PREFIX}` prefix")]
+    #[error("component path `{}` uses the reserved `{}` prefix", .0, PREFIX)]
     ReservedPrefix(Path),
 }
 

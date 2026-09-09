@@ -30,39 +30,42 @@ macro_rules! map {
 pub(crate) use map;
 
 macro_rules! declare_id {
-    ($name: ident, $prefix: literal) => {
+    ($name: ident, $prefix: expr) => {
         #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
         #[repr(transparent)]
-        pub struct $name(u32);
+        pub struct $name(crate::utils::NonMaxU32);
 
         impl $name {
-            pub const NULL: Self = Self(u32::MAX);
-
             #[allow(dead_code)]
             #[inline]
-            pub const fn from_raw(raw: u32) -> Self {
-                Self(raw)
+            pub const fn new(raw: u32) -> Option<Self> {
+                match crate::utils::NonMaxU32::new(raw) {
+                    Some(val) => Some(Self(val)),
+                    None => None,
+                }
+            }
+
+            /// # Safety
+            /// Caller must ensure that `raw` is not equal to u32::MAX
+            pub const unsafe fn new_unchecked(raw: u32) -> Self {
+                Self(unsafe { crate::utils::NonMaxU32::new_unchecked(raw) })
             }
 
             #[allow(dead_code)]
             #[inline]
             pub const fn raw(self) -> u32 {
-                self.0
+                self.0.get()
             }
 
             #[inline(always)]
             pub const fn index(self) -> usize {
-                self.0 as usize
+                self.0.get() as usize
             }
         }
 
         impl ::core::fmt::Display for $name {
             fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-                if *self == Self::NULL {
-                    write!(f, "{}#NULL", $prefix)
-                } else {
-                    write!(f, "{}#{}", $prefix, self.0)
-                }
+                write!(f, "{}{}", $prefix, self.raw())
             }
         }
 
@@ -97,3 +100,12 @@ macro_rules! impl_registry {
 }
 
 pub(crate) use impl_registry;
+
+macro_rules! count {
+    ($($T:ident),* $(,)?) => {
+        <[()]>::len(&[$(count!(@unit $T)),*])
+    };
+    (@unit $T:ident) => { () };
+}
+
+pub(crate) use count;

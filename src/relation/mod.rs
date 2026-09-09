@@ -7,7 +7,7 @@ use crate::{
     key::{UnregisteredKey, relation_key_count, unregistered},
     macros::impl_registry,
     relation::{
-        id::RelationId,
+        id::{PREFIX, RelationId},
         storage::{Edges, RelateError, Storage},
     },
     type_meta::HasMeta,
@@ -22,15 +22,11 @@ pub mod symmetry;
 
 type Path = Arc<str>;
 
-/// Reserved: `R#<n>` addresses a relation by id in string queries, and
-/// is the display form of an unnamed component.
-pub const ID_PREFIX: &str = "R#";
-
 #[derive(Debug, thiserror::Error)]
 pub enum RelationRegisterError {
     #[error("relation path `{0}` is already registered")]
     DuplicatePath(Path),
-    #[error("relation path `{0}` uses the reserved `{ID_PREFIX}` prefix")]
+    #[error("relation path `{}` uses the reserved `{}` prefix", .0, PREFIX)]
     ReservedPrefix(Path),
 }
 
@@ -147,12 +143,11 @@ impl RelationRegistry {
         shape: Shape,
         meta: TypeMeta,
     ) -> Result<RelationId, RelationRegisterError> {
-        debug_assert!(self.infos.len() < (u32::MAX as usize), "too many relations");
-        let id = RelationId::from_raw(self.infos.len() as u32);
+        let id = RelationId::new(self.infos.len() as u32).expect("too many relations");
         let path = match path {
             None => id.to_string().into(),
             Some(p) => {
-                if p.starts_with(ID_PREFIX) {
+                if p.starts_with(PREFIX) {
                     return Err(RelationRegisterError::ReservedPrefix(p));
                 }
                 match self.id_by_path.entry(p.clone()) {
@@ -168,11 +163,12 @@ impl RelationRegistry {
     }
 
     pub fn find_by_path(&self, path: &str) -> Option<RelationId> {
-        match path.strip_prefix(ID_PREFIX) {
-            Some(n) => {
-                let id = n.parse().ok()?;
-                ((id as usize) < self.infos.len()).then(|| RelationId::from_raw(id))
-            }
+        match path.strip_prefix(PREFIX) {
+            Some(n) => n
+                .parse()
+                .ok()
+                .and_then(RelationId::new)
+                .filter(|id| id.index() < self.infos.len()),
             None => self.id_by_path.get(path).copied(),
         }
     }

@@ -6,7 +6,7 @@ use crate::{
     query::{
         access::{Access, AccessMode, Select},
         context::Binds,
-        error::ValidationError,
+        error::{AccessError, PlanError},
     },
     relation::id::RelationId,
 };
@@ -102,7 +102,7 @@ impl PlanBuilder {
     pub fn new() -> Self {
         Self {
             access: vec![],
-            scopes: vec![],
+            scopes: vec![LogicalScope::default()],
             follows: vec![],
             current: 0,
         }
@@ -127,10 +127,7 @@ impl PlanBuilder {
         self
     }
 
-    pub fn follow<F>(mut self, relation: Relation, f: F) -> Self
-    where
-        F: FnOnce(Self) -> Self,
-    {
+    pub fn follow<F>(mut self, relation: Relation, f: impl FnOnce(Self) -> Self) -> Self {
         self.scopes[self.current].follows.push(self.follows.len());
 
         let prev = self.current;
@@ -143,45 +140,59 @@ impl PlanBuilder {
         self
     }
 
-    pub fn build(self) -> LogicalPlan {
-        LogicalPlan {
+    pub fn build(self) -> Result<LogicalPlan, PlanError> {
+        check_disjoint(&self.access)?;
+        Ok(LogicalPlan {
             access: self.access.into(),
             scopes: self.scopes.into(),
             follows: self.follows.into(),
-        }
+        })
     }
 }
 
-pub fn validate_access<S>(ecs: &Ecs, plan: &LogicalPlan) -> Result<(), ValidationError>
-where
-    S: Select,
-{
-    let requests = S::describe();
+fn check_disjoint(access: &[Access]) -> Result<(), PlanError> {
+    for (i, a) in access.iter().enumerate() {
+        for (j, b) in access[i + 1..].iter().enumerate() {
+            if a.id == b.id {
+                return Err(PlanError {
+                    component: a.id,
+                    first: i as u32,
+                    second: (i + 1 + j) as u32,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn validate_access<S: Select>(ecs: &Ecs, plan: &LogicalPlan) -> Result<(), AccessError> {
+    let requests = S::ACCESSES;
     let declared = &plan.access;
 
-    if requests.len() != declared.len() {
-        return Err(ValidationError::ColumnArity { received: requests.len(), expected: declared.len() });
+    let received = requests.len() as u32;
+    let expected = declared.len() as u32;
+
+    if received != expected {
+        return Err(AccessError::ArityMismatch { received, expected });
     }
 
-    for (index, (req, dec)) in requests.iter().zip(declared.iter()).enumerate() {
-        let name = req.type_name;
+    for (index, (r, d)) in requests.iter().zip(declared.iter()).enumerate() {
+        let index = index as u32;
 
-        use AccessMode::*;
-        match (req.mode, dec.mode) {
-            (Read, Read) | (Write, Write) => {}
-            (Read, Write) => return Err(ValidationError::ReadOnWrite { index, name }),
-            (Write, Read) => return Err(ValidationError::WriteOnRead { index, name }),
+        match (r.mode, d.mode) {
+            (AccessMode::Read, AccessMode::Write) => return Err(AccessError::ReadOnWrite { index }),
+            (AccessMode::Write, AccessMode::Read) => return Err(AccessError::WriteOnRead { index }),
+            _ => {}
         }
 
-        match (req.optional, dec.optional) {
-            (true, true) | (false, false) => {}
-            (true, false) => return Err(ValidationError::OptionalOnRequired { index, name }),
-            (false, true) => return Err(ValidationError::RequiredOnOptional { index, name }),
+        match (r.optional, d.optional) {
+            (true, false) => return Err(AccessError::OptionalOnRequired { index }),
+            (false, true) => return Err(AccessError::RequiredOnOptional { index }),
+            _ => {}
         }
 
-        let meta = &ecs.components.get(dec.id).meta;
-        if meta.type_id().is_none_or(|id| id == req.type_id) {
-            return Err(ValidationError::TypeMismatch { index });
+        if ecs.components[d.id].meta.type_id != r.type_id {
+            return Err(AccessError::TypeMismatch { index });
         }
     }
     Ok(())

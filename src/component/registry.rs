@@ -4,7 +4,7 @@ use ahash::AHashMap;
 
 use crate::{
     ComponentId, ComponentKey,
-    component::{ComponentConfig, ComponentInfo, ComponentRegisterError, ID_PREFIX, Path},
+    component::{ComponentConfig, ComponentInfo, ComponentRegisterError, Path, id::PREFIX},
     key::component_key_count,
     macros::impl_registry,
     type_meta::HasMeta,
@@ -41,12 +41,11 @@ impl ComponentRegistry {
     }
 
     pub fn new_component(&mut self, config: ComponentConfig) -> Result<ComponentId, ComponentRegisterError> {
-        debug_assert!(self.infos.len() < (u32::MAX as usize), "too many components");
-        let id = ComponentId::from_raw(self.infos.len() as u32);
+        let id = ComponentId::new(self.infos.len() as u32).expect("too many components");
         let path = match config.path {
             None => id.to_string().into(),
             Some(p) => {
-                if p.starts_with(ID_PREFIX) {
+                if p.starts_with(PREFIX) {
                     return Err(ComponentRegisterError::ReservedPrefix(p));
                 }
                 match self.id_by_path.entry(p.clone()) {
@@ -68,11 +67,12 @@ impl ComponentRegistry {
     }
 
     pub fn find_by_path(&self, path: &str) -> Option<ComponentId> {
-        match path.strip_prefix(ID_PREFIX) {
-            Some(n) => {
-                let id = n.parse().ok()?;
-                ((id as usize) < self.infos.len()).then(|| ComponentId::from_raw(id))
-            }
+        match path.strip_prefix(PREFIX) {
+            Some(n) => n
+                .parse()
+                .ok()
+                .and_then(ComponentId::new)
+                .filter(|id| id.index() < self.infos.len()),
             None => self.id_by_path.get(path).copied(),
         }
     }

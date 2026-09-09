@@ -76,8 +76,7 @@ impl BundleRegistry {
         match self.id_by_signature.entry(ids) {
             Entry::Occupied(e) => *e.get(),
             Entry::Vacant(e) => {
-                debug_assert!(self.infos.len() < (u32::MAX as usize), "too many bundles");
-                let id = BundleId::from_raw(self.infos.len() as u32);
+                let id = BundleId::new(self.infos.len() as u32).expect("too many bundles");
                 self.infos.push(BundleInfo::new(e.key().clone()));
                 e.insert(id);
                 id

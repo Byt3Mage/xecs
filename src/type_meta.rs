@@ -4,19 +4,15 @@ use crate::memory::DropFn;
 
 #[inline]
 const fn dtor<T>() -> DropFn {
-    if mem::needs_drop::<T>() {
-        Some(|p| unsafe { p.cast::<T>().drop_in_place() })
-    } else {
-        None
-    }
+    if mem::needs_drop::<T>() { Some(|p| unsafe { p.cast::<T>().drop_in_place() }) } else { None }
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct TypeMeta {
     pub drop: DropFn,
     pub layout: Layout,
-    pub type_id: Option<fn() -> TypeId>,
-    pub type_name: Option<fn() -> &'static str>,
+    pub type_id: TypeId,
+    pub type_name: fn() -> &'static str,
 }
 
 impl TypeMeta {
@@ -25,8 +21,8 @@ impl TypeMeta {
         Self {
             drop: dtor::<T>(),
             layout: Layout::new::<T>(),
-            type_id: Some(TypeId::of::<T>),
-            type_name: Some(std::any::type_name::<T>),
+            type_id: TypeId::of::<T>(),
+            type_name: std::any::type_name::<T>,
         }
     }
 
@@ -36,13 +32,8 @@ impl TypeMeta {
     }
 
     #[inline(always)]
-    pub fn type_id(&self) -> Option<TypeId> {
-        self.type_id.map(|id| id())
-    }
-
-    #[inline(always)]
-    pub fn type_name(&self) -> Option<&'static str> {
-        self.type_name.map(|n| n())
+    pub fn type_name(&self) -> &'static str {
+        (self.type_name)()
     }
 }
 

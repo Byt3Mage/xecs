@@ -1,6 +1,10 @@
 use crate::{Ecs, component::ComponentInfo, key::ComponentKey, macros::declare_id, type_meta::HasMeta};
 
-declare_id!(ComponentId, "C");
+/// Reserved: `C#<n>` addresses a component by id in string queries, and
+/// is the display form of an unnamed component.
+pub(super) const PREFIX: &str = "C#";
+
+declare_id!(ComponentId, PREFIX);
 
 pub trait IntoComponentId: Sized {
     fn id(self, ecs: &Ecs) -> Option<ComponentId>;

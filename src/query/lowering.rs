@@ -4,7 +4,7 @@ use crate::{
     ComponentId, Ecs, LogicalPlan,
     component::signature::Signature,
     query::{
-        access::Access,
+        access::{Access, ColIdx},
         logical::{Direction, Filter, IdSource, LogicalCheck, LogicalFollow, LogicalScope, Relation},
         physical::{MatchedTable, PhysicalCheck, PhysicalFollow, PhysicalPlan, PhysicalScope},
     },
@@ -35,7 +35,10 @@ fn lower_tables(ecs: &Ecs, access: &[Access], scope: &LogicalScope) -> Rc<[Match
 
         access
             .iter()
-            .map(|a| sig.find_id(&a.id).or_else(|| a.optional.then_some(usize::MAX)))
+            .map(|a| match sig.find_id(&a.id) {
+                Some(idx) => Some(ColIdx::new(idx as u32)),
+                None => a.optional.then_some(ColIdx::NONE),
+            })
             .collect::<Option<_>>()
             .map(|columns| MatchedTable { id, columns })
     };

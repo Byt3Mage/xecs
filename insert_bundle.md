@@ -18,3 +18,5 @@ remove(id, cid): 1, 2, 3, 4–7 with an empty bundle, no 8.
 delete_id(id): `on_remove` for every cid in src_sig, drop the row, free the id.
 
 Same-table case (`dst_table == r.table`): 1, 2, no 3, then for each field drop the old value and write the payload, then 8.
+
+_inline_

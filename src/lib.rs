@@ -13,6 +13,7 @@ mod relation;
 mod table;
 mod table_registry;
 mod type_meta;
+mod utils;
 
 #[doc(hidden)]
 pub use linkme as __linkme;
@@ -30,7 +31,7 @@ pub use key::{ComponentKey, RelationKey, STATIC_COMPONENTS, STATIC_RELATIONS, Un
 pub use query::{
     Follow, FollowIter, Query, TQuery,
     access::{Access, AccessMode, Select},
-    error::{PlanValidationError, ValidationError},
+    error::{AccessError, PlanError},
     logical::{LogicalPlan, PlanBuilder},
 };
 pub use relation::{

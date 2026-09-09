@@ -12,7 +12,7 @@ use crate::{
     table::{self, ColumnMap, Table, TableData},
 };
 
-declare_id!(TableId, "T");
+declare_id!(TableId, "T#");
 
 pub(crate) struct TableRegistry {
     tables: Vec<Table>,
@@ -20,7 +20,7 @@ pub(crate) struct TableRegistry {
 }
 
 impl TableRegistry {
-    pub const ROOT: TableId = TableId(0);
+    pub const ROOT: TableId = unsafe { TableId::new_unchecked(0) };
 
     pub(crate) fn new() -> Self {
         Self {
@@ -37,7 +37,7 @@ impl TableRegistry {
         match self.table_ids.entry(ids) {
             Entry::Occupied(e) => *e.get(),
             Entry::Vacant(e) => {
-                let id = TableId(self.tables.len() as u32);
+                let id = TableId::new(self.tables.len() as u32).expect("too many tables");
                 self.tables.push(table::new_table(id, components, e.key().clone()));
                 *e.insert(id)
             }
@@ -105,7 +105,8 @@ impl TableRegistry {
     }
 
     pub(crate) fn ids(&self) -> impl Iterator<Item = TableId> {
-        (0..self.tables.len() as u32).map(TableId)
+        // SAFETY: All ids up to table.len() are non-max.
+        (0..self.tables.len() as u32).map(|id| unsafe { TableId::new_unchecked(id) })
     }
 }
 

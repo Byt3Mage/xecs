@@ -3,6 +3,7 @@ use std::rc::Rc;
 use crate::{
     id::Id,
     query::{
+        access::ColIdx,
         context::QueryCtx,
         logical::{Direction, FollowId, IdSource, ScopeId},
     },
@@ -34,7 +35,7 @@ pub struct PhysicalPlan {
 #[derive(Debug, Clone)]
 pub struct MatchedTable {
     pub(crate) id: TableId,
-    pub(crate) columns: Box<[usize]>,
+    pub(crate) columns: Box<[ColIdx]>,
 }
 
 #[derive(Debug, Clone)]
