@@ -26,7 +26,7 @@ pub(crate) fn chunks(ecs: &Ecs, plan: &PhysicalPlan, cfg: &ParallelConfig, worke
     const MAX: u32 = 4096;
     const PER_WORKER: usize = 4;
 
-    let total: u32 = plan.tables.iter().map(|mt| ecs.tables[mt.id].num_rows()).sum();
+    let total: u32 = plan.tables.iter().map(|mt| ecs.storage.tables[mt.id].num_rows()).sum();
 
     if total == 0 {
         return Box::new([]);
@@ -40,7 +40,7 @@ pub(crate) fn chunks(ecs: &Ecs, plan: &PhysicalPlan, cfg: &ParallelConfig, worke
     let mut out = Vec::with_capacity(total.div_ceil(size) as usize);
 
     for (i, mt) in plan.tables.iter().enumerate() {
-        let rows = ecs.tables[mt.id].num_rows();
+        let rows = ecs.storage.tables[mt.id].num_rows();
         let mut start = 0;
         while start < rows {
             let len = size.min(rows - start);

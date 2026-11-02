@@ -1,32 +1,24 @@
-use std::sync::atomic::AtomicU32;
-
 use crate::{
-    ComponentKey, RelationKey,
-    bundle::{self, BundleRegistry},
-    component::{self, ComponentConfig, ComponentRegisterError, id::ComponentId, registry::ComponentRegistry},
+    Field, IdsExhausted, RelationKey,
+    bundle::{self, Bundle, BundleRegistry, ComponentSet},
+    component::{self, Component, ComponentConfig, ComponentId, ComponentRegisterError, registry::ComponentRegistry},
     error::{EcsError, EcsResult},
     id::{
         Id,
-        allocator::{IdAllocator, IdRecord},
+        allocator::{IdAllocator, IdRecord, NotAlive},
     },
     relation::{self, RelationRegisterError, RelationRegistry, id::RelationId},
     table::{self},
-    table_registry::TableRegistry,
+    table_storage::TableStorage,
     type_meta::HasMeta,
 };
 
-fn ecs_id_allocate() -> u32 {
-    static MAX_ID: AtomicU32 = AtomicU32::new(0);
-    MAX_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-}
-
 pub struct Ecs {
-    ecs_id: u32,
     pub(crate) ids: IdAllocator,
     pub(crate) components: ComponentRegistry,
     pub(crate) relations: RelationRegistry,
     pub(crate) bundles: BundleRegistry,
-    pub(crate) tables: TableRegistry,
+    pub(crate) storage: TableStorage,
 }
 
 impl Ecs {
@@ -36,24 +28,13 @@ impl Ecs {
             components: ComponentRegistry::new(),
             relations: RelationRegistry::new(),
             bundles: BundleRegistry::new(),
-            tables: TableRegistry::new(),
-            ecs_id: ecs_id_allocate(),
+            storage: TableStorage::new(),
         }
     }
 
     #[inline(always)]
-    pub fn generation(&self) -> u32 {
-        self.tables.generation()
-    }
-
-    #[inline(always)]
-    pub fn ecs_id(&self) -> u32 {
-        self.ecs_id
-    }
-
-    #[inline(always)]
-    pub fn component<T: HasMeta>(&mut self, key: ComponentKey<T>) -> Result<ComponentId, ComponentRegisterError> {
-        self.components.register(key)
+    pub fn generation(&self) -> u64 {
+        self.storage.generation()
     }
 
     #[inline(always)]
@@ -69,83 +50,98 @@ impl Ecs {
         self.components.new_component(config)
     }
 
-    /// Creates a new [Id].
-    pub fn new_id(&mut self) -> Id {
-        let table = TableRegistry::ROOT;
-        // SAFETY: No columns in root table, so there's nothing to initialize.
-        self.ids.new_id(|id| IdRecord {
-            table,
-            row: unsafe { self.tables[table].data.alloc_row(id) },
+    /// Creates a new [Id] with no components.
+    #[inline]
+    pub fn empty(&mut self) -> Result<Id, IdsExhausted> {
+        self.ids.new_id(|id| {
+            let table = TableStorage::ROOT;
+            let root = &mut self.storage.tables[table];
+            root.data.reserve(1);
+            // SAFETY: one row is reserved, and the root table has no columns
+            IdRecord { table, row: unsafe { root.data.push_row(id) } }
         })
     }
 
-    pub fn delete_id(&mut self, id: Id) -> EcsResult<()> {
+    /// Creates an [Id] carrying `values`.
+    #[inline]
+    pub fn create(&mut self, bundle: impl Bundle) -> Result<Id, IdsExhausted> {
+        bundle::create(self, |_| bundle)
+    }
+
+    /// Creates an [Id] carrying `values`.
+    #[inline]
+    pub fn create_with_id<B: Bundle>(&mut self, f: impl FnOnce(Id) -> B) -> Result<Id, IdsExhausted> {
+        bundle::create(self, f)
+    }
+
+    /// Creates `n` ids, each holding the bundle `f` returns for it. Nothing is
+    /// created unless all `n` ids can be allocated.
+    #[inline]
+    pub fn batch_create<B: Bundle>(&mut self, n: u32, f: impl FnMut(u32, Id) -> B) -> Result<(), IdsExhausted> {
+        bundle::batch_create(self, n, f)
+    }
+
+    pub fn delete_id(&mut self, id: Id) -> Result<(), NotAlive> {
         // TODO: run remove hooks.
         let r = self.ids.get(id)?;
-        unsafe { table::remove_id(self, r) };
+        table::remove_id(self, r);
         self.ids.remove_id(id);
         Ok(())
     }
 
     /// Checks if `id` has the `component`.
     #[inline(always)]
-    pub fn has<T: HasMeta>(&self, id: Id, key: ComponentKey<T>) -> EcsResult<bool> {
+    pub fn has<T: Component>(&self, id: Id) -> Result<bool, NotAlive> {
         let r = self.ids.get(id)?;
-        let c = component::resolve(self, key)?;
-        Ok(self.tables[r.table].col_map.contains(c))
+        Ok(self.storage.tables[r.table].has_component(T::id()))
+    }
+
+    #[inline(always)]
+    pub fn insert_bundle(&mut self, id: Id, bundle: impl Bundle) -> Result<(), NotAlive> {
+        bundle::insert(self, id, bundle)
+    }
+
+    #[inline(always)]
+    pub fn insert<T: Component>(&mut self, id: Id, v: T::Value) -> Result<(), NotAlive> {
+        self.insert_bundle(id, Field::<T>::new(v))
+    }
+
+    #[inline(always)]
+    pub fn remove<S: ComponentSet>(&mut self, id: Id) -> Result<(), NotAlive> {
+        bundle::remove::<S>(self, id)
     }
 
     #[inline]
-    pub fn add<T: HasMeta + Default>(&mut self, id: Id, key: ComponentKey<T>) -> EcsResult<()> {
-        self.insert(id, key, T::default())
-    }
-
-    #[inline]
-    pub fn insert<T: HasMeta>(&mut self, id: Id, key: ComponentKey<T>, value: T) -> EcsResult<()> {
-        let cid = component::resolve(self, key)?;
-        bundle::insert(self, id, (cid, value))?;
-        Ok(())
-    }
-
-    #[inline]
-    pub fn remove<T: HasMeta>(&mut self, id: Id, key: ComponentKey<T>) -> EcsResult<()> {
-        let cid = component::resolve(self, key)?;
-        let bid = self.bundles.intern([cid].into());
-        bundle::remove(self, id, bid)?;
-        Ok(())
-    }
-
-    #[inline]
-    pub fn get<T: HasMeta>(&self, id: Id, key: ComponentKey<T>) -> EcsResult<&T> {
+    pub fn read<T: Component>(&self, id: Id) -> EcsResult<&T::Value> {
         let r = self.ids.get(id)?;
-        let c = component::resolve(self, key)?;
+        let c = T::id();
         unsafe { component::get(self, r, c) }.ok_or(EcsError::MissingComponent(id, c))
     }
 
     #[inline]
-    pub fn get_mut<T: HasMeta>(&mut self, id: Id, key: ComponentKey<T>) -> EcsResult<&mut T> {
+    pub fn write<T: Component>(&mut self, id: Id) -> EcsResult<&mut T::Value> {
         let r = self.ids.get(id)?;
-        let c = component::resolve(self, key)?;
+        let c = T::id();
         unsafe { component::get_mut(self, r, c) }.ok_or(EcsError::MissingComponent(id, c))
     }
 
     #[inline]
     pub fn relate<T: HasMeta>(&mut self, id: Id, key: &RelationKey, target: Id, payload: T) -> EcsResult<()> {
-        let r = relation::resolve(self, key)?;
+        let r = relation::resolve(self, key).unwrap();
         unsafe { self.relations[r].relate(id, target, payload)? };
         Ok(())
     }
 
     #[inline]
     pub fn unrelate<T: HasMeta>(&mut self, id: Id, key: &RelationKey, target: Id) -> EcsResult<()> {
-        let r = relation::resolve(self, key)?;
+        let r = relation::resolve(self, key).unwrap();
         self.relations[r].unrelate(id, target);
         Ok(())
     }
 
     #[inline]
     pub fn remove_relation<T: HasMeta>(&mut self, id: Id, key: &RelationKey) -> EcsResult<()> {
-        let r = relation::resolve(self, key)?;
+        let r = relation::resolve(self, key).unwrap();
         self.relations[r].purge(id);
         Ok(())
     }

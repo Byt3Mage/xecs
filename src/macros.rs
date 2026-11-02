@@ -4,28 +4,56 @@ macro_rules! schema {
         $crate::schema!{$(#[$outer])* $vis component $name: (); $($rest)*}
     };
 
-    ($(#[$outer:meta])* $vis: vis component $name: ident: $ty: ty; $($rest: tt)*) => {
+    ($(#[$outer:meta])* $vis:vis component $name:ident: $ty:ty; $($rest:tt)*) => {
         $(#[$outer])*
-        #[allow(non_upper_case_globals)]
-        $vis static $name: $crate::ComponentKey<$ty> = {
-            #[doc(hidden)]
-            static KEY: $crate::UntypedKey = $crate::UntypedKey::new(concat!(module_path!(), "::", stringify!($name)));
+        #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+        $vis struct $name;
 
-            #[doc(hidden)]
-            #[$crate::__linkme::distributed_slice($crate::STATIC_COMPONENTS)]
-            #[linkme(crate = $crate::__linkme)]
-            static ENTRY: &'static xecs::UntypedKey = &KEY;
+        // SAFETY: `KEY` was built from `<$ty as HasMeta>::META`.
+        unsafe impl $crate::Component for $name {
+            type Value = $ty;
+            const KEY: &'static $crate::ComponentKey = {
+                static SLOT: $crate::KeySlot = $crate::KeySlot::new();
+                static KEY: $crate::ComponentKey = $crate::ComponentKey::new(
+                    &SLOT,
+                    concat!(module_path!(), "::", stringify!($name)),
+                    <$ty as $crate::HasMeta>::META,
+                );
+                #[$crate::__linkme::distributed_slice($crate::STATIC_COMPONENTS)]
+                #[linkme(crate = $crate::__linkme)]
+                static ENTRY: &'static $crate::ComponentKey = &KEY;
+                &KEY
+            };
+        }
 
-            $crate::ComponentKey::new(&KEY)
-        };
         $crate::schema!{$($rest)*}
     };
+
     () => {};
+}
+
+/// Builds a static bundle: `bundle!(Hp: 100.0, Mana: 40.0)`.
+#[macro_export]
+macro_rules! bundle {
+    ($K:ty: $value:expr $(,)?) => {
+        $crate::Field::<$K>::new($value)
+    };
+
+    ($($K:ty: $value:expr),+ $(,)?) => {{
+        const _: () = {
+           if let ::core::option::Option::Some(path) =
+                $crate::ComponentKey::find_repeated(&[$(<$K as $crate::Component>::KEY),+])
+            {
+                   ::core::panic!("{}", path);
+            }
+        };
+        ($($crate::Field::<$K>::new($value),)+)
+    }};
 }
 
 macro_rules! map {
     () => {{ ahash::AHashMap::new() }};
-    ($($key: expr => $value: expr),* $(,)?) => {{
+    ($($key: expr => $value: expr),+ $(,)?) => {{
         let mut m = crate::macros::map![];
         $(m.insert($key, $value);)*
         m
@@ -36,15 +64,16 @@ pub(crate) use map;
 
 macro_rules! declare_id {
     ($name: ident, $prefix: expr) => {
+        /// A non-max 32-bit id for use in registries
         #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
         #[repr(transparent)]
-        pub struct $name(crate::utils::NonMaxU32);
+        pub struct $name(#[doc(hidden)] std::num::NonZeroU32);
 
         impl $name {
             #[allow(dead_code)]
-            #[inline]
-            pub const fn new(raw: u32) -> Option<Self> {
-                match crate::utils::NonMaxU32::new(raw) {
+            #[inline(always)]
+            pub(crate) const fn new(raw: u32) -> Option<Self> {
+                match ::core::num::NonZeroU32::new(raw ^ u32::MAX) {
                     Some(val) => Some(Self(val)),
                     None => None,
                 }
@@ -52,25 +81,26 @@ macro_rules! declare_id {
 
             /// # Safety
             /// Caller must ensure that `raw` is not equal to u32::MAX
-            pub const unsafe fn new_unchecked(raw: u32) -> Self {
-                Self(unsafe { crate::utils::NonMaxU32::new_unchecked(raw) })
+            #[inline(always)]
+            #[allow(dead_code)]
+            pub(crate) const unsafe fn new_unchecked(raw: u32) -> Self {
+                Self(unsafe { ::core::num::NonZeroU32::new_unchecked(raw ^ u32::MAX) })
             }
 
-            #[allow(dead_code)]
-            #[inline]
+            #[inline(always)]
             pub const fn raw(self) -> u32 {
-                self.0.get()
+                self.0.get() ^ u32::MAX
             }
 
             #[inline(always)]
             pub const fn index(self) -> usize {
-                self.0.get() as usize
+                self.raw() as usize
             }
         }
 
         impl ::core::fmt::Display for $name {
             fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-                write!(f, "{}{}", $prefix, self.raw())
+                write!(f, "{}#{}", $prefix, self.raw())
             }
         }
 
@@ -83,34 +113,3 @@ macro_rules! declare_id {
 }
 
 pub(crate) use declare_id;
-
-macro_rules! impl_registry {
-    ($registry: ty [$index: ty] -> $output: ty) => {
-        impl std::ops::IndexMut<$index> for $registry {
-            #[inline]
-            fn index_mut(&mut self, index: $index) -> &mut Self::Output {
-                &mut self.infos[index.index()]
-            }
-        }
-
-        impl std::ops::Index<$index> for $registry {
-            type Output = $output;
-
-            #[inline]
-            fn index(&self, index: $index) -> &Self::Output {
-                &self.infos[index.index()]
-            }
-        }
-    };
-}
-
-pub(crate) use impl_registry;
-
-macro_rules! count {
-    ($($T:ident),* $(,)?) => {
-        <[()]>::len(&[$(count!(@unit $T)),*])
-    };
-    (@unit $T:ident) => { () };
-}
-
-pub(crate) use count;

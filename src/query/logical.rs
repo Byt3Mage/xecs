@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use crate::{
     Ecs, Id,
-    component::id::ComponentId,
+    component::ComponentId,
     query::{
         access::{Access, AccessMode, Select},
         context::Binds,
@@ -107,8 +107,8 @@ impl PlanBuilder {
             current: 0,
         }
     }
-    pub fn access(mut self, access: Access) -> Self {
-        self.access.push(access);
+    pub fn select(mut self, id: ComponentId, mode: AccessMode, optional: bool) -> Self {
+        self.access.push(Access { id, mode, optional });
         self
     }
 

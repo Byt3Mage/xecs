@@ -2,7 +2,7 @@ use crate::{Ecs, key::RelationKey, macros::declare_id, relation::RelationInfo};
 
 /// Reserved: `R#<n>` addresses a relation by id in string queries, and
 /// is the display form of an unnamed relation.
-pub(super) const PREFIX: &str = "R#";
+pub(super) const PREFIX: &str = "R";
 
 declare_id!(RelationId, PREFIX);
 

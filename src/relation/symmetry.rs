@@ -19,9 +19,7 @@ pub(crate) struct Symmetry {
 
 impl Symmetry {
     pub(super) fn new(unique: bool, meta: &TypeMeta) -> Self {
-        Self {
-            edges: Index::new(unique, meta),
-        }
+        Self { edges: Index::new(unique, meta) }
     }
 
     /// Every entity sharing an edge with `id`.
@@ -47,7 +45,7 @@ impl Symmetry {
     ///
     /// # Safety
     /// `payload` is a value if the declared relationship type `T`.
-    pub(super) unsafe fn relate<T>(&mut self, a: Id, b: Id, payload: T) -> Result<(), RelateError> {
+    pub(super) unsafe fn relate<T: Copy>(&mut self, a: Id, b: Id, payload: T) -> Result<(), RelateError> {
         // A self-edge has no meaning here. {a, a} would make an
         // entity its own partner and break exclusive displacement.
         if a == b {

@@ -58,13 +58,7 @@ pub struct Directed {
 }
 
 impl Directed {
-    pub(crate) fn new(
-        unique_source: bool,
-        unique_target: bool,
-        acyclic: bool,
-        reverse: bool,
-        meta: &TypeMeta,
-    ) -> Self {
+    pub(crate) fn new(unique_source: bool, unique_target: bool, acyclic: bool, reverse: bool, meta: &TypeMeta) -> Self {
         Self {
             forward: Index::new(unique_source, meta),
             reverse: (reverse || unique_target).then(|| Index::new(unique_target, <()>::META)),
@@ -129,12 +123,7 @@ impl Directed {
     ///
     /// # Safety
     /// `payload` is a value of the declared relationship payload type.
-    pub(crate) unsafe fn relate<T>(
-        &mut self,
-        source: Id,
-        target: Id,
-        payload: T,
-    ) -> Result<(), RelateError> {
+    pub(crate) unsafe fn relate<T: Copy>(&mut self, source: Id, target: Id, payload: T) -> Result<(), RelateError> {
         if let Some(data) = unsafe { self.forward.payload_mut(source, target) } {
             let _ = std::mem::replace(data, payload);
             return Ok(());

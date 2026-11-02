@@ -3,41 +3,30 @@ use std::collections::hash_map::Entry;
 use ahash::AHashMap;
 
 use crate::{
-    ComponentId, ComponentKey,
-    component::{ComponentConfig, ComponentInfo, ComponentRegisterError, Path, id::PREFIX},
-    key::component_key_count,
-    macros::impl_registry,
-    type_meta::HasMeta,
+    ComponentId,
+    component::{ComponentConfig, ComponentInfo, ComponentRegisterError, PREFIX, Path, static_components},
 };
 
 pub struct ComponentRegistry {
     infos: Vec<ComponentInfo>,
-    keys: Box<[Option<ComponentId>]>,
-    id_by_path: AHashMap<Path, ComponentId>,
+    path_to_id: AHashMap<Path, ComponentId>,
 }
-
-impl_registry!(ComponentRegistry[ComponentId] -> ComponentInfo);
 
 impl ComponentRegistry {
     pub fn new() -> Self {
-        Self {
-            infos: Vec::new(),
-            keys: vec![None; component_key_count()].into_boxed_slice(),
-            id_by_path: AHashMap::new(),
-        }
-    }
+        let keys = static_components();
+        let mut registry = Self {
+            infos: Vec::with_capacity(keys.len()),
+            path_to_id: AHashMap::with_capacity(keys.len()),
+        };
 
-    pub fn register<T: HasMeta>(&mut self, key: ComponentKey<T>) -> Result<ComponentId, ComponentRegisterError> {
-        let slot = key.slot() as usize;
-        Ok(match self.keys[slot] {
-            Some(id) => id,
-            None => {
-                let config = ComponentConfig { path: Some(key.path().into()), meta: *T::META };
-                let id = self.new_component(config)?;
-                self.keys[slot] = Some(id);
-                id
-            }
-        })
+        for key in keys {
+            let path = Path::Static(key.path());
+            registry.infos.push(ComponentInfo::new(path.clone(), *key.meta()));
+            registry.path_to_id.insert(path, key.id());
+        }
+
+        registry
     }
 
     pub fn new_component(&mut self, config: ComponentConfig) -> Result<ComponentId, ComponentRegisterError> {
@@ -48,7 +37,7 @@ impl ComponentRegistry {
                 if p.starts_with(PREFIX) {
                     return Err(ComponentRegisterError::ReservedPrefix(p));
                 }
-                match self.id_by_path.entry(p.clone()) {
+                match self.path_to_id.entry(p.clone()) {
                     Entry::Vacant(e) => e.insert(id),
                     Entry::Occupied(_) => return Err(ComponentRegisterError::DuplicatePath(p)),
                 };
@@ -62,10 +51,6 @@ impl ComponentRegistry {
         Ok(id)
     }
 
-    pub fn get(&self, id: ComponentId) -> &ComponentInfo {
-        &self.infos[id.index()]
-    }
-
     pub fn find_by_path(&self, path: &str) -> Option<ComponentId> {
         match path.strip_prefix(PREFIX) {
             Some(n) => n
@@ -73,12 +58,23 @@ impl ComponentRegistry {
                 .ok()
                 .and_then(ComponentId::new)
                 .filter(|id| id.index() < self.infos.len()),
-            None => self.id_by_path.get(path).copied(),
+            None => self.path_to_id.get(path).copied(),
         }
     }
+}
 
-    #[inline(always)]
-    pub fn find<T: HasMeta>(&self, key: ComponentKey<T>) -> Option<ComponentId> {
-        self.keys[key.slot() as usize]
+impl std::ops::IndexMut<ComponentId> for ComponentRegistry {
+    #[inline]
+    fn index_mut(&mut self, index: ComponentId) -> &mut Self::Output {
+        &mut self.infos[index.index()]
+    }
+}
+
+impl std::ops::Index<ComponentId> for ComponentRegistry {
+    type Output = ComponentInfo;
+
+    #[inline]
+    fn index(&self, index: ComponentId) -> &Self::Output {
+        &self.infos[index.index()]
     }
 }

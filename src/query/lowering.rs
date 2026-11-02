@@ -9,7 +9,7 @@ use crate::{
         physical::{MatchedTable, PhysicalCheck, PhysicalFollow, PhysicalPlan, PhysicalScope},
     },
     relation::storage::Shape,
-    table_registry::TableId,
+    table_storage::TableId,
 };
 
 pub fn lower_plan(ecs: &Ecs, plan: &LogicalPlan) -> PhysicalPlan {
@@ -27,7 +27,7 @@ fn lower_tables(ecs: &Ecs, access: &[Access], scope: &LogicalScope) -> Rc<[Match
     let filter = &scope.filter;
 
     let resolve = |id| {
-        let sig = &ecs.tables[id].sig;
+        let sig = &ecs.storage.tables[id].sig;
 
         if !matches_signature(sig, filter) {
             return None;
@@ -49,7 +49,7 @@ fn lower_tables(ecs: &Ecs, access: &[Access], scope: &LogicalScope) -> Rc<[Match
         .chain(access.iter().filter_map(|a| (!a.optional).then_some(&a.id)));
 
     match seed(ecs, required) {
-        None => ecs.tables.ids().filter_map(resolve).collect(),
+        None => ecs.storage.ids().filter_map(resolve).collect(),
         Some(c) => ecs.components[c].tables.iter().copied().filter_map(resolve).collect(),
     }
 }
@@ -106,11 +106,11 @@ fn match_filter(ecs: &Ecs, f: &Filter) -> Option<Box<[TableId]>> {
         return None;
     }
 
-    let filter = |id: &TableId| matches_signature(&ecs.tables[*id].sig, f);
+    let filter = |id: &TableId| matches_signature(&ecs.storage.tables[*id].sig, f);
 
     Some(match seed(ecs, f.with.iter()) {
         Some(c) => ecs.components[c].tables.iter().copied().filter(filter).collect(),
-        None => ecs.tables.ids().filter(filter).collect(),
+        None => ecs.storage.ids().filter(filter).collect(),
     })
 }
 

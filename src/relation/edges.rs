@@ -13,10 +13,10 @@ pub(super) struct ManyEdges {
 }
 
 impl ManyEdges {
-    pub(super) fn new(meta: RowLayout) -> Self {
+    pub(super) fn new(layout: RowLayout) -> Self {
         Self {
             targets: Ids::new(),
-            payload: RawBlock::new(meta),
+            payload: layout.new_block(),
             capacity: 0,
         }
     }
@@ -48,7 +48,7 @@ impl ManyEdges {
 
     /// # Safety
     /// `T` is the declared payload type.
-    pub(super) unsafe fn push<T>(&mut self, meta: RowLayout, target: Id, value: T) {
+    pub(super) unsafe fn push<T: Copy>(&mut self, meta: RowLayout, target: Id, value: T) {
         let old = self.capacity;
         let new = (old + 1).next_power_of_two().max(4);
 
@@ -58,7 +58,7 @@ impl ManyEdges {
         }
 
         // SAFETY: just reserved, and rows past `len` are never live.
-        unsafe { self.payload.write(meta, self.len(), value) };
+        unsafe { self.payload.set(meta.size(), self.len(), value) };
         self.targets.push(target);
     }
 
@@ -66,36 +66,32 @@ impl ManyEdges {
     /// its place in both arrays.
     ///
     /// Safe: dropping and moving need the layout, not the type.
-    pub(super) fn swap_remove(&mut self, meta: RowLayout, at: u32) -> Id {
+    pub(super) fn swap_remove(&mut self, row_size: usize, at: u32) -> Id {
         let last = self.len() - 1;
         // SAFETY: `at` is live. The value moving onto it comes from
         // `last`, which the target `swap_remove` below retires.
-        unsafe { self.payload.swap_remove(meta, at, last) };
+        unsafe { self.payload.swap_remove(row_size, at, last) };
         self.targets.swap_remove(at as usize)
     }
 
     /// Drop every value, release the buffer, and yield the targets.
-    pub(super) fn dispose(&mut self, meta: RowLayout) -> Ids {
-        // SAFETY: rows `0..len` are exactly the live set.
-        unsafe {
-            self.payload.drop_rows(meta, 0..self.len());
-            self.payload.dealloc(meta, self.capacity);
-        }
+    pub(super) fn dispose(&mut self, layout: RowLayout) -> Ids {
+        unsafe { self.payload.dealloc(layout, self.capacity) };
         std::mem::take(&mut self.targets)
     }
 
     /// # Safety
     /// `at < len` and `T` is the declared payload type.
     #[inline]
-    pub(super) unsafe fn value<T>(&self, meta: RowLayout, at: u32) -> &T {
-        unsafe { self.payload.read(meta, at) }
+    pub(super) unsafe fn value<T: Copy>(&self, size: usize, at: u32) -> &T {
+        unsafe { self.payload.get(size, at) }
     }
 
     /// # Safety
     /// `at < len` and `T` is the declared payload type.
     #[inline]
-    pub(super) unsafe fn value_mut<T>(&mut self, meta: RowLayout, at: u32) -> &mut T {
-        unsafe { self.payload.read_mut(meta, at) }
+    pub(super) unsafe fn value_mut<T: Copy>(&mut self, size: usize, at: u32) -> &mut T {
+        unsafe { self.payload.get_mut(size, at) }
     }
 }
 
@@ -116,10 +112,10 @@ pub(super) struct OneEdges {
 }
 
 impl OneEdges {
-    pub(super) fn new(meta: RowLayout) -> Self {
+    pub(super) fn new(layout: &RowLayout) -> Self {
         Self {
             targets: VecIdxU32::new(),
-            payload: RawBlock::new(meta),
+            payload: layout.new_block(),
         }
     }
 
@@ -144,17 +140,17 @@ impl OneEdges {
 
     /// # Safety
     /// `T` is the declared payload type.
-    pub(super) unsafe fn push<T>(&mut self, meta: RowLayout, target: Id, value: T) {
+    pub(super) unsafe fn push<T: Copy>(&mut self, layout: RowLayout, target: Id, value: T) {
         let old = self.cap();
         self.targets.reserve(1);
         let new = self.cap();
 
         if new > old {
-            unsafe { self.payload.grow(meta, old, new) };
+            unsafe { self.payload.grow(layout, old, new) };
         }
 
         // SAFETY: just reserved; rows past `len` are never live.
-        unsafe { self.payload.write(meta, self.len(), value) };
+        unsafe { self.payload.set(layout.size(), self.len(), value) };
         self.targets.push(target);
     }
 
@@ -162,46 +158,37 @@ impl OneEdges {
     ///
     /// # Safety
     /// `slot < len` and `T` is the declared payload type.
-    pub(super) unsafe fn replace<T>(&mut self, meta: RowLayout, slot: u32, target: Id, value: T) {
+    pub(super) unsafe fn replace<T: Copy>(&mut self, row_size: usize, slot: u32, target: Id, value: T) {
         self.targets[slot] = target;
         // SAFETY: the slot is occupied, so its row is live.
-        unsafe {
-            self.payload.drop_row(meta, slot);
-            self.payload.write(meta, slot, value);
-        }
+        unsafe { self.payload.set(row_size, slot, value) }
     }
 
-    pub(super) fn swap_remove(&mut self, meta: RowLayout, slot: u32) -> Id {
+    pub(super) fn swap_remove(&mut self, row_size: usize, slot: u32) -> Id {
         let last = self.len() - 1;
         // SAFETY: `slot` is live. The value moving onto it comes from
         // `last`, which the target `swap_remove` below retires.
-        unsafe {
-            self.payload.drop_row(meta, slot);
-            self.payload.shift(meta, last, slot, 1);
-        }
+        unsafe { self.payload.shift(row_size, last, slot, 1) };
         self.targets.swap_remove(slot)
     }
 
     /// # Safety
     /// `slot < len` and `T` is the declared payload type.
     #[inline]
-    pub(super) unsafe fn value<T>(&self, meta: RowLayout, slot: u32) -> &T {
-        unsafe { self.payload.read(meta, slot) }
+    pub(super) unsafe fn value<T: Copy>(&self, size: usize, slot: u32) -> &T {
+        unsafe { self.payload.get(size, slot) }
     }
 
     /// # Safety
     /// `slot < len` and `T` is the declared payload type.
     #[inline]
-    pub(super) unsafe fn value_mut<T>(&mut self, meta: RowLayout, slot: u32) -> &mut T {
-        unsafe { self.payload.read_mut(meta, slot) }
+    pub(super) unsafe fn value_mut<T: Copy>(&mut self, size: usize, slot: u32) -> &mut T {
+        unsafe { self.payload.get_mut(size, slot) }
     }
 
     pub(super) fn dispose(&mut self, meta: RowLayout) {
         // SAFETY: one live row per slot.
-        unsafe {
-            self.payload.drop_rows(meta, 0..self.len());
-            self.payload.dealloc(meta, self.cap());
-        }
+        unsafe { self.payload.dealloc(meta, self.cap()) };
         self.targets.clear();
     }
 }

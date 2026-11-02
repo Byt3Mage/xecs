@@ -1,10 +1,8 @@
 use std::rc::Rc;
 
-use crate::component::id::ComponentId;
+use crate::component::ComponentId;
 
-/// Sorted and deduped list of component ids in a [Table]
-///
-/// [Table]: crate::table::Table
+/// Sorted and deduped list of component ids.
 #[derive(Debug, Hash, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct Signature(Rc<[ComponentId]>);
@@ -173,5 +171,12 @@ impl Signature {
         out.extend_from_slice(&self[a..]);
 
         Some(Self(out.into())) // ids already sorted
+    }
+}
+
+impl std::borrow::Borrow<[ComponentId]> for Signature {
+    #[inline(always)]
+    fn borrow(&self) -> &[ComponentId] {
+        &self.0
     }
 }

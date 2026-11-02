@@ -1,17 +1,18 @@
+use thiserror::Error;
+
 use crate::{
-    ComponentId,
+    ComponentId, IdsExhausted,
     id::{Id, allocator::NotAlive},
-    key::UnregisteredKey,
     relation::storage::RelateError,
 };
 
-#[derive(thiserror::Error, Debug)]
+#[derive(Error, Debug)]
 pub enum EcsError {
     #[error(transparent)]
     NotAlive(#[from] NotAlive),
 
     #[error(transparent)]
-    UnregisteredKey(#[from] UnregisteredKey),
+    IdsExhausted(#[from] IdsExhausted),
 
     #[error("{0} does not have component {1}")]
     MissingComponent(Id, ComponentId),

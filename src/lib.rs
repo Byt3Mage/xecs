@@ -11,23 +11,25 @@ mod memory;
 mod query;
 mod relation;
 mod table;
-mod table_registry;
+mod table_storage;
 mod type_meta;
-mod utils;
 
 #[doc(hidden)]
 pub use linkme as __linkme;
 
+pub use bundle::{Bundle, Field};
 pub use component::{
-    ComponentRegisterError,
-    id::{ComponentId, IntoComponentId},
-    signature::Signature,
+    Component, ComponentId, ComponentInfo, ComponentKey, ComponentRegisterError, KeySlot, STATIC_COMPONENTS,
+    signature::Signature, static_components,
 };
 pub use ecs::Ecs;
-pub use error::EcsError;
-pub use id::Id;
+pub use error::{EcsError, EcsResult};
+pub use id::{
+    Id,
+    allocator::{IdsExhausted, NotAlive},
+};
 pub use inline_vec::InlineVec;
-pub use key::{ComponentKey, RelationKey, STATIC_COMPONENTS, STATIC_RELATIONS, UntypedKey};
+pub use key::{RelationKey, STATIC_RELATIONS};
 pub use query::{
     Follow, FollowIter, Query, TQuery,
     access::{Access, AccessMode, Select},
@@ -39,4 +41,4 @@ pub use relation::{
     id::{IntoRelationId, RelationId},
     storage::Shape,
 };
-pub use type_meta::TypeMeta;
+pub use type_meta::{HasMeta, TypeMeta};

@@ -74,7 +74,7 @@ impl<S: Select, F: Follows> TQuery<S, F> {
         let scope = &plan.scopes[0];
 
         'matches: for mt in plan.tables.iter() {
-            let table = &ecs.tables[mt.id];
+            let table = &ecs.storage.tables[mt.id];
             let ids = table.ids();
 
             if ids.is_empty() {

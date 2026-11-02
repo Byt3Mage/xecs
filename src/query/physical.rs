@@ -11,7 +11,7 @@ use crate::{
         id::RelationId,
         storage::{EdgeIter, Edges},
     },
-    table_registry::TableId,
+    table_storage::TableId,
 };
 
 /// A logical plan resolved against a concrete world. Flat, parallel to
@@ -19,7 +19,7 @@ use crate::{
 /// when `resolved_at != ecs.generation`.
 #[derive(Debug, Clone)]
 pub struct PhysicalPlan {
-    pub(crate) resolved_at: u32,
+    pub(crate) resolved_at: u64,
 
     /// Tables satisfying the scope's component constraints, ordered
     /// by [TableId], with per-select column resolution.

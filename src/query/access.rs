@@ -49,21 +49,9 @@ pub struct Access {
     pub optional: bool,
 }
 
-impl Access {
-    #[inline]
-    pub fn writes(&self) -> bool {
-        self.mode == AccessMode::Write
-    }
-
-    #[inline]
-    pub fn reads(&self) -> bool {
-        self.mode == AccessMode::Read
-    }
-}
-
 /// A base pointer to one table column, tagged with the borrow of the
 /// table it came from.
-pub struct Col<'a, T> {
+pub struct ColRef<'a, T> {
     ptr: NonNull<T>,
     marker: PhantomData<&'a [T]>,
 }
@@ -75,13 +63,13 @@ pub struct ColMut<'a, T> {
     marker: PhantomData<&'a mut [T]>,
 }
 
-impl<T> Clone for Col<'_, T> {
+impl<T> Clone for ColRef<'_, T> {
     #[inline(always)]
     fn clone(&self) -> Self {
         *self
     }
 }
-impl<T> Copy for Col<'_, T> {}
+impl<T> Copy for ColRef<'_, T> {}
 
 impl<T> Clone for ColMut<'_, T> {
     #[inline(always)]
@@ -91,7 +79,7 @@ impl<T> Clone for ColMut<'_, T> {
 }
 impl<T> Copy for ColMut<'_, T> {}
 
-impl<'a, T> Col<'a, T> {
+impl<'a, T> ColRef<'a, T> {
     #[inline(always)]
     fn new(table: &'a Table, index: u32) -> Self {
         Self {
@@ -145,7 +133,6 @@ mod private {
     pub trait SealedFetch {}
 }
 
-impl SealedFetch for Id {}
 impl<T> SealedFetch for &T {}
 impl<T> SealedFetch for &mut T {}
 impl<T> SealedFetch for Option<&T> {}
@@ -164,7 +151,7 @@ pub trait TypedAccess: SealedFetch {
 
 impl<T: 'static> TypedAccess for &T {
     type Row<'a> = &'a T;
-    type Column<'a> = Col<'a, T>;
+    type Column<'a> = ColRef<'a, T>;
     const ACCESS: TAccess = TAccess::of::<T>(AccessMode::Read, false);
 
     #[inline(always)]
@@ -174,7 +161,7 @@ impl<T: 'static> TypedAccess for &T {
 
     #[inline(always)]
     fn column(table: &Table, index: ColIdx) -> Self::Column<'_> {
-        Col::new(table, index.get().expect("required component missing"))
+        ColRef::new(table, index.get().expect("required component missing"))
     }
 }
 
@@ -196,7 +183,7 @@ impl<T: 'static> TypedAccess for &mut T {
 
 impl<T: 'static> TypedAccess for Option<&T> {
     type Row<'a> = Option<&'a T>;
-    type Column<'a> = Option<Col<'a, T>>;
+    type Column<'a> = Option<ColRef<'a, T>>;
     const ACCESS: TAccess = TAccess::of::<T>(AccessMode::Read, true);
 
     unsafe fn row<'a>(column: Self::Column<'a>, row: u32) -> Self::Row<'a> {
@@ -204,7 +191,7 @@ impl<T: 'static> TypedAccess for Option<&T> {
     }
 
     fn column(table: &Table, index: ColIdx) -> Self::Column<'_> {
-        index.get().map(|i| Col::new(table, i))
+        index.get().map(|i| ColRef::new(table, i))
     }
 }
 

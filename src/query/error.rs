@@ -11,21 +11,21 @@ pub struct PlanError {
 
 #[derive(thiserror::Error, Debug)]
 pub enum AccessError {
-    #[error("access {index}: &mut on a Read access")]
+    #[error("access[{index}]: &mut on a Read access")]
     WriteOnRead { index: u32 },
 
-    #[error("access {index}: &T on a Write access")]
+    #[error("access[{index}]: &T on a Write access")]
     ReadOnWrite { index: u32 },
 
-    #[error("access {index}: query declares optional access")]
+    #[error("access[{index}]: &(mut)T on an optional access")]
     RequiredOnOptional { index: u32 },
 
-    #[error("access {index}: query declares required access")]
+    #[error("access[{index}]: Option<&(mut)T> on a required access")]
     OptionalOnRequired { index: u32 },
 
-    #[error("access {index}: column type mismatch")]
+    #[error("access[{index}]: column type mismatch")]
     TypeMismatch { index: u32 },
 
-    #[error("claims {received} columns, query declares {expected}")]
+    #[error("selects {received} columns, query declares {expected}")]
     ArityMismatch { received: u32, expected: u32 },
 }

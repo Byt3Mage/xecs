@@ -1,15 +1,12 @@
-use std::{alloc::Layout, any::TypeId, mem};
-
-use crate::memory::DropFn;
-
-#[inline]
-const fn dtor<T>() -> DropFn {
-    if mem::needs_drop::<T>() { Some(|p| unsafe { p.cast::<T>().drop_in_place() }) } else { None }
-}
+use std::{
+    alloc::Layout,
+    any::TypeId,
+    collections::{HashMap, hash_map::Entry},
+    hash::{BuildHasherDefault, Hasher},
+};
 
 #[derive(Debug, Clone, Copy)]
 pub struct TypeMeta {
-    pub drop: DropFn,
     pub layout: Layout,
     pub type_id: TypeId,
     pub type_name: fn() -> &'static str,
@@ -17,9 +14,8 @@ pub struct TypeMeta {
 
 impl TypeMeta {
     #[inline]
-    pub const fn of<T: 'static>() -> Self {
+    pub const fn of<T: Copy + 'static>() -> Self {
         Self {
-            drop: dtor::<T>(),
             layout: Layout::new::<T>(),
             type_id: TypeId::of::<T>(),
             type_name: std::any::type_name::<T>,
@@ -32,15 +28,64 @@ impl TypeMeta {
     }
 
     #[inline(always)]
-    pub fn type_name(&self) -> &'static str {
+    pub fn name(&self) -> &'static str {
         (self.type_name)()
     }
 }
 
-pub trait HasMeta: 'static {
+pub trait HasMeta: Copy + 'static {
     const META: &'static TypeMeta;
 }
 
-impl<T: 'static> HasMeta for T {
-    const META: &'static TypeMeta = &TypeMeta::of::<Self>();
+impl<T: Copy + 'static> HasMeta for T {
+    const META: &TypeMeta = &TypeMeta::of::<Self>();
+}
+
+/// Passes a `TypeId`'s own hash bits through unchanged. `TypeId` hashes
+/// itself with a single `write_u64`; `write` mixes bytes for any other
+/// input.
+#[derive(Default)]
+struct TypeIdHasher(u64);
+
+impl Hasher for TypeIdHasher {
+    #[inline(always)]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    #[inline(always)]
+    fn write_u64(&mut self, n: u64) {
+        self.0 = n;
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0.rotate_left(5) ^ (b as u64)).wrapping_mul(0x517c_c1b7_2722_0a95);
+        }
+    }
+}
+
+#[repr(transparent)]
+pub(crate) struct TypeIdMap<V>(HashMap<TypeId, V, BuildHasherDefault<TypeIdHasher>>);
+
+impl<V> Default for TypeIdMap<V> {
+    fn default() -> Self {
+        Self(Default::default())
+    }
+}
+
+impl<V> TypeIdMap<V> {
+    pub(crate) fn new() -> Self {
+        Self(HashMap::default())
+    }
+
+    #[inline(always)]
+    pub(crate) fn get<T: 'static>(&self) -> Option<&V> {
+        self.0.get(&TypeId::of::<T>())
+    }
+
+    #[inline(always)]
+    pub(crate) fn entry<T: 'static>(&mut self) -> Entry<'_, TypeId, V> {
+        self.0.entry(TypeId::of::<T>())
+    }
 }

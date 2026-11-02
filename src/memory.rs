@@ -1,54 +1,45 @@
 use std::{
-    alloc::{alloc, dealloc, handle_alloc_error, realloc, Layout},
+    alloc::{Layout, alloc, dealloc, handle_alloc_error, realloc},
     ptr::NonNull,
 };
 
 use crate::TypeMeta;
 
-pub type DropFn = Option<unsafe fn(ptr: NonNull<u8>)>;
-
-/// How to interpret a `RawBlock`'s bytes: one element's padded layout
-/// and its drop glue.
+/// One element's layout, padded to its alignment so that `size * n`
+/// addresses row `n`.
 ///
-/// Held once by the structure that owns a block — a table's column map,
-/// a relation index, a hierarchy — rather than stored per buffer, which
-/// is what lets a per-source or per-tree block cost one pointer.
+/// Held once by the structure that owns a block rather than per buffer,
+/// so a block is one pointer.
 #[derive(Copy, Clone)]
-pub(crate) struct RowLayout {
+pub struct RowLayout {
     /// Padded to alignment, so `size * n` addresses row `n`.
     layout: Layout,
-    drop: DropFn,
 }
 
 impl RowLayout {
-    pub(crate) fn new(layout: Layout, drop: DropFn) -> Self {
-        Self { layout: layout.pad_to_align(), drop }
+    #[inline]
+    pub(crate) fn new(layout: Layout) -> Self {
+        Self { layout: layout.pad_to_align() }
     }
 
+    #[inline]
     pub(crate) fn from_meta(meta: &TypeMeta) -> Self {
-        Self::new(meta.layout, meta.drop)
+        Self::new(meta.layout)
     }
 
     #[inline(always)]
-    pub(crate) const fn size(&self) -> usize {
+    pub const fn size(&self) -> usize {
         self.layout.size()
     }
 
     #[inline(always)]
-    pub(crate) const fn align(&self) -> usize {
+    pub const fn align(&self) -> usize {
         self.layout.align()
     }
 
     #[inline(always)]
-    pub(crate) const fn is_zst(&self) -> bool {
+    pub const fn is_zst(&self) -> bool {
         self.layout.size() == 0
-    }
-
-    #[inline(always)]
-    pub(crate) unsafe fn drop(&self, data: NonNull<u8>) {
-        if let Some(drop) = self.drop {
-            unsafe { drop(data) };
-        }
     }
 
     /// Layout of `n` contiguous rows.
@@ -60,25 +51,22 @@ impl RowLayout {
     }
 
     #[inline]
-    fn dangling(&self) -> NonNull<u8> {
-        self.layout.dangling_ptr()
+    pub(crate) fn new_block(&self) -> RawBlock {
+        RawBlock { ptr: self.layout.dangling_ptr() }
     }
 }
 
+/// Untyped storage for rows of one `RowLayout`. Capacity is tracked by
+/// the owner.
+///
+/// Elements are `Copy`, so rows are plain bytes. A row may be overwritten
+/// or abandoned without any cleanup, and relocation is a byte copy.
 #[repr(transparent)]
 pub(crate) struct RawBlock {
     ptr: NonNull<u8>,
 }
 
 impl RawBlock {
-    /// An unallocated block. The pointer is aligned rather than merely
-    /// non-null, so zero-sized reads and writes through it are
-    /// well-formed without a special case anywhere else.
-    #[inline]
-    pub(crate) fn new(layout: RowLayout) -> Self {
-        Self { ptr: layout.dangling() }
-    }
-
     #[inline(always)]
     pub(crate) fn ptr(&self) -> NonNull<u8> {
         self.ptr
@@ -90,14 +78,14 @@ impl RawBlock {
     /// - `old_cap` is this block's current capacity, from a previous
     ///   `grow`/`shrink` on the same `rm`.
     /// - `new_cap > old_cap`.
-    pub(crate) unsafe fn grow(&mut self, rm: RowLayout, old_cap: u32, new_cap: u32) {
+    pub(crate) unsafe fn grow(&mut self, rl: RowLayout, old_cap: u32, new_cap: u32) {
         debug_assert!(new_cap > old_cap);
 
-        if rm.is_zst() {
+        if rl.is_zst() {
             return;
         }
 
-        let layout = rm.array(new_cap);
+        let layout = rl.array(new_cap);
 
         // SAFETY: `layout` has non-zero size — `new_cap` exceeds `old_cap`
         // and the stride is non-zero. On the realloc path `self.ptr` came
@@ -105,7 +93,7 @@ impl RawBlock {
         let ptr = unsafe {
             match old_cap {
                 0 => alloc(layout),
-                old => realloc(self.ptr.as_ptr(), rm.array(old), layout.size()),
+                old => realloc(self.ptr.as_ptr(), rl.array(old), layout.size()),
             }
         };
 
@@ -121,24 +109,24 @@ impl RawBlock {
     /// - `new_cap < old_cap`.
     /// - No row at or past `new_cap` is live. Values there are lost
     ///   without being dropped.
-    pub(crate) unsafe fn shrink(&mut self, rm: RowLayout, old_cap: u32, new_cap: u32) {
+    pub(crate) unsafe fn shrink(&mut self, rl: RowLayout, old_cap: u32, new_cap: u32) {
         debug_assert!(new_cap < old_cap);
 
-        if rm.is_zst() || old_cap == 0 {
+        if rl.is_zst() || old_cap == 0 {
             return;
         }
 
-        let old_layout = rm.array(old_cap);
+        let old_layout = rl.array(old_cap);
 
         if new_cap == 0 {
             // SAFETY: `self.ptr` came from `old_layout`, and the caller
             // guarantees no live rows remain.
             unsafe { dealloc(self.ptr.as_ptr(), old_layout) };
-            self.ptr = rm.dangling();
+            self.ptr = rl.layout.dangling_ptr();
             return;
         }
 
-        let layout = rm.array(new_cap);
+        let layout = rl.array(new_cap);
 
         // SAFETY: `self.ptr` came from `old_layout`. Shrinking preserves
         // the first `new_cap` rows, all of which remain live.
@@ -155,7 +143,7 @@ impl RawBlock {
             return;
         }
         unsafe { std::alloc::dealloc(self.ptr.as_ptr(), rm.array(cap)) };
-        *self = Self::new(rm);
+        self.ptr = rm.layout.dangling_ptr();
     }
 
     #[inline(always)]
@@ -168,41 +156,25 @@ impl RawBlock {
     /// # Safety
     /// `i` is within capacity and holds no live value; `T` matches `rm`.
     #[inline]
-    pub(crate) unsafe fn write<T>(&mut self, rm: RowLayout, i: u32, value: T) {
-        unsafe { self.row(rm.size(), i).cast::<T>().write(value) };
+    pub(crate) unsafe fn set<T: Copy>(&mut self, size: usize, i: u32, value: T) {
+        unsafe { self.row(size, i).cast::<T>().write(value) };
     }
 
     /// # Safety
-    /// `i` holds a live value; `T` matches `rm`.
+    /// - `i` holds a live value
+    /// - `T` matches this block's type
     #[inline]
-    pub(crate) unsafe fn read<T>(&self, rm: RowLayout, i: u32) -> &T {
-        unsafe { self.row(rm.size(), i).cast::<T>().as_ref() }
+    pub(crate) unsafe fn get<T: Copy>(&self, size: usize, i: u32) -> &T {
+        unsafe { self.row(size, i).cast::<T>().as_ref() }
     }
 
     /// # Safety
-    /// `i` holds a live value; `T` matches `rm`; no other reference to
-    /// this row exists.
+    /// - `i` holds a live value
+    /// - `T` is this block's type
+    /// - no other reference to this row exists.
     #[inline]
-    pub(crate) unsafe fn read_mut<T>(&mut self, rm: RowLayout, i: u32) -> &mut T {
-        unsafe { self.row(rm.size(), i).cast::<T>().as_mut() }
-    }
-
-    /// # Safety
-    /// `i` is within capacity and holds a live value.
-    #[inline]
-    pub(crate) unsafe fn drop_row(&self, rm: RowLayout, i: u32) {
-        if let Some(drop) = rm.drop {
-            unsafe { drop(self.row(rm.size(), i)) };
-        }
-    }
-
-    /// # Safety
-    /// Every row in `range` is within capacity and live.
-    #[inline]
-    pub(crate) unsafe fn drop_rows(&self, rm: RowLayout, range: std::ops::Range<u32>) {
-        if let Some(drop) = rm.drop {
-            range.for_each(|i| unsafe { drop(self.row(rm.size(), i)) });
-        }
+    pub(crate) unsafe fn get_mut<T: Copy>(&mut self, size: usize, i: u32) -> &mut T {
+        unsafe { self.row(size, i).cast::<T>().as_mut() }
     }
 
     /// Relocate `count` rows within this block. Ranges may overlap.
@@ -212,54 +184,44 @@ impl RawBlock {
     /// rows are dead afterwards and must not be dropped, and the
     /// destination must have held nothing live.
     #[inline]
-    pub(crate) unsafe fn shift(&mut self, rm: RowLayout, src: u32, dst: u32, count: u32) {
-        if rm.is_zst() || count == 0 || src == dst {
+    pub(crate) unsafe fn shift(&mut self, row_size: usize, src: u32, dst: u32, count: u32) {
+        if row_size == 0 || count == 0 || src == dst {
             return;
         }
+
         unsafe {
-            let size = rm.size();
-            let src = self.row(size, src);
-            let dst = self.row(size, dst);
-            src.copy_to(dst, (count as usize) * rm.size());
+            let src = self.row(row_size, src);
+            let dst = self.row(row_size, dst);
+            src.copy_to(dst, (count as usize) * row_size);
         };
     }
 
     /// Relocate `count` rows into another block.
     ///
     /// # Safety
-    /// Both blocks use `rm`; both ranges are within their capacities;
-    /// the blocks are distinct allocations. Same move obligations as
-    /// `shift`.
+    /// Both blocks use the same size; both ranges are within their capacities;
+    /// the blocks are distinct allocations.
     #[inline]
-    pub(crate) unsafe fn move_row(&self, rm: RowLayout, src: u32, dest: &RawBlock, dst: u32, count: u32) {
-        if rm.is_zst() || count == 0 {
+    pub(crate) unsafe fn copy_rows(&self, row_size: usize, src: u32, dest: &RawBlock, dst: u32, count: u32) {
+        if row_size == 0 || count == 0 {
             return;
         }
         unsafe {
-            let size = rm.size();
-            let src = self.row(size, src);
-            let dst = dest.row(size, dst);
-            src.copy_to_nonoverlapping(dst, (count as usize) * rm.size());
+            let src = self.row(row_size, src);
+            let dst = dest.row(row_size, dst);
+            src.copy_to_nonoverlapping(dst, (count as usize) * row_size);
         };
     }
 
-    /// Drop the value at `at` and move the last one into its place,
-    /// mirroring `Vec::swap_remove` for an owner whose length lives
-    /// elsewhere.
-    ///
-    /// The drop happens first: the row must be dead before anything is
-    /// moved onto it, or the incoming value would be destroyed instead.
+    /// Overwrite row `at` with row `last`, mirroring `Vec::swap_remove`
+    /// for an owner whose length is tracked elsewhere. The owner's length
+    /// becomes `last`.
     ///
     /// # Safety
-    /// `at <= last`, both within capacity, and every row in `0..=last`
-    /// is live. The owner's length becomes `last` on return, so that
-    /// row is dead and must not be dropped again.
+    /// `at <= last` and both are within capacity.
     #[inline]
-    pub(crate) unsafe fn swap_remove(&mut self, rm: RowLayout, at: u32, last: u32) {
+    pub(crate) unsafe fn swap_remove(&mut self, row_size: usize, at: u32, last: u32) {
         debug_assert!(at <= last);
-        unsafe {
-            self.drop_row(rm, at);
-            self.shift(rm, last, at, 1);
-        }
+        unsafe { self.shift(row_size, last, at, 1) };
     }
 }

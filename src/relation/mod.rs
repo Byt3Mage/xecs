@@ -5,7 +5,6 @@ use ahash::AHashMap;
 use crate::{
     Ecs, Id, RelationKey, Shape, TypeMeta,
     key::{UnregisteredKey, relation_key_count, unregistered},
-    macros::impl_registry,
     relation::{
         id::{PREFIX, RelationId},
         storage::{Edges, RelateError, Storage},
@@ -42,7 +41,7 @@ impl RelationInfo {
         self.shape
     }
 
-    pub(crate) unsafe fn relate<T>(&mut self, source: Id, target: Id, payload: T) -> Result<(), RelateError> {
+    pub(crate) unsafe fn relate<T: Copy>(&mut self, source: Id, target: Id, payload: T) -> Result<(), RelateError> {
         unsafe {
             match &mut self.storage {
                 Storage::Directed(s) => s.relate(source, target, payload),
@@ -114,8 +113,6 @@ pub struct RelationRegistry {
     id_by_path: AHashMap<Path, RelationId>,
 }
 
-impl_registry!(RelationRegistry[RelationId] -> RelationInfo);
-
 impl RelationRegistry {
     pub fn new() -> Self {
         Self {
@@ -176,6 +173,22 @@ impl RelationRegistry {
     #[inline(always)]
     pub fn find(&self, key: &RelationKey) -> Option<RelationId> {
         self.keys[key.slot() as usize]
+    }
+}
+
+impl std::ops::IndexMut<RelationId> for RelationRegistry {
+    #[inline]
+    fn index_mut(&mut self, index: RelationId) -> &mut Self::Output {
+        &mut self.infos[index.index()]
+    }
+}
+
+impl std::ops::Index<RelationId> for RelationRegistry {
+    type Output = RelationInfo;
+
+    #[inline]
+    fn index(&self, index: RelationId) -> &Self::Output {
+        &self.infos[index.index()]
     }
 }
 

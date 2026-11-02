@@ -110,15 +110,15 @@ pub(super) struct Index {
     pub(super) sparse: Sparse<u32>,
     pub(super) source: VecIdxU32<Id>,
     pub(super) target: Target,
-    meta: RowLayout,
+    layout: RowLayout,
 }
 
 impl Drop for Index {
     fn drop(&mut self) {
         match &mut self.target {
-            Target::One(e) => e.dispose(self.meta),
+            Target::One(e) => e.dispose(self.layout),
             Target::Many(many) => many.iter_mut().for_each(|l| {
-                l.dispose(self.meta);
+                l.dispose(self.layout);
             }),
         }
     }
@@ -126,15 +126,15 @@ impl Drop for Index {
 
 impl Index {
     pub(crate) fn new(unique: bool, meta: &TypeMeta) -> Self {
-        let meta = RowLayout::from_meta(meta);
+        let layout = RowLayout::from_meta(meta);
         Self {
             sparse: Sparse::new(),
             source: VecIdxU32::new(),
             target: match unique {
-                true => Target::One(OneEdges::new(meta)),
+                true => Target::One(OneEdges::new(&layout)),
                 false => Target::Many(VecIdxU32::new()),
             },
-            meta,
+            layout,
         }
     }
 }
@@ -165,12 +165,10 @@ impl Index {
 
     #[inline(always)]
     pub(crate) fn contains(&self, source: Id, target: Id) -> bool {
-        self.sparse
-            .get(source)
-            .is_some_and(|&s| match &self.target {
-                Target::One(e) => e.target(s) == target,
-                Target::Many(e) => e[s].contains(target),
-            })
+        self.sparse.get(source).is_some_and(|&s| match &self.target {
+            Target::One(e) => e.target(s) == target,
+            Target::Many(e) => e[s].contains(target),
+        })
     }
 
     /// Insert `(source, target)`.
@@ -180,8 +178,8 @@ impl Index {
     ///
     /// # Safety
     /// `T` is the relation's declared payload type.
-    pub(super) unsafe fn add<T>(&mut self, source: Id, target: Id, payload: T) -> bool {
-        let meta = self.meta;
+    pub(super) unsafe fn add<T: Copy>(&mut self, source: Id, target: Id, payload: T) -> bool {
+        let row_size = self.layout.size();
 
         if let Some(&slot) = self.sparse.get(source) {
             return match &mut self.target {
@@ -190,7 +188,7 @@ impl Index {
                         return false;
                     }
                     // SAFETY: caller guarantees `T`; the slot is live.
-                    unsafe { e.replace(meta, slot, target, payload) };
+                    unsafe { e.replace(row_size, slot, target, payload) };
                     true
                 }
                 Target::Many(e) => {
@@ -199,7 +197,7 @@ impl Index {
                         return false;
                     }
                     // SAFETY: caller guarantees `T`.
-                    unsafe { list.push(meta, target, payload) };
+                    unsafe { list.push(self.layout, target, payload) };
                     true
                 }
             };
@@ -209,10 +207,10 @@ impl Index {
         self.source.push(source);
         // SAFETY: caller guarantees `T`.
         match &mut self.target {
-            Target::One(e) => unsafe { e.push(meta, target, payload) },
+            Target::One(e) => unsafe { e.push(self.layout, target, payload) },
             Target::Many(e) => {
-                let mut many = ManyEdges::new(meta);
-                unsafe { many.push(meta, target, payload) };
+                let mut many = ManyEdges::new(self.layout);
+                unsafe { many.push(self.layout, target, payload) };
                 e.push(many);
             }
         }
@@ -224,7 +222,8 @@ impl Index {
         let Some(&slot) = self.sparse.get(source) else {
             return false;
         };
-        let meta = self.meta;
+
+        let row_size = self.layout.size();
 
         match &mut self.target {
             Target::One(e) => {
@@ -234,19 +233,19 @@ impl Index {
 
                 self.sparse.remove(source);
                 self.source.swap_remove(slot);
-                e.swap_remove(meta, slot);
+                e.swap_remove(row_size, slot);
             }
             Target::Many(e) => {
                 let list = &mut e[slot];
                 let Some(at) = list.position(target) else {
                     return false;
                 };
-                list.swap_remove(meta, at);
+                list.swap_remove(row_size, at);
 
                 if list.len() == 0 {
                     self.sparse.remove(source);
                     self.source.swap_remove(slot);
-                    e.swap_remove(slot).dispose(meta);
+                    e.swap_remove(slot).dispose(self.layout);
                 }
             }
         }
@@ -262,14 +261,13 @@ impl Index {
         let Some(&slot) = self.sparse.get(source) else {
             return invec![];
         };
-        let meta = self.meta;
 
         self.sparse.remove(source);
         self.source.swap_remove(slot);
 
         let ids = match &mut self.target {
-            Target::One(e) => std::iter::once(e.swap_remove(meta, slot)).collect(),
-            Target::Many(e) => e.swap_remove(slot).dispose(meta),
+            Target::One(e) => std::iter::once(e.swap_remove(self.layout.size(), slot)).collect(),
+            Target::Many(e) => e.swap_remove(slot).dispose(self.layout),
         };
 
         if slot < self.source.len() {
@@ -283,14 +281,12 @@ impl Index {
     ///
     /// # Safety
     /// `T` is the relation's declared payload type.
-    pub(crate) unsafe fn payload<T>(&self, source: Id, target: Id) -> Option<&T> {
+    pub(crate) unsafe fn payload<T: Copy>(&self, source: Id, target: Id) -> Option<&T> {
         let &slot = self.sparse.get(source)?;
-        let meta = self.meta;
+        let size = self.layout.size();
         match &self.target {
-            Target::One(e) => (e.target(slot) == target).then(|| unsafe { e.value(meta, slot) }),
-            Target::Many(e) => e[slot]
-                .position(target)
-                .map(|i| unsafe { e[slot].value(meta, i) }),
+            Target::One(e) => (e.target(slot) == target).then(|| unsafe { e.value(size, slot) }),
+            Target::Many(e) => e[slot].position(target).map(|i| unsafe { e[slot].value(size, i) }),
         }
     }
 
@@ -298,16 +294,12 @@ impl Index {
     ///
     /// # Safety
     /// `T` is the relation's declared payload type.
-    pub(crate) unsafe fn payload_mut<T>(&mut self, source: Id, target: Id) -> Option<&mut T> {
+    pub(crate) unsafe fn payload_mut<T: Copy>(&mut self, source: Id, target: Id) -> Option<&mut T> {
         let &slot = self.sparse.get(source)?;
-        let meta = self.meta;
+        let size = self.layout.size();
         match &mut self.target {
-            Target::One(e) => {
-                (e.target(slot) == target).then(|| unsafe { e.value_mut(meta, slot) })
-            }
-            Target::Many(e) => e[slot]
-                .position(target)
-                .map(|i| unsafe { e[slot].value_mut(meta, i) }),
+            Target::One(e) => (e.target(slot) == target).then(|| unsafe { e.value_mut(size, slot) }),
+            Target::Many(e) => e[slot].position(target).map(|i| unsafe { e[slot].value_mut(size, i) }),
         }
     }
 
@@ -350,18 +342,9 @@ impl Storage {
         match shape {
             Shape::Hierarchical => Storage::Hierarchy(Hierarchy::new()),
             Shape::Symmetric { unique } => Storage::Symmetry(Symmetry::new(unique, meta)),
-            Shape::Directed {
-                unique_source,
-                unique_target,
-                acyclic,
-                reverse,
-            } => Storage::Directed(Directed::new(
-                unique_source,
-                unique_target,
-                acyclic,
-                reverse,
-                meta,
-            )),
+            Shape::Directed { unique_source, unique_target, acyclic, reverse } => {
+                Storage::Directed(Directed::new(unique_source, unique_target, acyclic, reverse, meta))
+            }
         }
     }
 }

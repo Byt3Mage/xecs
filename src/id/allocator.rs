@@ -1,9 +1,13 @@
-use crate::{id::Id, table_registry::TableId};
+use crate::{id::Id, table_storage::TableId};
 
 /// Error returned if accessing an [IdRecord] fails
 #[derive(thiserror::Error, Debug)]
 #[error("{0} is not alive")]
 pub struct NotAlive(pub Id);
+
+#[derive(thiserror::Error, Debug)]
+#[error("allocator has exhasuted all available ids")]
+pub struct IdsExhausted;
 
 #[derive(Debug, Clone, Copy)]
 pub struct IdRecord {
@@ -16,29 +20,24 @@ struct Entry {
     record: IdRecord,
 }
 
-pub struct IdAllocator {
-    sparse: Vec<usize>,
+/// Sparse set of ids. `dense[..alive]` holds live ids, `dense[alive..]`
+/// holds dead ids awaiting reuse. `sparse` maps an id's index to its
+/// position in `dense`; both always have one slot per id ever created.
+pub(crate) struct IdAllocator {
+    sparse: Vec<u32>,
     dense: Vec<Entry>,
-    alive: usize,
-    max: u32,
+    alive: u32,
 }
 
 impl IdAllocator {
     pub(crate) fn new() -> Self {
-        Self { sparse: vec![], dense: vec![], alive: 0, max: 0 }
+        Self { sparse: vec![], dense: vec![], alive: 0 }
     }
 
+    #[inline]
     pub(crate) fn set_location(&mut self, id: Id, r: IdRecord) {
-        if let Some(&dense) = self.sparse.get(id.index() as usize)
-            && dense < self.alive
-        {
-            let entry = &mut self.dense[dense];
-            if entry.id == id {
-                entry.record = r;
-            }
-        } else {
-            debug_assert!(false, "set_location on stale id")
-        }
+        debug_assert!(self.is_alive(id), "set_location on dead id {id}");
+        self.dense[self.sparse[id.index() as usize] as usize].record = r;
     }
 
     /// Returns the [IdRecord] for the [Id].
@@ -47,23 +46,19 @@ impl IdAllocator {
     pub(crate) fn get(&self, id: Id) -> Result<IdRecord, NotAlive> {
         self.sparse
             .get(id.index() as usize)
-            .and_then(|dense| (dense < &self.alive).then(|| &self.dense[*dense]))
-            .and_then(|entry| (entry.id == id).then_some(entry.record))
+            .filter(|&&d| d < self.alive)
+            .map(|&d| &self.dense[d as usize])
+            .filter(|e| e.id == id)
+            .map(|e| e.record)
             .ok_or(NotAlive(id))
     }
 
     /// Checks if the [Id] is alive
+    #[inline]
     pub fn is_alive(&self, id: Id) -> bool {
         self.sparse
             .get(id.index() as usize)
-            .is_some_and(|&d| d < self.alive && self.dense[d].id == id)
-    }
-
-    /// Check if [Id] was ever created (whether alive or dead).
-    pub fn exists(&self, id: Id) -> bool {
-        self.sparse
-            .get(id.index() as usize)
-            .is_some_and(|&d| d < self.dense.len())
+            .is_some_and(|&d| d < self.alive && (self.dense[d as usize].id == id))
     }
 
     pub(crate) fn remove_id(&mut self, id: Id) {
@@ -73,68 +68,64 @@ impl IdAllocator {
             return;
         };
 
+        let dense_idx = dense as usize;
+
         // Do nothing entity if already dead or nonexistent.
-        if dense >= self.alive || self.dense[dense].id != id {
+        if dense >= self.alive || self.dense[dense_idx].id != id {
             return;
         }
 
         self.alive -= 1;
         self.sparse[sparse] = self.alive;
-        self.dense[dense].id = id.next_generation();
+        self.dense[dense_idx].id = id.next_generation();
 
         // swap last alive entity with removed entity.
         if dense != self.alive {
-            self.dense.swap(dense, self.alive);
-            self.sparse[self.dense[dense].id.index() as usize] = dense;
+            self.dense.swap(dense_idx, self.alive as usize);
+            self.sparse[self.dense[dense_idx].id.index() as usize] = dense;
         }
 
         debug_assert!(!self.is_alive(id), "XECS INTERNAL ERROR: IdAllocator corrupted");
     }
 
-    pub(crate) fn new_id(&mut self, f: impl FnOnce(Id) -> IdRecord) -> Id {
-        if let Some(entry) = self.dense.get_mut(self.alive) {
-            // Recycle id if a free one is available.
+    /// Fails unless `n` more ids can be allocated.
+    pub(crate) fn ensure_available(&self, n: u32) -> Result<(), IdsExhausted> {
+        let fresh = ((Id::MAX_INDEX as usize) + 1).saturating_sub(self.dense.len());
+        let available = self.num_dead() + fresh;
+        if (n as usize) <= available { Ok(()) } else { Err(IdsExhausted) }
+    }
+
+    pub(crate) fn new_id(&mut self, f: impl FnOnce(Id) -> IdRecord) -> Result<Id, IdsExhausted> {
+        // Recycle id if a free one is available.
+        if let Some(entry) = self.dense.get_mut(self.alive as usize) {
             entry.record = f(entry.id);
             self.alive += 1;
-            return entry.id;
+            return Ok(entry.id);
         }
 
-        // Create new id.
-        assert!(
-            self.max < Id::MAX_INDEX,
-            "id index {} exceeds limit(={})",
-            self.max,
-            Id::MAX_INDEX
-        );
+        let index = u32::try_from(self.dense.len()).map_err(|_| IdsExhausted)?;
 
-        let new_id = Id::new(self.max);
-        self.max += 1;
-
-        debug_assert!(!self.exists(new_id), "new id: `{new_id}` already in use");
-
-        self.dense.push(Entry { id: new_id, record: f(new_id) });
-
-        let sparse = new_id.index() as usize;
-
-        if sparse >= self.sparse.len() {
-            self.sparse.resize(sparse + 1, usize::MAX);
+        if index > Id::MAX_INDEX {
+            return Err(IdsExhausted);
         }
 
-        self.sparse[sparse] = self.alive;
+        let id = Id::new(index);
+        let record = f(id);
+
+        self.dense.push(Entry { id, record });
+        self.sparse.push(self.alive);
         self.alive += 1;
 
-        debug_assert!(self.alive == self.dense.len());
-
-        new_id
+        Ok(id)
     }
 
     #[inline]
     pub fn num_alive(&self) -> usize {
-        self.alive
+        self.alive as usize
     }
 
     #[inline]
     pub fn num_dead(&self) -> usize {
-        self.dense.len() - self.alive
+        self.dense.len() - (self.alive as usize)
     }
 }
