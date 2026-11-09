@@ -5,7 +5,6 @@ mod ecs;
 mod error;
 mod id;
 mod inline_vec;
-mod key;
 mod macros;
 mod memory;
 mod query;
@@ -23,22 +22,17 @@ pub use component::{
     signature::Signature, static_components,
 };
 pub use ecs::Ecs;
-pub use error::{EcsError, EcsResult};
+pub use error::{EcsResult, Error};
 pub use id::{
     Id,
     allocator::{IdsExhausted, NotAlive},
 };
 pub use inline_vec::InlineVec;
-pub use key::{RelationKey, STATIC_RELATIONS};
 pub use query::{
-    Follow, FollowIter, Query, TQuery,
-    access::{Access, AccessMode, Select},
-    error::{AccessError, PlanError},
-    logical::{LogicalPlan, PlanBuilder},
+    EcsMismatch, GetError, Query,
+    access::{AccessError, AccessSet},
+    data::{QueryData, ReadOnlyData, SliceData},
+    filter::{QueryFilter, With, Without},
 };
-pub use relation::{
-    RelationRegisterError,
-    id::{IntoRelationId, RelationId},
-    storage::Shape,
-};
+
 pub use type_meta::{HasMeta, TypeMeta};

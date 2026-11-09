@@ -233,20 +233,6 @@ impl std::fmt::Display for ComponentKey {
     }
 }
 
-/// A component declared with `schema!`, named by its own type.
-///
-/// # Safety
-/// `KEY.meta()` describes `Value`.
-pub unsafe trait Component: Copy + 'static {
-    type Value: HasMeta;
-    const KEY: &'static ComponentKey;
-
-    #[inline(always)]
-    fn id() -> ComponentId {
-        Self::KEY.id()
-    }
-}
-
 #[linkme::distributed_slice]
 pub static STATIC_COMPONENTS: [&'static ComponentKey];
 
@@ -279,6 +265,20 @@ pub fn static_components() -> &'static [&'static ComponentKey] {
         keys
     });
     &SORTED
+}
+
+/// A component declared with `schema!`, named by its own type.
+///
+/// # Safety
+/// `KEY.meta()` describes `Value`.
+pub unsafe trait Component: Copy + 'static {
+    type Value: HasMeta;
+    const KEY: &'static ComponentKey;
+
+    #[inline(always)]
+    fn id() -> ComponentId {
+        Self::KEY.id()
+    }
 }
 
 #[derive(Debug, Clone)]

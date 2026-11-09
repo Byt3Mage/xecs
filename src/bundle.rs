@@ -357,9 +357,9 @@ where
 /// Creates one id holding `bundle`.
 pub(crate) fn create<B: Bundle>(ecs: &mut Ecs, f: impl FnOnce(Id) -> B) -> Result<Id, IdsExhausted> {
     get_insert_edge::<B::Set, _, _>(ecs, TableStorage::ROOT, |tables, ids, edge| {
-        let table = &mut tables[edge.dst];
-        table.data.reserve(1);
         ids.new_id(|id| {
+            let table = &mut tables[edge.dst];
+            table.data.reserve(1);
             // SAFETY:
             // - capacity for the row is reserved by the caller.
             // - the root table has no columns, so an edge out of it writes every

@@ -1,22 +1,30 @@
+use std::sync::atomic::AtomicU32;
+
+use errset::{set, try_};
+
 use crate::{
-    Field, IdsExhausted, RelationKey,
+    AccessError, Field, IdsExhausted, Query, QueryData, QueryFilter,
     bundle::{self, Bundle, BundleRegistry, ComponentSet},
     component::{self, Component, ComponentConfig, ComponentId, ComponentRegisterError, registry::ComponentRegistry},
-    error::{EcsError, EcsResult},
+    error::{EcsResult, Error, MissingComponent},
     id::{
         Id,
         allocator::{IdAllocator, IdRecord, NotAlive},
     },
-    relation::{self, RelationRegisterError, RelationRegistry, id::RelationId},
     table::{self},
     table_storage::TableStorage,
-    type_meta::HasMeta,
 };
 
+fn ecs_id_allocate() -> u32 {
+    static NEXT_ID: AtomicU32 = AtomicU32::new(0);
+    NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 pub struct Ecs {
+    ecs_id: u32,
     pub(crate) ids: IdAllocator,
     pub(crate) components: ComponentRegistry,
-    pub(crate) relations: RelationRegistry,
+
     pub(crate) bundles: BundleRegistry,
     pub(crate) storage: TableStorage,
 }
@@ -24,22 +32,18 @@ pub struct Ecs {
 impl Ecs {
     pub fn new() -> Self {
         Self {
+            ecs_id: ecs_id_allocate(),
             ids: IdAllocator::new(),
             components: ComponentRegistry::new(),
-            relations: RelationRegistry::new(),
+
             bundles: BundleRegistry::new(),
             storage: TableStorage::new(),
         }
     }
 
     #[inline(always)]
-    pub fn generation(&self) -> u64 {
-        self.storage.generation()
-    }
-
-    #[inline(always)]
-    pub fn relation<T: HasMeta>(&mut self, key: &RelationKey) -> Result<RelationId, RelationRegisterError> {
-        self.relations.register::<T>(key)
+    pub fn ecs_id(&self) -> u32 {
+        self.ecs_id
     }
 
     /// Creates a new component and returns its [Id].
@@ -111,39 +115,28 @@ impl Ecs {
         bundle::remove::<S>(self, id)
     }
 
-    #[inline]
-    pub fn read<T: Component>(&self, id: Id) -> EcsResult<&T::Value> {
+    #[inline(always)]
+    pub fn read<T: Component>(&self, id: Id) -> Result<Option<&T::Value>, NotAlive> {
         let r = self.ids.get(id)?;
-        let c = T::id();
-        unsafe { component::get(self, r, c) }.ok_or(EcsError::MissingComponent(id, c))
+        Ok(unsafe { component::get(self, r, T::id()) })
     }
 
-    #[inline]
-    pub fn write<T: Component>(&mut self, id: Id) -> EcsResult<&mut T::Value> {
+    #[inline(always)]
+    pub fn write<T: Component>(&mut self, id: Id) -> Result<Option<&mut T::Value>, NotAlive> {
         let r = self.ids.get(id)?;
-        let c = T::id();
-        unsafe { component::get_mut(self, r, c) }.ok_or(EcsError::MissingComponent(id, c))
+        Ok(unsafe { component::get_mut(self, r, T::id()) })
     }
 
+    /// Creates a query fetching `D` from every matching entity.
     #[inline]
-    pub fn relate<T: HasMeta>(&mut self, id: Id, key: &RelationKey, target: Id, payload: T) -> EcsResult<()> {
-        let r = relation::resolve(self, key).unwrap();
-        unsafe { self.relations[r].relate(id, target, payload)? };
-        Ok(())
+    pub fn query<D: QueryData>(&self) -> Result<Query<D>, AccessError> {
+        Query::new(self)
     }
 
+    /// Creates a query fetching `D` from every entity matching `D` and `F`.
     #[inline]
-    pub fn unrelate<T: HasMeta>(&mut self, id: Id, key: &RelationKey, target: Id) -> EcsResult<()> {
-        let r = relation::resolve(self, key).unwrap();
-        self.relations[r].unrelate(id, target);
-        Ok(())
-    }
-
-    #[inline]
-    pub fn remove_relation<T: HasMeta>(&mut self, id: Id, key: &RelationKey) -> EcsResult<()> {
-        let r = relation::resolve(self, key).unwrap();
-        self.relations[r].purge(id);
-        Ok(())
+    pub fn query_filtered<D: QueryData, F: QueryFilter>(&self) -> Result<Query<D, F>, AccessError> {
+        Query::new(self)
     }
 
     #[inline(always)]

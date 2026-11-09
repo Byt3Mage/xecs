@@ -8,7 +8,11 @@ description = "eXtended ecs"
 [lib]
 doctest = false
 
+[lints.rust]
+unused_must_use = "deny"
+
 [dependencies]
 linkme = "0.3.37"
 thiserror = "2.0.20"
 ahash = "0.8.12"
+errset = "0.2.1"

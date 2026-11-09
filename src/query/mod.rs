@@ -1,162 +1,213 @@
+pub mod access;
+pub mod data;
+pub mod filter;
+
 use std::marker::PhantomData;
 
 use crate::{
-    AccessError, Ecs, Id,
-    query::{
-        access::{Follows, Select},
-        context::{Binds, QueryCtx},
-        logical::{FollowId, LogicalPlan, ScopeId, validate_access},
-        lowering::lower_plan,
-        physical::{PhysicalPlan, PhysicalScope},
-    },
-    relation::storage::EdgeIter,
+    ecs::Ecs,
+    id::{Id, allocator::NotAlive},
+    table_storage::TableId,
 };
 
-pub(crate) mod access;
-pub(crate) mod context;
-pub(crate) mod error;
-pub(crate) mod logical;
-pub(crate) mod lowering;
-pub(crate) mod parallel;
-pub(crate) mod physical;
+use access::{AccessError, AccessSet};
+use data::{QueryData, ReadOnlyData, SliceData};
+use filter::QueryFilter;
 
-#[derive(Debug, Clone)]
-pub struct Query {
-    logical: LogicalPlan,
-    physical: PhysicalPlan,
+/// Error returned when fetching one id from a query fails.
+#[derive(Debug, thiserror::Error)]
+pub enum GetError {
+    #[error(transparent)]
+    EcsMismatch(#[from] EcsMismatch),
+    #[error(transparent)]
+    NotAlive(#[from] NotAlive),
+    #[error("id does not match the query")]
+    NoMatch,
 }
 
-impl Query {
-    pub fn new(ecs: &Ecs, logical: LogicalPlan) -> Self {
-        Self { physical: lower_plan(ecs, &logical), logical }
-    }
-
-    /// Re-evaluate the physical plan if out of sync with current ecs state.
-    /// `force` triggers re-evaluation regardless of sync status.
-    pub fn rematch(&mut self, ecs: &Ecs, force: bool) {
-        if force || self.physical.resolved_at != ecs.generation() {
-            self.physical = lower_plan(ecs, &self.logical);
-        }
-    }
-
-    #[inline]
-    pub fn make_ctx<'w>(&'w self, ecs: &'w Ecs, params: &'w [Id]) -> QueryCtx<'w> {
-        QueryCtx {
-            ecs,
-            plan: &self.physical,
-            params,
-            binds: Binds::new(self.physical.scopes.len()),
-        }
-    }
-
-    /// Converts [Query] to a typed [TQuery] with access validation performed.
-    #[inline]
-    pub fn typed<S: Select, F: Follows>(self, ecs: &Ecs) -> Result<TQuery<S, F>, AccessError> {
-        validate_access::<S>(ecs, &self.logical)?;
-        Ok(TQuery { query: self, marker: PhantomData })
-    }
+#[derive(Debug, thiserror::Error)]
+#[error("world mismatch: expected {expected}, got {received}")]
+pub struct EcsMismatch {
+    pub expected: u32,
+    pub received: u32,
 }
 
-pub struct TQuery<S: Select = (), F: Follows = ()> {
-    query: Query,
-    marker: PhantomData<(S, F)>,
+/// A cached table query fetching `D` from every entity whose table matches
+/// `D` and `F`.
+///
+/// The query does not borrow the [`Ecs`]; it is passed to each run. Tables
+/// are never removed, so each run only checks tables created since the last.
+pub struct Query<D: QueryData, F: QueryFilter = ()> {
+    ecs_id: u32,
+    /// Every matched table, with the state `D` resolved for it.
+    matched: Vec<(TableId, D::State)>,
+    /// For each checked table, its index in `matched` if it matched.
+    slots: Vec<Option<u32>>,
+    marker: PhantomData<fn() -> F>,
 }
 
-impl<S: Select, F: Follows> TQuery<S, F> {
-    pub fn new(ecs: &Ecs, plan: LogicalPlan) -> Result<Self, AccessError> {
-        validate_access::<S>(ecs, &plan)?;
-        Ok(Self { query: Query::new(ecs, plan), marker: PhantomData })
-    }
-
-    pub fn each(&mut self, ecs: &mut Ecs, params: &[Id], mut f: impl FnMut(Id, S::Row<'_>, F::Get<'_>)) {
-        let ctx = self.query.make_ctx(ecs, params);
-        let plan = &self.query.physical;
-        let scope = &plan.scopes[0];
-
-        'matches: for mt in plan.tables.iter() {
-            let table = &ecs.storage.tables[mt.id];
-            let ids = table.ids();
-
-            if ids.is_empty() {
-                continue 'matches;
-            }
-
-            let cols = S::columns(table, &mt.columns);
-
-            'table: for (row, &id) in table.ids().iter().enumerate() {
-                if !scope.check_relations(id, &ctx) {
-                    continue 'table;
-                }
-
-                // SAFETY: `row` indexes `ids`, whose length is this
-                // table's row count, and `columns` was taken from this
-                // same table.
-                let row = unsafe { S::row(cols, row as u32) };
-
-                f(id, row, F::get(&ctx, 0, id, &scope.follows));
-            }
-        }
-    }
-}
-
-pub struct Follow<'w, F: Follows> {
-    ctx: &'w QueryCtx<'w>,
-    from: Id,
-    index: FollowId,
-    marker: PhantomData<F>,
-}
-
-impl<'w, F: Follows> Follow<'w, F> {
-    #[inline(always)]
-    pub(crate) fn new(ctx: &'w QueryCtx<'w>, from: Id, index: usize) -> Self {
-        Self { ctx, from, index, marker: PhantomData }
-    }
-
-    #[inline(always)]
-    pub fn iter(&mut self) -> FollowIter<'w, F> {
-        let follow = &self.ctx.plan.follows[self.index];
-        FollowIter {
-            ctx: self.ctx,
-            edges: follow.fan(self.from, self.ctx),
-            scope: &self.ctx.plan.scopes[follow.scope],
-            scope_id: follow.scope,
+impl<D: QueryData, F: QueryFilter> Query<D, F> {
+    /// Validates `D`'s access and creates an empty query for `ecs`.
+    pub fn new(ecs: &Ecs) -> Result<Self, AccessError> {
+        D::access(&mut AccessSet::default())?;
+        Ok(Self {
+            ecs_id: ecs.ecs_id(),
+            matched: vec![],
+            slots: vec![],
             marker: PhantomData,
+        })
+    }
+
+    /// Checks every table created since the last update.
+    fn update(&mut self, ecs: &Ecs) -> Result<(), EcsMismatch> {
+        if self.ecs_id != ecs.ecs_id() {
+            return Err(EcsMismatch { expected: self.ecs_id, received: ecs.ecs_id() });
+        }
+
+        let tables = &ecs.storage.tables;
+        let seen = self.slots.len();
+
+        ecs.storage.ids(seen).for_each(|id| {
+            let table = &tables[id];
+            let slot = if F::matches(table) {
+                D::resolve(table).map(|state| {
+                    let slot = self.matched.len() as u32;
+                    self.matched.push((id, state));
+                    slot
+                })
+            } else {
+                None
+            };
+            self.slots.push(slot);
+        });
+
+        Ok(())
+    }
+
+    /// Calls `f` with the item of every matched row.
+    ///
+    /// # Safety
+    /// The caller holds the access `D` reports for `'w`.
+    unsafe fn run<'w>(&self, ecs: &'w Ecs, mut f: impl FnMut(D::Value<'w>)) {
+        for &(id, state) in &self.matched {
+            let table = &ecs.storage.tables[id];
+            let len = table.num_rows() as usize;
+
+            if len == 0 {
+                continue;
+            }
+
+            // SAFETY: `state` was resolved for this table.
+            let fetch = unsafe { D::fetch(state, table) };
+
+            for row in 0..len {
+                // SAFETY:
+                // - `row < len`
+                // - table is unchanged during the run
+                // - caller holds `D`'s access.
+                f(unsafe { D::fetch_row(fetch, row) });
+            }
         }
     }
 
-    /// Iterate all follow targets to completion.
-    #[inline(always)]
-    pub fn each(&mut self, func: impl FnMut((Id, F::Get<'_>))) {
-        self.iter().for_each(func);
+    /// Calls `f` with the slices of every non-empty matched table.
+    ///
+    /// # Safety
+    /// The caller holds the access `D` reports for `'w`.
+    unsafe fn run_tables<'w>(&self, ecs: &'w Ecs, mut f: impl FnMut(D::Slice<'w>))
+    where
+        D: SliceData,
+    {
+        for &(id, state) in &self.matched {
+            let table = &ecs.storage.tables[id];
+            let len = table.num_rows() as usize;
+
+            if len == 0 {
+                continue;
+            }
+
+            // SAFETY:
+            // - `state` was resolved for this table
+            // - `len` is its row count
+            // - caller holds `D`'s access
+            f(unsafe { D::slice(D::fetch(state, table), len) });
+        }
     }
 
-    /// The zero-or-one fast path.
-    #[inline(always)]
-    pub fn get(&mut self) -> Option<(Id, F::Get<'_>)> {
-        self.iter().next()
+    /// The item of `id`.
+    ///
+    /// # Safety
+    /// The caller holds the access `D` reports for `'w`, and this query was
+    /// updated against `ecs`.
+    unsafe fn get_row<'w>(&self, ecs: &'w Ecs, id: Id) -> Result<D::Value<'w>, GetError> {
+        let r = ecs.ids.get(id)?;
+        let idx = r.table.index();
+        let Some(Some(slot)) = self.slots.get(idx) else { return Err(GetError::NoMatch) };
+        let (tid, state) = self.matched[*slot as usize];
+        let table = &ecs.storage.tables[tid];
+        // SAFETY:
+        // - `state` was resolved for this table,
+        // - `r.row` is a live row
+        // - caller holds `D`'s access.
+        Ok(unsafe { D::fetch_row(D::fetch(state, table), r.row as usize) })
     }
-}
 
-pub struct FollowIter<'w, F: Follows> {
-    edges: EdgeIter<'w>,
-    ctx: &'w QueryCtx<'w>,
-    scope: &'w PhysicalScope,
-    scope_id: ScopeId,
-    marker: PhantomData<F>,
-}
+    /// Calls `f` with the item of every matched row.
+    pub fn each<'w>(&mut self, ecs: &'w mut Ecs, f: impl FnMut(D::Value<'w>)) -> Result<(), EcsMismatch> {
+        self.update(ecs)?;
+        // SAFETY: `ecs` is borrowed uniquely for `'w`.
+        unsafe { self.run(ecs, f) };
+        Ok(())
+    }
 
-impl<'w, F: Follows> Iterator for FollowIter<'w, F> {
-    type Item = (Id, F::Get<'w>);
+    /// Calls `f` with the item of every matched row, through a shared borrow.
+    pub fn read<'w>(&mut self, ecs: &'w Ecs, f: impl FnMut(D::Value<'w>)) -> Result<(), EcsMismatch>
+    where
+        D: ReadOnlyData,
+    {
+        self.update(ecs)?;
+        // SAFETY: `D` only reads.
+        unsafe { self.run(ecs, f) };
+        Ok(())
+    }
 
-    fn next(&mut self) -> Option<Self::Item> {
-        let ctx = self.ctx;
-        let scope = self.scope;
-        let scope_id = self.scope_id;
-        self.edges.find_map(
-            |id| match scope.check_relations(id, ctx) && scope.passes_filter(ctx, id) {
-                true => Some((id, F::get(ctx, scope_id, id, &scope.follows))),
-                false => None,
-            },
-        )
+    /// Calls `f` with the column slices of every non-empty matched table.
+    pub fn each_table<'w>(&mut self, ecs: &'w mut Ecs, f: impl FnMut(D::Slice<'w>)) -> Result<(), EcsMismatch>
+    where
+        D: SliceData,
+    {
+        self.update(ecs)?;
+        // SAFETY: `ecs` is borrowed uniquely for `'w`.
+        unsafe { self.run_tables(ecs, f) };
+        Ok(())
+    }
+
+    /// Calls `f` with the column slices of every non-empty matched table,
+    /// through a shared borrow.
+    pub fn read_table<'w>(&mut self, ecs: &'w Ecs, f: impl FnMut(D::Slice<'w>)) -> Result<(), EcsMismatch>
+    where
+        D: SliceData + ReadOnlyData,
+    {
+        self.update(ecs)?;
+        // SAFETY: `D` only reads.
+        unsafe { self.run_tables(ecs, f) };
+        Ok(())
+    }
+
+    /// The item of `id`, through a shared borrow.
+    pub fn get<'w>(&mut self, ecs: &'w Ecs, id: Id) -> Result<D::Value<'w>, GetError>
+    where
+        D: ReadOnlyData,
+    {
+        self.update(ecs)?;
+        // SAFETY: `D` only reads, and the query was just updated.
+        unsafe { self.get_row(ecs, id) }
+    }
+
+    /// The value of `id`.
+    pub fn get_mut<'w>(&mut self, ecs: &'w mut Ecs, id: Id) -> Result<D::Value<'w>, GetError> {
+        self.update(ecs)?;
+        // SAFETY: `ecs` is borrowed uniquely for `'w`, and the query was just updated.
+        unsafe { self.get_row(ecs, id) }
     }
 }

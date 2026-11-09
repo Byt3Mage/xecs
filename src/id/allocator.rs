@@ -61,6 +61,11 @@ impl IdAllocator {
             .is_some_and(|&d| d < self.alive && (self.dense[d as usize].id == id))
     }
 
+    #[inline(always)]
+    pub fn validate_alive(&self, id: Id) -> Result<(), NotAlive> {
+        if self.is_alive(id) { Ok(()) } else { Err(NotAlive(id)) }
+    }
+
     pub(crate) fn remove_id(&mut self, id: Id) {
         let sparse = id.index() as usize;
 
@@ -103,19 +108,15 @@ impl IdAllocator {
             return Ok(entry.id);
         }
 
-        let index = u32::try_from(self.dense.len()).map_err(|_| IdsExhausted)?;
+        let idx = match u32::try_from(self.dense.len()) {
+            Ok(i) if i <= Id::MAX_INDEX => i,
+            _ => return Err(IdsExhausted),
+        };
 
-        if index > Id::MAX_INDEX {
-            return Err(IdsExhausted);
-        }
-
-        let id = Id::new(index);
-        let record = f(id);
-
-        self.dense.push(Entry { id, record });
+        let id = Id::new(idx);
+        self.dense.push(Entry { id, record: f(id) });
         self.sparse.push(self.alive);
         self.alive += 1;
-
         Ok(id)
     }
 

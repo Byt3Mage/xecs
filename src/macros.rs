@@ -35,11 +35,12 @@ macro_rules! schema {
 /// Builds a static bundle: `bundle!(Hp: 100.0, Mana: 40.0)`.
 #[macro_export]
 macro_rules! bundle {
-    ($K:ty: $value:expr $(,)?) => {
-        $crate::Field::<$K>::new($value)
+    ($K:ty$(: $value:expr)? $(,)?) => {
+        #[allow(clippy::double_parens, unused_parens)]
+        $crate::Field::<$K>::new(($($value)?))
     };
 
-    ($($K:ty: $value:expr),+ $(,)?) => {{
+    ($($K:ty$(: $value:expr)?),+ $(,)?) => {{
         const _: () = {
            if let ::core::option::Option::Some(path) =
                 $crate::ComponentKey::find_repeated(&[$(<$K as $crate::Component>::KEY),+])
@@ -47,7 +48,8 @@ macro_rules! bundle {
                    ::core::panic!("{}", path);
             }
         };
-        ($($crate::Field::<$K>::new($value),)+)
+        #[allow(clippy::double_parens, unused_parens)]
+        ($($crate::Field::<$K>::new(($($value)?)),)+)
     }};
 }
 

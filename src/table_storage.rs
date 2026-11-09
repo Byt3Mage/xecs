@@ -85,9 +85,8 @@ pub(crate) struct TableStorage {
     pub(crate) inserts: TableVec<TypeIdMap<InsertEdge>>,
     /// Remove edges out of each table, keyed by component set. Parallel to `tables`.
     pub(crate) removes: TableVec<TypeIdMap<RemoveEdge>>,
+
     sig_to_id: AHashMap<Signature, TableId>,
-    /// Incremented whenever a table is created.
-    generation: u64,
 }
 
 impl TableStorage {
@@ -104,14 +103,7 @@ impl TableStorage {
             inserts: TableVec(vec![TypeIdMap::new()]),
             removes: TableVec(vec![TypeIdMap::new()]),
             sig_to_id: map![sig => Self::ROOT],
-            generation: 0,
         }
-    }
-
-    /// Changes whenever a table is created.
-    #[inline]
-    pub(crate) fn generation(&self) -> u64 {
-        self.generation
     }
 
     /// The table with signature `sig`, creating it if it doesn't exist.
@@ -121,14 +113,13 @@ impl TableStorage {
             self.tables.0.push(Table::create(id, components, sig.clone()));
             self.inserts.0.push(TypeIdMap::new());
             self.removes.0.push(TypeIdMap::new());
-            self.generation += 1;
             id
         })
     }
 
     #[inline]
-    pub(crate) fn ids(&self) -> impl Iterator<Item = TableId> {
+    pub(crate) fn ids(&self, from: usize) -> impl Iterator<Item = TableId> {
         // SAFETY: All ids up to tables.len() are non-max.
-        (0..self.tables.len() as u32).map(|id| unsafe { TableId::new_unchecked(id) })
+        (from..self.tables.len()).map(|id| unsafe { TableId::new_unchecked(id as u32) })
     }
 }
