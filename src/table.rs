@@ -10,6 +10,7 @@ use crate::{
         allocator::{IdAllocator, IdRecord},
     },
     memory::{RawBlock, RowLayout},
+    relation::{self, RelationId},
     table_storage::{TableId, TableVec},
 };
 
@@ -134,6 +135,7 @@ impl Drop for TableData {
 pub struct Table {
     pub(crate) sig: Signature,
     pub(crate) data: TableData,
+    pub(crate) relations: Box<[RelationId]>,
 }
 
 impl Table {
@@ -144,7 +146,13 @@ impl Table {
             ci.insert_table(id);
             columns.push(Column::new(&ci.meta))
         }
-        Self { sig, data: TableData::new(columns.into()) }
+        let relations = sig.iter().filter_map(|&cid| relation::edge_owner(cid)).collect();
+
+        Self {
+            sig,
+            data: TableData::new(columns.into()),
+            relations,
+        }
     }
 
     #[inline]
@@ -194,7 +202,6 @@ impl Table {
 pub(crate) unsafe fn insert(
     tables: &mut TableVec<Table>,
     ids: &mut IdAllocator,
-    id: Id,
     r: IdRecord,
     edge: &InsertEdge,
     bundle: impl Bundle,
@@ -203,18 +210,18 @@ pub(crate) unsafe fn insert(
         let table = &tables[r.table];
         let mut cols = edge.writes.iter();
         bundle.write(|src| {
-            if let Some(&col) = cols.next() {
-                // SAFETY:
-                // - `r.row` is live.
-                // - `edge.writes` holds one column per field in field
-                //   order, so `src` is a value of `col`'s component.
-                unsafe { table.column(col).write_raw(r.row, src) };
-            }
+            let &col = cols.next().expect("xecs: bundle writes all named columns");
+            // SAFETY:
+            // - `r.row` is live.
+            // - `edge.writes` holds one column per field in field
+            //   order, so `src` is a value of `col`'s component.
+            unsafe { table.column(col).write_raw(r.row, src) };
         });
         return;
     }
 
     let (src, dst) = tables.get_2_mut(r.table, edge.dst);
+    let id = src.data.ids[r.row as usize];
 
     dst.data.reserve(1);
 
@@ -232,13 +239,12 @@ pub(crate) unsafe fn insert(
 
     let mut cols = edge.writes.iter();
     bundle.write(|p| {
-        if let Some(&col) = cols.next() {
-            // SAFETY:
-            // - `dst_row` is within capacity.
-            // - `edge.writes` holds one column per field in field order, so
-            //   `p` is a value of `col`'s component.
-            unsafe { dst.column(col).write_raw(dst_row, p) };
-        }
+        let &col = cols.next().expect("xecs: bundle writes all named columns");
+        // SAFETY:
+        // - `dst_row` is within capacity.
+        // - `edge.writes` holds one column per field in field order, so
+        //   `p` is a value of `col`'s component.
+        unsafe { dst.column(col).write_raw(dst_row, p) };
     });
 
     if let Some(moved) = src.data.swap_remove_row(r.row) {
@@ -254,18 +260,13 @@ pub(crate) unsafe fn insert(
 /// # Safety
 /// - `id` is live at `r`.
 /// - `edge` was built for `r.table`.
-pub(crate) unsafe fn remove(
-    tables: &mut TableVec<Table>,
-    ids: &mut IdAllocator,
-    id: Id,
-    r: IdRecord,
-    edge: &RemoveEdge,
-) {
+pub(crate) unsafe fn remove(tables: &mut TableVec<Table>, ids: &mut IdAllocator, r: IdRecord, edge: &RemoveEdge) {
     if edge.dst == r.table {
         return;
     }
 
     let (src, dst) = tables.get_2_mut(r.table, edge.dst);
+    let id = src.data.ids[r.row as usize];
 
     dst.data.reserve(1);
 
@@ -285,6 +286,15 @@ pub(crate) unsafe fn remove(
     }
 
     ids.set_location(id, IdRecord { table: edge.dst, row: dst_row });
+}
+
+/// Gets the id at `r`.
+///
+/// # Panics
+/// Panics if `r.row` is out of bounds for `r.table`.
+#[inline(always)]
+pub(crate) fn get_id(ecs: &Ecs, r: IdRecord) -> Id {
+    ecs.storage.tables[r.table].data.ids[r.row as usize]
 }
 
 /// Removes the row at `r`, moving the table's last row into its place.

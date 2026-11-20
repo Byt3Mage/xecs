@@ -4,7 +4,6 @@ mod data_structures;
 mod ecs;
 mod error;
 mod id;
-mod inline_vec;
 mod macros;
 mod memory;
 mod query;
@@ -27,12 +26,14 @@ pub use id::{
     Id,
     allocator::{IdsExhausted, NotAlive},
 };
-pub use inline_vec::InlineVec;
 pub use query::{
     EcsMismatch, GetError, Query,
     access::{AccessError, AccessSet},
     data::{QueryData, ReadOnlyData, SliceData},
     filter::{QueryFilter, With, Without},
 };
-
+pub use relation::{
+    Acyclic, CycleError, CycleOf, Cycles, Cyclic, Directed, Fixed, Many, Mirror, One, RelateError, Relation,
+    RelationId, RelationKey, RelationVtable, STATIC_RELATIONS, Slot, Sources, Targets,
+};
 pub use type_meta::{HasMeta, TypeMeta};

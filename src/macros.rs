@@ -1,27 +1,74 @@
 #[macro_export]
 macro_rules! schema {
-    ($(#[$outer:meta])* $vis:vis component $name:ident; $($rest:tt)*) => {
-        $crate::schema!{$(#[$outer])* $vis component $name: (); $($rest)*}
-    };
-
-    ($(#[$outer:meta])* $vis:vis component $name:ident: $ty:ty; $($rest:tt)*) => {
+    ($(#[$outer:meta])* $vis:vis component $name:ident$(: $ty:ty)?; $($rest:tt)*) => {
         $(#[$outer])*
         #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
         $vis struct $name;
 
         // SAFETY: `KEY` was built from `<$ty as HasMeta>::META`.
         unsafe impl $crate::Component for $name {
-            type Value = $ty;
+            #[allow(unused_parens)]
+            type Value = ($($ty)?);
             const KEY: &'static $crate::ComponentKey = {
                 static SLOT: $crate::KeySlot = $crate::KeySlot::new();
                 static KEY: $crate::ComponentKey = $crate::ComponentKey::new(
                     &SLOT,
                     concat!(module_path!(), "::", stringify!($name)),
-                    <$ty as $crate::HasMeta>::META,
+                     #[allow(unused_parens)]
+                    <($($ty)?) as $crate::HasMeta>::META,
                 );
                 #[$crate::__linkme::distributed_slice($crate::STATIC_COMPONENTS)]
                 #[linkme(crate = $crate::__linkme)]
                 static ENTRY: &'static $crate::ComponentKey = &KEY;
+                &KEY
+            };
+        }
+
+        $crate::schema!{$($rest)*}
+    };
+
+    ($(#[$outer:meta])* $vis:vis relation $name:ident {
+            targets: $targets:ty,
+            sources: $sources:ty,
+            cycles: $cycles:ty,
+            $(data: $data:ty $(,)?)?
+    } $($rest:tt)*) => {
+        $(#[$outer])*
+        #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+        $vis struct $name;
+
+        // SAFETY: the edge key's meta is built from the forward type of
+        // `$targets` and `$payload`, and `FNS` is `RelationFns::of::<$name>()`.
+        unsafe impl $crate::Relation for $name {
+            type Targets = $targets;
+            type Sources = $sources;
+            type Cycles = $cycles;
+            #[allow(unused_parens)]
+            type Data = ($($data)?);
+
+            const KEY: &'static $crate::RelationKey = {
+                static EDGE_SLOT: $crate::KeySlot = $crate::KeySlot::new();
+                static EDGE: $crate::ComponentKey = $crate::ComponentKey::new(
+                    &EDGE_SLOT,
+                    concat!(module_path!(), "::", stringify!($name), "#edge"),
+                    #[allow(unused_parens)]
+                    <<$targets as $crate::Targets>::Row<$name> as $crate::HasMeta>::META,
+                );
+                #[$crate::__linkme::distributed_slice($crate::STATIC_COMPONENTS)]
+                #[linkme(crate = $crate::__linkme)]
+                static EDGE_ENTRY: &'static $crate::ComponentKey = &EDGE;
+
+                static VTABLE: $crate::RelationVtable = $crate::RelationVtable::of::<$name>();
+                static SLOT: $crate::KeySlot = $crate::KeySlot::new();
+                static KEY: $crate::RelationKey = $crate::RelationKey::new(
+                    &SLOT,
+                    concat!(module_path!(), "::", stringify!($name)),
+                    &EDGE,
+                    &VTABLE,
+                );
+                #[$crate::__linkme::distributed_slice($crate::STATIC_RELATIONS)]
+                #[linkme(crate = $crate::__linkme)]
+                static ENTRY: &'static $crate::RelationKey = &KEY;
                 &KEY
             };
         }

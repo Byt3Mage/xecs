@@ -1,4 +1,4 @@
-use crate::{ComponentKey, component::ComponentId};
+use crate::component::ComponentId;
 
 /// Error returned when a query's terms would alias.
 #[derive(Debug, thiserror::Error)]
@@ -40,47 +40,4 @@ impl AccessSet {
         self.writes.push(c);
         Ok(())
     }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum AccessMode {
-    Read,
-    Write,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct Access {
-    key: &'static ComponentKey,
-    mode: AccessMode,
-}
-
-impl Access {
-    #[inline(always)]
-    pub const fn read(key: &'static ComponentKey) -> Self {
-        Self { key, mode: AccessMode::Read }
-    }
-
-    #[inline(always)]
-    pub const fn write(key: &'static ComponentKey) -> Self {
-        Self { key, mode: AccessMode::Write }
-    }
-}
-
-pub fn validate_access(accesses: &[Access]) -> Result<(), AccessError> {
-    for (i, a) in accesses.iter().enumerate() {
-        let a_id = a.key.id();
-
-        for b in &accesses[i + 1..] {
-            if a_id != b.key.id() {
-                continue;
-            }
-
-            match (a.mode, b.mode) {
-                (AccessMode::Write, AccessMode::Write) => return Err(AccessError::DoubleWrite(a_id)),
-                (AccessMode::Write, _) | (_, AccessMode::Write) => return Err(AccessError::ReadWrite(a_id)),
-                _ => {}
-            }
-        }
-    }
-    Ok(())
 }

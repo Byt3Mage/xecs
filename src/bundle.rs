@@ -6,25 +6,29 @@ use crate::{
     ecs::Ecs,
     id::{
         Id,
-        allocator::{IdAllocator, IdRecord, NotAlive},
+        allocator::{IdAllocator, IdRecord},
     },
     table::{self, Table},
     table_storage::{TableId, TableStorage, TableVec},
     type_meta::TypeIdMap,
 };
 
-/// A set of distinct components, named by their marker types.
+/// A set of distinct columns, named by marker types. The table graph keys
+/// its transitions on the set's `TypeId`.
 ///
-/// A set whose keys repeat a component fails to compile wherever it is
+/// A set whose keys repeat a column fails to compile wherever it is
 /// inserted or removed.
-pub trait ComponentSet: Copy + 'static {
+pub trait ColumnSet: Copy + 'static {
     const KEYS: &'static [&'static ComponentKey];
 }
+
+/// A column set users may insert and remove directly.
+pub trait ComponentSet: ColumnSet {}
 
 /// Fails compilation of every instantiation where `S` repeats a component,
 /// reporting the repeated path.
 #[inline(always)]
-const fn assert_unique<S: ComponentSet>() {
+const fn assert_unique<S: ColumnSet>() {
     const {
         if let Some(path) = ComponentKey::find_repeated(S::KEYS) {
             panic!("{}", path);
@@ -32,9 +36,11 @@ const fn assert_unique<S: ComponentSet>() {
     }
 }
 
-impl<K: Component> ComponentSet for K {
+impl<K: Component> ColumnSet for K {
     const KEYS: &'static [&'static ComponentKey] = &[K::KEY];
 }
+
+impl<K: Component> ComponentSet for K {}
 
 /// Values for every component of `Set`.
 ///
@@ -43,7 +49,7 @@ impl<K: Component> ComponentSet for K {
 /// each time with a pointer to a valid value of that component's type that
 /// is readable for the duration of the call.
 pub unsafe trait Bundle: Copy {
-    type Set: ComponentSet;
+    type Set: ColumnSet;
 
     /// Hands each payload to `sink`, in field order.
     fn write(self, sink: impl FnMut(NonNull<u8>));
@@ -84,10 +90,12 @@ unsafe impl<K: Component> Bundle for Field<K> {
 /// component is always spelled `K` / `Field<K>`.
 macro_rules! impl_tuples {
     ($K0:ident, $($K:ident),+ $(,)?) => {
-        impl<$K0: Component, $($K: Component),+> ComponentSet for ($K0, $($K,)+) {
+        impl<$K0: Component, $($K: Component),+> ColumnSet for ($K0, $($K,)+) {
             const KEYS: &'static [&'static ComponentKey] =
                 &[<$K0 as Component>::KEY, $(<$K as Component>::KEY),+];
         }
+
+        impl<$K0: Component, $($K: Component),+> ComponentSet for ($K0, $($K,)+) {}
 
         // SAFETY: one payload per field, of that field's `K::Value`, in the
         // same order as `Set::KEYS`.
@@ -129,7 +137,7 @@ struct SetInfo {
 }
 
 impl SetInfo {
-    fn from_set<S: ComponentSet>() -> Self {
+    fn from_set<S: ColumnSet>() -> Self {
         let mut fields: Box<_> = S::KEYS.iter().enumerate().map(|(i, k)| (k.id(), i as u32)).collect();
         fields.sort_unstable_by_key(|f| f.0);
         debug_assert!(
@@ -179,7 +187,7 @@ impl BundleRegistry {
 
     /// The info of `S`, built on first use.
     #[inline(always)]
-    fn get_or_insert<S: ComponentSet>(&mut self) -> &SetInfo {
+    fn get_or_insert<S: ColumnSet>(&mut self) -> &SetInfo {
         self.sets.entry::<S>().or_insert_with(SetInfo::from_set::<S>)
     }
 }
@@ -242,7 +250,7 @@ fn plan_remove(src_sig: &Signature, dst_sig: &Signature) -> Box<[Move]> {
 
 /// Builds the edge taken by inserting `S` into the table `src`, creating
 /// the destination table if needed.
-fn build_insert<S: ComponentSet>(ecs: &mut Ecs, src: TableId) -> InsertEdge {
+fn build_insert<S: ColumnSet>(ecs: &mut Ecs, src: TableId) -> InsertEdge {
     let info = ecs.bundles.get_or_insert::<S>();
     let storage = &mut ecs.storage;
 
@@ -263,7 +271,7 @@ fn build_insert<S: ComponentSet>(ecs: &mut Ecs, src: TableId) -> InsertEdge {
 
 /// Builds the edge taken by removing `S` from the table `src`, creating the
 /// destination table if needed.
-fn build_remove<S: ComponentSet>(ecs: &mut Ecs, src: TableId) -> RemoveEdge {
+fn build_remove<S: ColumnSet>(ecs: &mut Ecs, src: TableId) -> RemoveEdge {
     let info = ecs.bundles.get_or_insert::<S>();
     let storage = &mut ecs.storage;
 
@@ -280,65 +288,58 @@ fn build_remove<S: ComponentSet>(ecs: &mut Ecs, src: TableId) -> RemoveEdge {
 
 /// Inserts every component of `bundle` into `id`, overwriting values it
 /// already has.
-pub(crate) fn insert<B: Bundle>(ecs: &mut Ecs, id: Id, bundle: B) -> Result<(), NotAlive> {
+pub(crate) fn insert<B: Bundle>(ecs: &mut Ecs, r: IdRecord, bundle: B) {
     assert_unique::<B::Set>();
 
-    let r = ecs.ids.get(id)?;
     let TableStorage { inserts, tables, .. } = &mut ecs.storage;
 
     #[cold]
     #[inline(never)]
-    fn insert_slow<B: Bundle>(ecs: &mut Ecs, id: Id, r: IdRecord, bundle: B) {
+    fn insert_slow<B: Bundle>(ecs: &mut Ecs, r: IdRecord, bundle: B) {
         let edge = build_insert::<B::Set>(ecs, r.table);
         let edge = ecs.storage.inserts[r.table].entry::<B::Set>().or_insert(edge);
-        unsafe { table::insert(&mut ecs.storage.tables, &mut ecs.ids, id, r, edge, bundle) };
+        unsafe { table::insert(&mut ecs.storage.tables, &mut ecs.ids, r, edge, bundle) };
     }
 
     // SAFETY: `r` is live, and the edge was built for `r.table` and `B::Set`.
     match inserts[r.table].get::<B::Set>() {
-        Some(edge) => unsafe { table::insert(tables, &mut ecs.ids, id, r, edge, bundle) },
-        None => insert_slow(ecs, id, r, bundle),
+        Some(edge) => unsafe { table::insert(tables, &mut ecs.ids, r, edge, bundle) },
+        None => insert_slow(ecs, r, bundle),
     }
-
-    Ok(())
 }
 
 /// Removes the components of `S` from `id`, ignoring any it does not have.
-pub(crate) fn remove<S: ComponentSet>(ecs: &mut Ecs, id: Id) -> Result<(), NotAlive> {
+pub(crate) fn remove<S: ColumnSet>(ecs: &mut Ecs, r: IdRecord) {
     assert_unique::<S>();
 
-    let r = ecs.ids.get(id)?;
     let TableStorage { removes, tables, .. } = &mut ecs.storage;
 
     #[cold]
     #[inline(never)]
-    fn remove_slow<S: ComponentSet>(ecs: &mut Ecs, id: Id, r: IdRecord) {
+    fn remove_slow<S: ColumnSet>(ecs: &mut Ecs, r: IdRecord) {
         let edge = build_remove::<S>(ecs, r.table);
         let edge = ecs.storage.removes[r.table].entry::<S>().or_insert(edge);
-        unsafe { table::remove(&mut ecs.storage.tables, &mut ecs.ids, id, r, edge) };
+        unsafe { table::remove(&mut ecs.storage.tables, &mut ecs.ids, r, edge) };
     }
 
     // SAFETY: `r` is live, and the edge was built for `r.table`.
     match removes[r.table].get::<S>() {
-        Some(edge) => unsafe { table::remove(tables, &mut ecs.ids, id, r, edge) },
-
-        None => remove_slow::<S>(ecs, id, r),
+        Some(edge) => unsafe { table::remove(tables, &mut ecs.ids, r, edge) },
+        None => remove_slow::<S>(ecs, r),
     }
-
-    Ok(())
 }
 
 #[inline]
 fn get_insert_edge<S, F, R>(ecs: &mut Ecs, table: TableId, f: F) -> R
 where
-    S: ComponentSet,
+    S: ColumnSet,
     F: FnOnce(&mut TableVec<Table>, &mut IdAllocator, &InsertEdge) -> R,
 {
     #[cold]
     #[inline(never)]
     fn slow<S, F, R>(ecs: &mut Ecs, table: TableId, f: F) -> R
     where
-        S: ComponentSet,
+        S: ColumnSet,
         F: FnOnce(&mut TableVec<Table>, &mut IdAllocator, &InsertEdge) -> R,
     {
         let edge = build_insert::<S>(ecs, table);

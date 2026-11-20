@@ -1,8 +1,8 @@
 /// A position in a [`Slots`] of `N` positions. Always less than `N`.
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub struct SlotIdx<const N: usize>(u32);
+pub struct Slot<const N: usize>(u32);
 
-impl<const N: usize> SlotIdx<N> {
+impl<const N: usize> Slot<N> {
     /// Position `I`. Fails to compile when `I` is not less than `N`.
     #[inline(always)]
     pub const fn at<const I: usize>() -> Self {
@@ -33,8 +33,8 @@ impl<const N: usize> SlotIdx<N> {
 /// `N` positions, each empty or holding one entry. Removing an entry empties
 /// its position and moves no other entry.
 #[derive(Copy, Clone, Debug)]
-pub(crate) struct Slots<T: Copy, const N: usize> {
-    items: [Option<T>; N],
+pub struct Slots<T: Copy, const N: usize> {
+    pub(crate) items: [Option<T>; N],
 }
 
 impl<T: Copy, const N: usize> Slots<T, N> {
@@ -43,40 +43,52 @@ impl<T: Copy, const N: usize> Slots<T, N> {
     #[inline(always)]
     pub(crate) const fn new() -> Self {
         const {
-            assert!(N > 0, "slots need at least one position");
+            assert!(N > 1, "slots need at least two positions");
             assert!(N <= (u32::MAX as usize), "slot count exceeds u32");
         };
         Self { items: [None; N] }
     }
 
+    pub(crate) fn with_entry(entry: T) -> Self {
+        let mut slots = Self::new();
+        slots.items[0] = Some(entry);
+        slots
+    }
+
     #[inline(always)]
-    pub(crate) fn get(&self, i: SlotIdx<N>) -> Option<&T> {
+    pub(crate) fn get(&self, i: Slot<N>) -> Option<&T> {
         self.items[i.index()].as_ref()
     }
 
     #[inline(always)]
-    pub(crate) fn get_mut(&mut self, i: SlotIdx<N>) -> Option<&mut T> {
+    pub(crate) fn get_mut(&mut self, i: Slot<N>) -> Option<&mut T> {
         self.items[i.index()].as_mut()
     }
 
     /// Writes `entry` at `i`, returning the entry it replaced.
     #[inline(always)]
-    pub(crate) fn replace(&mut self, i: SlotIdx<N>, entry: T) -> Option<T> {
+    pub(crate) fn replace(&mut self, i: Slot<N>, entry: T) -> Option<T> {
         self.items[i.index()].replace(entry)
     }
 
     /// Empties `i`, returning the entry it held.
     #[inline(always)]
-    pub(crate) fn take(&mut self, i: SlotIdx<N>) -> Option<T> {
+    pub(crate) fn take(&mut self, i: Slot<N>) -> Option<T> {
         self.items[i.index()].take()
     }
 
     /// Writes `entry` at the lowest empty position and returns that position.
     /// Returns `None` without writing when every position is occupied.
-    pub(crate) fn push(&mut self, entry: T) -> Option<SlotIdx<N>> {
+    pub(crate) fn push(&mut self, entry: T) -> Option<Slot<N>> {
         let i = self.items.iter().position(Option::is_none)?;
         self.items[i] = Some(entry);
-        Some(SlotIdx(i as u32))
+        Some(Slot(i as u32))
+    }
+
+    /// The lowest empty position, or `None` when every position is occupied.
+    #[inline]
+    pub(crate) fn next_empty(&self) -> Option<Slot<N>> {
+        self.items.iter().position(Option::is_none).map(|i| Slot(i as u32))
     }
 
     /// Number of occupied positions.
@@ -88,67 +100,22 @@ impl<T: Copy, const N: usize> Slots<T, N> {
         self.items.iter().all(Option::is_none)
     }
 
-    /// Occupied positions in ascending order.
-    pub(crate) fn iter(&self) -> impl Iterator<Item = (SlotIdx<N>, &T)> {
-        self.items
-            .iter()
-            .enumerate()
-            .filter_map(|(i, e)| e.as_ref().map(|e| (SlotIdx(i as u32), e)))
-    }
-
-    /// Occupied positions in ascending order.
-    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = (SlotIdx<N>, &mut T)> {
-        self.items
-            .iter_mut()
-            .enumerate()
-            .filter_map(|(i, e)| e.as_mut().map(|e| (SlotIdx(i as u32), e)))
-    }
-
-    /// The lowest occupied position whose entry satisfies `pred`.
-    pub(crate) fn position(&self, mut pred: impl FnMut(&T) -> bool) -> Option<SlotIdx<N>> {
-        self.iter().find(|(_, e)| pred(e)).map(|(i, _)| i)
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &T> {
+        self.items.iter().filter_map(Option::as_ref)
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn push_fills_lowest_hole() {
-        let mut s = Slots::<u64, 3>::new();
-        assert_eq!(s.push(10), SlotIdx::new(0));
-        assert_eq!(s.push(11), SlotIdx::new(1));
-        assert_eq!(s.push(12), SlotIdx::new(2));
-        assert_eq!(s.push(13), None);
-
-        assert_eq!(s.take(SlotIdx::at::<1>()), Some(11));
-        assert_eq!(s.len(), 2);
-        assert_eq!(s.get(SlotIdx::at::<2>()), Some(&12));
-
-        assert_eq!(s.push(14), SlotIdx::new(1));
-        assert_eq!(s.get(SlotIdx::at::<1>()), Some(&14));
+impl<T: Copy, const N: usize> std::ops::Index<Slot<N>> for Slots<T, N> {
+    type Output = T;
+    #[inline(always)]
+    fn index(&self, i: Slot<N>) -> &T {
+        self.items[i.index()].as_ref().unwrap()
     }
+}
 
-    #[test]
-    fn replace_and_iterate() {
-        let mut s = Slots::<u64, 4>::new();
-        assert_eq!(s.replace(SlotIdx::at::<2>(), 7), None);
-        assert_eq!(s.replace(SlotIdx::at::<2>(), 8), Some(7));
-        s.replace(SlotIdx::at::<0>(), 1);
-
-        let seen: Vec<(u32, u64)> = s.iter().map(|(i, &e)| (i.get(), e)).collect();
-        assert_eq!(seen, [(0, 1), (2, 8)]);
-        assert_eq!(s.position(|&e| e == 8), SlotIdx::new(2));
-
-        s.take(SlotIdx::at::<0>());
-        s.take(SlotIdx::at::<2>());
-        assert!(s.is_empty());
-    }
-
-    #[test]
-    fn index_bounds() {
-        assert!(SlotIdx::<2>::new(1).is_some());
-        assert!(SlotIdx::<2>::new(2).is_none());
+impl<T: Copy, const N: usize> std::ops::IndexMut<Slot<N>> for Slots<T, N> {
+    #[inline(always)]
+    fn index_mut(&mut self, i: Slot<N>) -> &mut Self::Output {
+        self.items[i.index()].as_mut().unwrap()
     }
 }

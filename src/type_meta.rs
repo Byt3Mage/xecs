@@ -35,10 +35,12 @@ impl TypeMeta {
 
 pub trait HasMeta: Copy + 'static {
     const META: &'static TypeMeta;
+    const IS_ZST: bool;
 }
 
 impl<T: Copy + 'static> HasMeta for T {
     const META: &TypeMeta = &TypeMeta::of::<Self>();
+    const IS_ZST: bool = core::mem::size_of::<Self>() == 0;
 }
 
 /// Passes a `TypeId`'s own hash bits through unchanged. `TypeId` hashes

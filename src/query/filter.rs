@@ -1,6 +1,6 @@
 use std::marker::PhantomData;
 
-use crate::{bundle::ComponentSet, table::Table};
+use crate::{bundle::ColumnSet, table::Table};
 
 /// A condition on a table's signature, checked once when the table is matched.
 pub trait QueryFilter: 'static {
@@ -15,9 +15,9 @@ impl QueryFilter for () {
 }
 
 /// Matches tables holding every component of `S`.
-pub struct With<S: ComponentSet>(PhantomData<fn() -> S>);
+pub struct With<S: ColumnSet>(PhantomData<fn() -> S>);
 
-impl<S: ComponentSet> QueryFilter for With<S> {
+impl<S: ColumnSet> QueryFilter for With<S> {
     #[inline]
     fn matches(table: &Table) -> bool {
         S::KEYS.iter().all(|k| table.sig.has_id(&k.id()))
@@ -25,9 +25,9 @@ impl<S: ComponentSet> QueryFilter for With<S> {
 }
 
 /// Matches tables holding no component of `S`.
-pub struct Without<S: ComponentSet>(PhantomData<fn() -> S>);
+pub struct Without<S: ColumnSet>(PhantomData<fn() -> S>);
 
-impl<S: ComponentSet> QueryFilter for Without<S> {
+impl<S: ColumnSet> QueryFilter for Without<S> {
     #[inline]
     fn matches(table: &Table) -> bool {
         !S::KEYS.iter().any(|k| table.sig.has_id(&k.id()))

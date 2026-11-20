@@ -1,16 +1,14 @@
 use std::sync::atomic::AtomicU32;
 
-use errset::{set, try_};
-
 use crate::{
-    AccessError, Field, IdsExhausted, Query, QueryData, QueryFilter,
-    bundle::{self, Bundle, BundleRegistry, ComponentSet},
+    AccessError, Field, IdsExhausted, Query, QueryData, QueryFilter, RelateError,
+    bundle::{self, Bundle, BundleRegistry, ColumnSet, ComponentSet},
     component::{self, Component, ComponentConfig, ComponentId, ComponentRegisterError, registry::ComponentRegistry},
-    error::{EcsResult, Error, MissingComponent},
     id::{
         Id,
         allocator::{IdAllocator, IdRecord, NotAlive},
     },
+    relation::{self, One, Relation, Sources, Src, Targets, Tgt, Unbounded, store::RelationStorage},
     table::{self},
     table_storage::TableStorage,
 };
@@ -24,7 +22,7 @@ pub struct Ecs {
     ecs_id: u32,
     pub(crate) ids: IdAllocator,
     pub(crate) components: ComponentRegistry,
-
+    pub(crate) relations: RelationStorage,
     pub(crate) bundles: BundleRegistry,
     pub(crate) storage: TableStorage,
 }
@@ -35,7 +33,7 @@ impl Ecs {
             ecs_id: ecs_id_allocate(),
             ids: IdAllocator::new(),
             components: ComponentRegistry::new(),
-
+            relations: RelationStorage::new(),
             bundles: BundleRegistry::new(),
             storage: TableStorage::new(),
         }
@@ -68,25 +66,32 @@ impl Ecs {
 
     /// Creates an [Id] carrying `values`.
     #[inline]
-    pub fn create(&mut self, bundle: impl Bundle) -> Result<Id, IdsExhausted> {
+    pub fn create(&mut self, bundle: impl Bundle<Set: ComponentSet>) -> Result<Id, IdsExhausted> {
         bundle::create(self, |_| bundle)
     }
 
     /// Creates an [Id] carrying `values`.
     #[inline]
-    pub fn create_with_id<B: Bundle>(&mut self, f: impl FnOnce(Id) -> B) -> Result<Id, IdsExhausted> {
+    pub fn create_with_id<B>(&mut self, f: impl FnOnce(Id) -> B) -> Result<Id, IdsExhausted>
+    where
+        B: Bundle<Set: ComponentSet>,
+    {
         bundle::create(self, f)
     }
 
     /// Creates `n` ids, each holding the bundle `f` returns for it. Nothing is
     /// created unless all `n` ids can be allocated.
     #[inline]
-    pub fn batch_create<B: Bundle>(&mut self, n: u32, f: impl FnMut(u32, Id) -> B) -> Result<(), IdsExhausted> {
+    pub fn batch_create<B>(&mut self, n: u32, f: impl FnMut(u32, Id) -> B) -> Result<(), IdsExhausted>
+    where
+        B: Bundle<Set: ComponentSet>,
+    {
         bundle::batch_create(self, n, f)
     }
 
     pub fn delete_id(&mut self, id: Id) -> Result<(), NotAlive> {
         // TODO: run remove hooks.
+        //TODO: relation::purge(self, id)?;
         let r = self.ids.get(id)?;
         table::remove_id(self, r);
         self.ids.remove_id(id);
@@ -102,7 +107,8 @@ impl Ecs {
 
     #[inline(always)]
     pub fn insert_bundle(&mut self, id: Id, bundle: impl Bundle) -> Result<(), NotAlive> {
-        bundle::insert(self, id, bundle)
+        bundle::insert(self, self.ids.get(id)?, bundle);
+        Ok(())
     }
 
     #[inline(always)]
@@ -111,20 +117,65 @@ impl Ecs {
     }
 
     #[inline(always)]
-    pub fn remove<S: ComponentSet>(&mut self, id: Id) -> Result<(), NotAlive> {
-        bundle::remove::<S>(self, id)
+    pub fn remove<S: ColumnSet>(&mut self, id: Id) {
+        let Ok(r) = self.ids.get(id) else { return };
+        bundle::remove::<S>(self, r);
     }
 
     #[inline(always)]
     pub fn read<T: Component>(&self, id: Id) -> Result<Option<&T::Value>, NotAlive> {
         let r = self.ids.get(id)?;
-        Ok(unsafe { component::get(self, r, T::id()) })
+        let c = T::id();
+        Ok(unsafe { component::get(&self.storage.tables, r, c) })
     }
 
     #[inline(always)]
     pub fn write<T: Component>(&mut self, id: Id) -> Result<Option<&mut T::Value>, NotAlive> {
         let r = self.ids.get(id)?;
-        Ok(unsafe { component::get_mut(self, r, T::id()) })
+        let c = T::id();
+        Ok(unsafe { component::get_mut(&mut self.storage.tables, r, c) })
+    }
+
+    /// Creates the edge `src -> tgt` of `R` carrying `data`, replacing whatever
+    /// edges `R`'s cardinalities require. An existing `src -> tgt` keeps its
+    /// position and takes `data`. For a symmetric `R` the edge joins `src` and `tgt`
+    /// in both directions.
+    #[inline]
+    pub fn relate<R>(&mut self, src: Id, tgt: Id, data: R::Data) -> Result<(), RelateError<R>>
+    where
+        R: Relation<Targets: Unbounded>,
+    {
+        Src::<R>::relate::<R>(self, src, tgt, data)
+    }
+
+    /// Removes the edge `s -> t` of `R`. Does nothing when it is absent.
+    #[inline]
+    pub fn unrelate<R>(&mut self, src: Id, tgt: Id)
+    where
+        R: Relation<Targets: Unbounded>,
+    {
+        Src::<R>::unrelate::<R>(self, src, tgt);
+    }
+
+    /// Removes every edge of `R` out of `s`. Does nothing when there are none.
+    #[inline]
+    pub fn clear<R: Relation>(&mut self, s: Id) -> Result<(), NotAlive> {
+        todo!()
+    }
+
+    /// The target of `s`'s edge of `R`, if it has one.
+    #[inline]
+    pub fn target<R: Relation<Targets = One>>(&self, s: Id) -> Result<Option<Id>, NotAlive> {
+        let r = self.ids.get(s)?;
+        Ok(relation::row::<R>(self, r).map(|tgt| tgt.id))
+    }
+
+    /// The target of `s`'s edge of `R`, if it has one.
+    #[inline]
+    pub fn targets<R: Relation>(&self, s: Id, mut f: impl FnMut(Id, &R::Data)) -> Result<(), NotAlive> {
+        let r = self.ids.get(s)?;
+        Tgt::<R>::for_each::<R>(self, r, |t| f(t.id, &t.data));
+        Ok(())
     }
 
     /// Creates a query fetching `D` from every matching entity.
@@ -145,12 +196,12 @@ impl Ecs {
     }
 
     #[inline(always)]
-    pub fn alive_count(&self) -> usize {
-        self.ids.num_alive()
+    pub fn live_count(&self) -> u32 {
+        self.ids.num_live()
     }
 
     #[inline(always)]
-    pub fn dead_count(&self) -> usize {
+    pub fn dead_count(&self) -> u32 {
         self.ids.num_dead()
     }
 }

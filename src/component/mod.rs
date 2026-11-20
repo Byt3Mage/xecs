@@ -7,10 +7,10 @@ use std::{
 };
 
 use crate::{
-    ecs::Ecs,
     id::allocator::IdRecord,
     macros::declare_id,
-    table_storage::TableId,
+    table::Table,
+    table_storage::{TableId, TableVec},
     type_meta::{HasMeta, TypeMeta},
 };
 
@@ -111,7 +111,7 @@ pub enum ComponentRegisterError {
 
 declare_id!(ComponentId, PREFIX);
 
-const NULL_KEY: u32 = u32::MAX;
+pub(crate) const NULL_KEY: u32 = u32::MAX;
 
 /// The id slot of one static component, assigned by `static_components`.
 #[derive(Debug)]
@@ -125,12 +125,12 @@ impl KeySlot {
     }
 
     #[inline(always)]
-    fn load(&self) -> u32 {
+    pub(crate) fn load(&self) -> u32 {
         self.0.load(Ordering::Relaxed)
     }
 
     #[inline(always)]
-    fn store(&self, slot: u32) {
+    pub(crate) fn store(&self, slot: u32) {
         self.0.store(slot, Ordering::Relaxed);
     }
 }
@@ -330,11 +330,11 @@ impl ComponentInfo {
 }
 
 #[inline(always)]
-pub(crate) unsafe fn get<T>(ecs: &Ecs, r: IdRecord, comp: ComponentId) -> Option<&T> {
-    Some(unsafe { ecs.storage.tables[r.table].column_of(comp)?.row(r.row).cast().as_ref() })
+pub(crate) unsafe fn get<T>(tables: &TableVec<Table>, r: IdRecord, comp: ComponentId) -> Option<&T> {
+    Some(unsafe { tables[r.table].column_of(comp)?.row(r.row).cast().as_ref() })
 }
 
 #[inline(always)]
-pub(crate) unsafe fn get_mut<T>(ecs: &mut Ecs, r: IdRecord, comp: ComponentId) -> Option<&mut T> {
-    Some(unsafe { ecs.storage.tables[r.table].column_of(comp)?.row(r.row).cast().as_mut() })
+pub(crate) unsafe fn get_mut<T>(tables: &mut TableVec<Table>, r: IdRecord, comp: ComponentId) -> Option<&mut T> {
+    Some(unsafe { tables[r.table].column_of(comp)?.row(r.row).cast().as_mut() })
 }

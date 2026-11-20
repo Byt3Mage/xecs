@@ -153,30 +153,6 @@ impl RawBlock {
         unsafe { self.ptr.byte_add(i as usize * size) }
     }
 
-    /// # Safety
-    /// `i` is within capacity and holds no live value; `T` matches `rm`.
-    #[inline]
-    pub(crate) unsafe fn set<T: Copy>(&mut self, size: usize, i: u32, value: T) {
-        unsafe { self.row(size, i).cast::<T>().write(value) };
-    }
-
-    /// # Safety
-    /// - `i` holds a live value
-    /// - `T` matches this block's type
-    #[inline]
-    pub(crate) unsafe fn get<T: Copy>(&self, size: usize, i: u32) -> &T {
-        unsafe { self.row(size, i).cast::<T>().as_ref() }
-    }
-
-    /// # Safety
-    /// - `i` holds a live value
-    /// - `T` is this block's type
-    /// - no other reference to this row exists.
-    #[inline]
-    pub(crate) unsafe fn get_mut<T: Copy>(&mut self, size: usize, i: u32) -> &mut T {
-        unsafe { self.row(size, i).cast::<T>().as_mut() }
-    }
-
     /// Relocate `count` rows within this block. Ranges may overlap.
     ///
     /// # Safety

@@ -10,7 +10,7 @@ pub struct NotAlive(pub Id);
 pub struct IdsExhausted;
 
 #[derive(Debug, Clone, Copy)]
-pub struct IdRecord {
+pub(crate) struct IdRecord {
     pub(crate) table: TableId,
     pub(crate) row: u32,
 }
@@ -61,7 +61,8 @@ impl IdAllocator {
             .is_some_and(|&d| d < self.alive && (self.dense[d as usize].id == id))
     }
 
-    #[inline(always)]
+    /// Validates that the [Id] is alive
+    #[inline]
     pub fn validate_alive(&self, id: Id) -> Result<(), NotAlive> {
         if self.is_alive(id) { Ok(()) } else { Err(NotAlive(id)) }
     }
@@ -90,14 +91,14 @@ impl IdAllocator {
             self.sparse[self.dense[dense_idx].id.index() as usize] = dense;
         }
 
-        debug_assert!(!self.is_alive(id), "XECS INTERNAL ERROR: IdAllocator corrupted");
+        debug_assert!(!self.is_alive(id), "XECS: IdAllocator corrupted");
     }
 
     /// Fails unless `n` more ids can be allocated.
     pub(crate) fn ensure_available(&self, n: u32) -> Result<(), IdsExhausted> {
-        let fresh = ((Id::MAX_INDEX as usize) + 1).saturating_sub(self.dense.len());
+        let fresh = (Id::MAX_INDEX + 1).saturating_sub(self.dense.len() as u32);
         let available = self.num_dead() + fresh;
-        if (n as usize) <= available { Ok(()) } else { Err(IdsExhausted) }
+        if n <= available { Ok(()) } else { Err(IdsExhausted) }
     }
 
     pub(crate) fn new_id(&mut self, f: impl FnOnce(Id) -> IdRecord) -> Result<Id, IdsExhausted> {
@@ -121,12 +122,12 @@ impl IdAllocator {
     }
 
     #[inline]
-    pub fn num_alive(&self) -> usize {
-        self.alive as usize
+    pub fn num_live(&self) -> u32 {
+        self.alive
     }
 
     #[inline]
-    pub fn num_dead(&self) -> usize {
-        self.dense.len() - (self.alive as usize)
+    pub fn num_dead(&self) -> u32 {
+        (self.dense.len() as u32) - self.alive
     }
 }
