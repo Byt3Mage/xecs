@@ -99,7 +99,6 @@ impl TableStorage {
             tables: TableVec(vec![Table {
                 sig: sig.clone(),
                 data: TableData::new(Box::new([])),
-                relations: Box::new([]),
             }]),
             inserts: TableVec(vec![TypeIdMap::new()]),
             removes: TableVec(vec![TypeIdMap::new()]),

@@ -1,30 +1,55 @@
 use std::ptr::NonNull;
 
-use ahash::AHashSet;
-
 use crate::{
-    Cycles,
     data_structures::Sparse,
     id::Id,
-    relation::{Cycle, Relation, Src, Targets, Tgt, registry, sources::Sources},
+    relation::{Relation, Src, Targets, Tgt, registry, sources::Sources},
 };
 
-type Scratch<R> = <Cycle<R> as Cycles>::Scratch;
 type TgtStore<R> = <Tgt<R> as Targets>::Store<R>;
 type SrcStore<R> = Sparse<<Src<R> as Sources>::Store<R>>;
 
 /// Resuable buffers for graph searches over one relation.
 #[derive(Default)]
 pub struct Walk {
-    pub(crate) stack: Vec<Id>,
-    pub(crate) seen: AHashSet<Id>,
+    stack: Vec<Id>,
+    stamps: Vec<u32>,
+    stamp: u32,
+}
+
+impl Walk {
+    pub(crate) fn begin(&mut self) {
+        self.stack.clear();
+        self.stamp = self.stamp.checked_add(1).unwrap_or_else(|| {
+            self.stamps.fill(0);
+            1
+        });
+    }
+
+    #[inline]
+    pub(crate) fn push(&mut self, id: Id) {
+        self.stack.push(id)
+    }
+
+    #[inline]
+    pub(crate) fn pop(&mut self) -> Option<Id> {
+        self.stack.pop()
+    }
+
+    pub(crate) fn mark(&mut self, id: Id) -> bool {
+        let i = id.index as usize;
+        if i >= self.stamps.len() {
+            self.stamps.resize(i + 1, 0);
+        }
+        let slot = std::mem::replace(&mut self.stamps[i], self.stamp);
+        slot != self.stamp
+    }
 }
 
 /// The per-world data of `R` that lives outside tables.
 pub(crate) struct Store<R: Relation> {
     pub(crate) targets: TgtStore<R>,
     pub(crate) sources: SrcStore<R>,
-    pub(crate) scratch: Scratch<R>,
 }
 
 impl<R: Relation> Store<R> {
@@ -32,7 +57,6 @@ impl<R: Relation> Store<R> {
         Self {
             targets: TgtStore::<R>::default(),
             sources: SrcStore::<R>::default(),
-            scratch: Scratch::<R>::default(),
         }
     }
 }
@@ -80,12 +104,14 @@ impl RelationVtable {
 /// One store per static relation, indexed by relation id.
 pub(crate) struct RelationStorage {
     items: Box<[Erased]>,
+    pub(crate) walk: Walk,
 }
 
 impl RelationStorage {
     pub(crate) fn new() -> Self {
         Self {
             items: registry().keys.iter().map(|k| (k.vtable().new_store)()).collect(),
+            walk: Walk::default(),
         }
     }
 

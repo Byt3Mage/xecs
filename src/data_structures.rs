@@ -1,7 +1,7 @@
 use crate::Id;
 
 pub const fn ix(id: Id) -> usize {
-    id.index() as usize
+    id.index as usize
 }
 
 pub struct Sparse<T> {

@@ -20,20 +20,20 @@ pub use component::{
     Component, ComponentId, ComponentInfo, ComponentKey, ComponentRegisterError, KeySlot, STATIC_COMPONENTS,
     signature::Signature, static_components,
 };
-pub use ecs::Ecs;
-pub use error::{EcsResult, Error};
+pub use ecs::{Ecs, EcsGetError};
+pub use error::{EcsResult, Error, NoComponent, NoRelation};
 pub use id::{
     Id,
     allocator::{IdsExhausted, NotAlive},
 };
 pub use query::{
-    EcsMismatch, GetError, Query,
+    EcsMismatch, Query, QueryGetError,
     access::{AccessError, AccessSet},
     data::{QueryData, ReadOnlyData, SliceData},
     filter::{QueryFilter, With, Without},
 };
 pub use relation::{
-    Acyclic, CycleError, CycleOf, Cycles, Cyclic, Directed, Fixed, Many, Mirror, One, RelateError, Relation,
-    RelationId, RelationKey, RelationVtable, STATIC_RELATIONS, Slot, Sources, Targets,
+    Acyclic, Bounded, CycleError, Cycles, Cyclic, Directed, Fixed, Many, Mirror, One, RelateError, Relation,
+    RelationId, RelationKey, RelationVtable, STATIC_RELATIONS, Slot, Sources, TPos, Targets, Unbounded,
 };
 pub use type_meta::{HasMeta, TypeMeta};

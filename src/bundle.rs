@@ -129,14 +129,14 @@ impl_tuples!(K0, K1, K2, K3, K4, K5, K6, K7, K8, K9, K10, K11, K12, K13);
 impl_tuples!(K0, K1, K2, K3, K4, K5, K6, K7, K8, K9, K10, K11, K12, K13, K14);
 impl_tuples!(K0, K1, K2, K3, K4, K5, K6, K7, K8, K9, K10, K11, K12, K13, K14, K15);
 
-struct SetInfo {
+struct ColumnSetInfo {
     /// Sorted signature of the set's components.
     sig: Signature,
     /// `(component, field index)`, ascending by component.
     fields: Box<[(ComponentId, u32)]>,
 }
 
-impl SetInfo {
+impl ColumnSetInfo {
     fn from_set<S: ColumnSet>() -> Self {
         let mut fields: Box<_> = S::KEYS.iter().enumerate().map(|(i, k)| (k.id(), i as u32)).collect();
         fields.sort_unstable_by_key(|f| f.0);
@@ -176,7 +176,7 @@ pub(crate) struct RemoveEdge {
 }
 
 pub(crate) struct BundleRegistry {
-    sets: TypeIdMap<SetInfo>,
+    sets: TypeIdMap<ColumnSetInfo>,
 }
 
 impl BundleRegistry {
@@ -187,8 +187,8 @@ impl BundleRegistry {
 
     /// The info of `S`, built on first use.
     #[inline(always)]
-    fn get_or_insert<S: ColumnSet>(&mut self) -> &SetInfo {
-        self.sets.entry::<S>().or_insert_with(SetInfo::from_set::<S>)
+    fn get_or_insert<S: ColumnSet>(&mut self) -> &ColumnSetInfo {
+        self.sets.entry::<S>().or_insert_with(ColumnSetInfo::from_set::<S>)
     }
 }
 
@@ -289,7 +289,7 @@ fn build_remove<S: ColumnSet>(ecs: &mut Ecs, src: TableId) -> RemoveEdge {
 /// Inserts every component of `bundle` into `id`, overwriting values it
 /// already has.
 pub(crate) fn insert<B: Bundle>(ecs: &mut Ecs, r: IdRecord, bundle: B) {
-    assert_unique::<B::Set>();
+    const { assert_unique::<B::Set>() };
 
     let TableStorage { inserts, tables, .. } = &mut ecs.storage;
 

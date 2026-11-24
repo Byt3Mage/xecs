@@ -1,5 +1,6 @@
 /// A position in a [`Slots`] of `N` positions. Always less than `N`.
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[repr(transparent)]
 pub struct Slot<const N: usize>(u32);
 
 impl<const N: usize> Slot<N> {
@@ -49,15 +50,10 @@ impl<T: Copy, const N: usize> Slots<T, N> {
         Self { items: [None; N] }
     }
 
-    pub(crate) fn with_entry(entry: T) -> Self {
+    pub(crate) fn with_entry(slot: Slot<N>, value: T) -> Self {
         let mut slots = Self::new();
-        slots.items[0] = Some(entry);
+        slots.items[slot.index()] = Some(value);
         slots
-    }
-
-    #[inline(always)]
-    pub(crate) fn get(&self, i: Slot<N>) -> Option<&T> {
-        self.items[i.index()].as_ref()
     }
 
     #[inline(always)]
@@ -77,31 +73,21 @@ impl<T: Copy, const N: usize> Slots<T, N> {
         self.items[i.index()].take()
     }
 
-    /// Writes `entry` at the lowest empty position and returns that position.
-    /// Returns `None` without writing when every position is occupied.
-    pub(crate) fn push(&mut self, entry: T) -> Option<Slot<N>> {
-        let i = self.items.iter().position(Option::is_none)?;
-        self.items[i] = Some(entry);
-        Some(Slot(i as u32))
-    }
-
-    /// The lowest empty position, or `None` when every position is occupied.
-    #[inline]
-    pub(crate) fn next_empty(&self) -> Option<Slot<N>> {
-        self.items.iter().position(Option::is_none).map(|i| Slot(i as u32))
-    }
-
     /// Number of occupied positions.
     pub(crate) fn len(&self) -> u32 {
         self.items.iter().filter(|e| e.is_some()).count() as u32
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.items.iter().all(Option::is_none)
+        self.len() == 0
     }
 
     pub(crate) fn iter(&self) -> impl Iterator<Item = &T> {
         self.items.iter().filter_map(Option::as_ref)
+    }
+
+    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> {
+        self.items.iter_mut().filter_map(Option::as_mut)
     }
 }
 

@@ -1,14 +1,14 @@
-pub struct ManyStore<T: Copy> {
+pub struct ManySlots<T: Copy> {
     items: Vec<T>,
 }
 
-impl<T: Copy> Default for ManyStore<T> {
+impl<T: Copy> Default for ManySlots<T> {
     fn default() -> Self {
         Self { items: Default::default() }
     }
 }
 
-impl<T: Copy> ManyStore<T> {
+impl<T: Copy> ManySlots<T> {
     pub(crate) fn new() -> Self {
         Self { items: Vec::new() }
     }
@@ -42,7 +42,7 @@ impl<T: Copy> ManyStore<T> {
     }
 }
 
-impl<T: Copy> std::ops::Deref for ManyStore<T> {
+impl<T: Copy> std::ops::Deref for ManySlots<T> {
     type Target = [T];
 
     fn deref(&self) -> &Self::Target {
@@ -50,13 +50,13 @@ impl<T: Copy> std::ops::Deref for ManyStore<T> {
     }
 }
 
-impl<T: Copy> std::ops::DerefMut for ManyStore<T> {
+impl<T: Copy> std::ops::DerefMut for ManySlots<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.items
     }
 }
 
-impl<T: Copy> std::ops::Index<u32> for ManyStore<T> {
+impl<T: Copy> std::ops::Index<u32> for ManySlots<T> {
     type Output = T;
     #[inline(always)]
     fn index(&self, i: u32) -> &T {
@@ -64,7 +64,7 @@ impl<T: Copy> std::ops::Index<u32> for ManyStore<T> {
     }
 }
 
-impl<T: Copy> std::ops::IndexMut<u32> for ManyStore<T> {
+impl<T: Copy> std::ops::IndexMut<u32> for ManySlots<T> {
     #[inline(always)]
     fn index_mut(&mut self, i: u32) -> &mut T {
         &mut self.items[i as usize]

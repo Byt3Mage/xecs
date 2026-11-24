@@ -1,4 +1,4 @@
-use xecs::{Ecs, EcsResult, bundle, schema};
+use xecs::{Ecs, bundle, schema};
 
 schema! {
     pub component Health: f32;
@@ -8,11 +8,11 @@ schema! {
 }
 
 #[test]
-fn test_types() -> EcsResult<()> {
+fn test_types() -> anyhow::Result<()> {
     let mut ecs = Ecs::new();
     let bob = ecs.create(bundle!(Health: 5.5, Position: (5, 6)))?;
 
-    let h = ecs.read::<Health>(bob)?;
+    let h = ecs.get::<Health>(bob)?;
 
     println!("bob's position is: {h:?}");
 

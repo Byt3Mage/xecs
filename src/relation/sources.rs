@@ -1,16 +1,16 @@
 use crate::{
-    Ecs, HasMeta, Id, Many, One, RelateError, Relation,
+    Bounded, CycleError, Ecs, HasMeta, Id, Many, One, RelateError, Relation,
     relation::{
-        Tgt, Unbounded, directed,
+        self, Tgt, Unbounded, directed,
         edge::{Source, TPos},
-        many::ManyStore,
+        many::ManySlots,
         sealed::Sealed,
         targets::Targets,
     },
 };
 
 /// Edges per target, and the reverse index that follows from it.
-pub trait Sources: Sealed + Unbounded + 'static {
+pub trait Sources: Sealed + 'static {
     type Pos: HasMeta;
     type Store<R: Relation>;
 
@@ -31,10 +31,18 @@ pub trait Sources: Sealed + Unbounded + 'static {
         R: Relation<Sources = Self>,
         R::Targets: Unbounded;
 
-    fn unrelate<R>(ecs: &mut Ecs, src: Id, tgt: Id)
+    fn relate_at<R>(ecs: &mut Ecs, src: Id, tgt: Id, pos: TPos<R>, data: R::Data) -> Result<(), RelateError<R>>
     where
         R: Relation<Sources = Self>,
-        R::Targets: Unbounded;
+        R::Targets: Bounded;
+
+    fn unrelate<R>(ecs: &mut Ecs, src: Id, tgt: Id)
+    where
+        R: Relation<Sources = Self>;
+
+    fn closes_cycle<R>(ecs: &mut Ecs, src: Id, tgt: Id) -> Result<(), CycleError>
+    where
+        R: Relation<Sources = Self>;
 }
 
 impl Sources for One {
@@ -62,10 +70,7 @@ impl Sources for One {
     where
         R: Relation<Sources = Self>,
     {
-        let sources = &mut ecs.relations.get_mut::<R>().sources;
-        let pos = sources[tgt].pos;
-        sources.remove(tgt);
-        pos
+        ecs.relations.get_mut::<R>().sources.remove(tgt).unwrap().pos
     }
 
     fn relate<R>(ecs: &mut Ecs, src: Id, tgt: Id, data: R::Data) -> Result<(), RelateError<R>>
@@ -76,18 +81,32 @@ impl Sources for One {
         directed::relate::<R>(ecs, src, tgt, data)
     }
 
+    fn relate_at<R>(ecs: &mut Ecs, src: Id, tgt: Id, pos: TPos<R>, data: R::Data) -> Result<(), RelateError<R>>
+    where
+        R: Relation<Sources = Self>,
+        R::Targets: Bounded,
+    {
+        directed::relate_at::<R>(ecs, src, tgt, pos, data)
+    }
+
     fn unrelate<R>(ecs: &mut Ecs, src: Id, tgt: Id)
     where
         R: Relation<Sources = Self>,
-        R::Targets: Unbounded,
     {
         directed::unrelate::<R>(ecs, src, tgt)
+    }
+
+    fn closes_cycle<R>(ecs: &mut Ecs, src: Id, tgt: Id) -> Result<(), CycleError>
+    where
+        R: Relation<Sources = Self>,
+    {
+        relation::check_sources::<R>(ecs, src, tgt)
     }
 }
 
 impl Sources for Many {
     type Pos = u32;
-    type Store<R: Relation> = ManyStore<Source<R>>;
+    type Store<R: Relation> = ManySlots<Source<R>>;
 
     #[inline(always)]
     fn get_mut<R>(ecs: &mut Ecs, tgt: Id, pos: Self::Pos) -> Option<&mut Source<R>>
@@ -104,7 +123,7 @@ impl Sources for Many {
         ecs.relations
             .get_mut::<R>()
             .sources
-            .get_or_insert_with(tgt, ManyStore::new)
+            .get_or_insert_with(tgt, ManySlots::new)
             .push(src)
     }
 
@@ -116,7 +135,7 @@ impl Sources for Many {
         let src = sources[pos];
 
         if let Some(&mov) = sources.swap_remove(pos) {
-            let r = ecs.ids.get(mov.id).expect("xecs: source is alive");
+            let r = ecs.ids[mov.id];
             let tgt = Tgt::<R>::get_mut::<R>(ecs, r, mov.pos).expect("xecs: source has target");
             tgt.pos = pos;
         }
@@ -138,11 +157,26 @@ impl Sources for Many {
         directed::relate::<R>(ecs, src, tgt, data)
     }
 
+    fn relate_at<R>(ecs: &mut Ecs, src: Id, tgt: Id, pos: TPos<R>, data: R::Data) -> Result<(), RelateError<R>>
+    where
+        R: Relation<Sources = Self>,
+        R::Targets: Bounded,
+    {
+        directed::relate_at::<R>(ecs, src, tgt, pos, data)
+    }
+
     fn unrelate<R>(ecs: &mut Ecs, src: Id, tgt: Id)
     where
         R: Relation<Sources = Self>,
-        R::Targets: Unbounded,
     {
         directed::unrelate::<R>(ecs, src, tgt);
+    }
+
+    #[inline]
+    fn closes_cycle<R>(ecs: &mut Ecs, src: Id, tgt: Id) -> Result<(), CycleError>
+    where
+        R: Relation<Sources = Self>,
+    {
+        relation::check_targets_dfs::<R>(ecs, tgt, src)
     }
 }

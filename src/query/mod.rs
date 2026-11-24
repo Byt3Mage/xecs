@@ -16,7 +16,7 @@ use filter::QueryFilter;
 
 /// Error returned when fetching one id from a query fails.
 #[derive(Debug, thiserror::Error)]
-pub enum GetError {
+pub enum QueryGetError {
     #[error(transparent)]
     EcsMismatch(#[from] EcsMismatch),
     #[error(transparent)]
@@ -139,10 +139,10 @@ impl<D: QueryData, F: QueryFilter> Query<D, F> {
     /// # Safety
     /// The caller holds the access `D` reports for `'w`, and this query was
     /// updated against `ecs`.
-    unsafe fn get_row<'w>(&self, ecs: &'w Ecs, id: Id) -> Result<D::Value<'w>, GetError> {
+    unsafe fn get_row<'w>(&self, ecs: &'w Ecs, id: Id) -> Result<D::Value<'w>, QueryGetError> {
         let r = ecs.ids.get(id)?;
         let idx = r.table.index();
-        let Some(Some(slot)) = self.slots.get(idx) else { return Err(GetError::NoMatch) };
+        let Some(Some(slot)) = self.slots.get(idx) else { return Err(QueryGetError::NoMatch) };
         let (tid, state) = self.matched[*slot as usize];
         let table = &ecs.storage.tables[tid];
         // SAFETY:
@@ -195,7 +195,7 @@ impl<D: QueryData, F: QueryFilter> Query<D, F> {
     }
 
     /// The item of `id`, through a shared borrow.
-    pub fn get<'w>(&mut self, ecs: &'w Ecs, id: Id) -> Result<D::Value<'w>, GetError>
+    pub fn get<'w>(&mut self, ecs: &'w Ecs, id: Id) -> Result<D::Value<'w>, QueryGetError>
     where
         D: ReadOnlyData,
     {
@@ -205,7 +205,7 @@ impl<D: QueryData, F: QueryFilter> Query<D, F> {
     }
 
     /// The value of `id`.
-    pub fn get_mut<'w>(&mut self, ecs: &'w mut Ecs, id: Id) -> Result<D::Value<'w>, GetError> {
+    pub fn get_mut<'w>(&mut self, ecs: &'w mut Ecs, id: Id) -> Result<D::Value<'w>, QueryGetError> {
         self.update(ecs)?;
         // SAFETY: `ecs` is borrowed uniquely for `'w`, and the query was just updated.
         unsafe { self.get_row(ecs, id) }

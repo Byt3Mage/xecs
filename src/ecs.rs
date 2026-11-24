@@ -1,14 +1,14 @@
 use std::sync::atomic::AtomicU32;
 
 use crate::{
-    AccessError, Field, IdsExhausted, Query, QueryData, QueryFilter, RelateError,
+    AccessError, Bounded, Field, IdsExhausted, Query, QueryData, QueryFilter, RelateError,
     bundle::{self, Bundle, BundleRegistry, ColumnSet, ComponentSet},
     component::{self, Component, ComponentConfig, ComponentId, ComponentRegisterError, registry::ComponentRegistry},
     id::{
         Id,
         allocator::{IdAllocator, IdRecord, NotAlive},
     },
-    relation::{self, One, Relation, Sources, Src, Targets, Tgt, Unbounded, store::RelationStorage},
+    relation::{self, One, Relation, Sources, Src, TPos, Targets, Tgt, Unbounded, store::RelationStorage},
     table::{self},
     table_storage::TableStorage,
 };
@@ -25,6 +25,12 @@ pub struct Ecs {
     pub(crate) relations: RelationStorage,
     pub(crate) bundles: BundleRegistry,
     pub(crate) storage: TableStorage,
+}
+
+impl Default for Ecs {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Ecs {
@@ -123,17 +129,17 @@ impl Ecs {
     }
 
     #[inline(always)]
-    pub fn read<T: Component>(&self, id: Id) -> Result<Option<&T::Value>, NotAlive> {
+    pub fn get<T: Component>(&self, id: Id) -> Result<&T::Value, EcsGetError> {
         let r = self.ids.get(id)?;
-        let c = T::id();
-        Ok(unsafe { component::get(&self.storage.tables, r, c) })
+        let comp = T::id();
+        unsafe { component::get(&self.storage.tables, r, comp) }.ok_or(EcsGetError::NoComponent { id, comp })
     }
 
     #[inline(always)]
-    pub fn write<T: Component>(&mut self, id: Id) -> Result<Option<&mut T::Value>, NotAlive> {
+    pub fn get_mut<T: Component>(&mut self, id: Id) -> Result<&mut T::Value, EcsGetError> {
         let r = self.ids.get(id)?;
-        let c = T::id();
-        Ok(unsafe { component::get_mut(&mut self.storage.tables, r, c) })
+        let comp = T::id();
+        unsafe { component::get_mut(&mut self.storage.tables, r, comp) }.ok_or(EcsGetError::NoComponent { id, comp })
     }
 
     /// Creates the edge `src -> tgt` of `R` carrying `data`, replacing whatever
@@ -148,12 +154,21 @@ impl Ecs {
         Src::<R>::relate::<R>(self, src, tgt, data)
     }
 
+    /// Creates the edge `src -> tgt` of `R` at `pos` carrying `data`. It replaces whatever
+    /// edges `R`'s cardinalities require. An existing `src -> tgt` keeps its
+    /// position and takes `data`. For a symmetric `R` the edge joins `src` and `tgt`
+    /// in both directions.
+    #[inline]
+    pub fn relate_at<R>(&mut self, src: Id, tgt: Id, pos: TPos<R>, data: R::Data) -> Result<(), RelateError<R>>
+    where
+        R: Relation<Targets: Bounded>,
+    {
+        Src::<R>::relate_at::<R>(self, src, tgt, pos, data)
+    }
+
     /// Removes the edge `s -> t` of `R`. Does nothing when it is absent.
     #[inline]
-    pub fn unrelate<R>(&mut self, src: Id, tgt: Id)
-    where
-        R: Relation<Targets: Unbounded>,
-    {
+    pub fn unrelate<R: Relation>(&mut self, src: Id, tgt: Id) {
         Src::<R>::unrelate::<R>(self, src, tgt);
     }
 
@@ -206,8 +221,10 @@ impl Ecs {
     }
 }
 
-impl Default for Ecs {
-    fn default() -> Self {
-        Self::new()
-    }
+#[derive(Debug, thiserror::Error, Clone, Copy)]
+pub enum EcsGetError {
+    #[error(transparent)]
+    NotAlive(#[from] NotAlive),
+    #[error("{id} does not have component {comp}")]
+    NoComponent { id: Id, comp: ComponentId },
 }

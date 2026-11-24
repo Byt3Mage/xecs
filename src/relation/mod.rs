@@ -9,7 +9,7 @@ use crate::{
         allocator::{IdRecord, NotAlive},
     },
     macros::declare_id,
-    relation::{edge::ComponentOf, store::Walk},
+    relation::edge::ComponentOf,
 };
 
 pub(crate) mod bounds;
@@ -21,8 +21,9 @@ pub(crate) mod sources;
 pub(crate) mod store;
 pub(crate) mod targets;
 
-pub use bounds::Unbounded;
+pub use bounds::{Bounded, Unbounded};
 pub use directed::Directed;
+pub use edge::TPos;
 pub use slots::Slot;
 pub use sources::Sources;
 pub use store::RelationVtable;
@@ -87,11 +88,7 @@ pub(crate) type Src<R> = <R as Relation>::Sources;
 pub(crate) type Cycle<R> = <R as Relation>::Cycles;
 pub(crate) type Row<R> = <Tgt<R> as Targets>::Row<R>;
 
-/// The cycle error of `R`.
-pub type CycleOf<R> = <<R as Relation>::Cycles as Cycles>::Error;
-
-/// Error returned by `relate`. `C` and `F` are uninhabited for relations
-/// that cannot fail that way.
+/// Error returned by `relate`. `Cycles` is uninhabited for Cyclic relations.
 #[derive(Debug, thiserror::Error)]
 pub enum RelateError<R: Relation> {
     #[error(transparent)]
@@ -102,23 +99,24 @@ pub enum RelateError<R: Relation> {
 
 /// The edge would close a cycle.
 #[derive(Debug, thiserror::Error)]
-#[error("edge would close a cycle")]
-pub struct CycleError;
+#[error("edge formed by {src} -> {tgt} would close a cycle")]
+pub struct CycleError {
+    src: Id,
+    tgt: Id,
+}
 
 /// Whether edges may form cycles, and the check `relate` runs.
 pub trait Cycles: Sealed + 'static {
-    type Scratch: Default;
-    /// Error returned by `relate` when the edge would close a cycle.
     type Error: std::error::Error + 'static;
 
-    #[doc(hidden)]
-    fn check<R>(ecs: &mut Ecs, s: Id, t: Id) -> Result<(), Self::Error>
+    /// Fails when the edge `src -> tgt` would close a cycle, which is when `src`
+    /// is already reachable from `tgt`: forward from `tgt`, or backward from `src`.
+    fn check<R>(ecs: &mut Ecs, src: Id, tgt: Id) -> Result<(), Self::Error>
     where
         R: Relation<Cycles = Self>;
 }
 
 impl Cycles for Cyclic {
-    type Scratch = ();
     type Error = !;
 
     #[inline(always)]
@@ -128,36 +126,14 @@ impl Cycles for Cyclic {
 }
 
 impl Cycles for Acyclic {
-    type Scratch = Walk;
     type Error = CycleError;
 
-    #[inline]
+    #[inline(always)]
     fn check<R>(ecs: &mut Ecs, src: Id, tgt: Id) -> Result<(), Self::Error>
     where
         R: Relation<Cycles = Self>,
     {
-        let mut walk = std::mem::take(&mut ecs.relations.get_mut::<R>().scratch);
-        walk.stack.clear();
-        walk.seen.clear();
-        walk.stack.push(src);
-
-        while let Some(cur) = walk.stack.pop() {
-            if cur == tgt {
-                return Err(CycleError);
-            }
-
-            // With one target per source the walk is a chain, which revisits no
-            // entity while the relation is acyclic.
-            if !walk.seen.insert(cur) {
-                continue;
-            }
-
-            let r = ecs.ids.get(cur).expect("target is alive");
-            Tgt::<R>::for_each::<R>(ecs, r, |tgt| walk.stack.push(tgt.id));
-        }
-
-        ecs.relations.get_mut::<R>().scratch = walk;
-        Ok(())
+        Tgt::<R>::closes_cycle::<R>(ecs, src, tgt)
     }
 }
 
@@ -283,4 +259,60 @@ pub(crate) fn row_mut<R: Relation>(ecs: &mut Ecs, r: IdRecord) -> Option<&mut Ro
     // SAFETY: `r` is live, and `ColumnOf<R>`'s column holds `Forward<R>`
     // per `Relation`'s contract.
     unsafe { component::get_mut::<Row<R>>(&mut ecs.storage.tables, r, ComponentOf::<R>::id()) }
+}
+
+/// Follows the chain of single targets starting at `from`, and fails when
+/// it reaches `to`. `from` itself counts as reached.
+///
+/// The chain ends because the relation is acyclic, which is the invariant
+/// before every insertion.
+pub(crate) fn check_targets<R>(ecs: &Ecs, from: Id, to: Id) -> Result<(), CycleError>
+where
+    R: Relation<Targets = One>,
+{
+    let mut cur = from;
+    while cur != to {
+        let Some(next) = row::<R>(ecs, ecs.ids[cur]) else { return Ok(()) };
+        cur = next.id;
+    }
+    Err(CycleError { src: to, tgt: from })
+}
+
+/// Follows the chain of single sources starting at `from`, and fails when
+/// it reaches `to`. `from` itself counts as reached.
+///
+/// The chain ends because the relation is acyclic, which is the invariant
+/// before every insertion.
+pub(crate) fn check_sources<R>(ecs: &Ecs, from: Id, to: Id) -> Result<(), CycleError>
+where
+    R: Relation<Sources = One>,
+{
+    let mut cur = from;
+    while cur != to {
+        let Some(prev) = ecs.relations.get::<R>().sources.get(cur) else { return Ok(()) };
+        cur = prev.id;
+    }
+    Err(CycleError { src: from, tgt: to })
+}
+
+/// Searches the targets reachable from `from`, and fails when it reaches
+/// `to`. `from` itself counts as reached. Each entity is expanded at most
+/// once.
+pub(crate) fn check_targets_dfs<R: Relation>(ecs: &mut Ecs, from: Id, to: Id) -> Result<(), CycleError> {
+    let mut walk = std::mem::take(&mut ecs.relations.walk);
+    walk.begin();
+    walk.push(from);
+
+    while let Some(cur) = walk.pop() {
+        if cur == to {
+            ecs.relations.walk = walk;
+            return Err(CycleError { src: to, tgt: from });
+        }
+        if walk.mark(cur) {
+            Tgt::<R>::for_each::<R>(ecs, ecs.ids[cur], |t| walk.push(t.id));
+        }
+    }
+
+    ecs.relations.walk = walk;
+    Ok(())
 }

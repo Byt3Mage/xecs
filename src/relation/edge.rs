@@ -33,8 +33,8 @@ impl<P: HasMeta, T: HasMeta> Edge<P, T> {
     }
 }
 
-pub(crate) type SPos<R> = <Src<R> as Sources>::Pos;
-pub(crate) type TPos<R> = <Tgt<R> as Targets>::Pos;
+pub type SPos<R> = <Src<R> as Sources>::Pos;
+pub type TPos<R> = <Tgt<R> as Targets>::Pos;
 
 /// One target edge in the source's targets list.
 pub(crate) type Target<R> = Edge<SPos<R>, <R as Relation>::Data>;

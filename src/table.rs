@@ -10,7 +10,6 @@ use crate::{
         allocator::{IdAllocator, IdRecord},
     },
     memory::{RawBlock, RowLayout},
-    relation::{self, RelationId},
     table_storage::{TableId, TableVec},
 };
 
@@ -135,24 +134,20 @@ impl Drop for TableData {
 pub struct Table {
     pub(crate) sig: Signature,
     pub(crate) data: TableData,
-    pub(crate) relations: Box<[RelationId]>,
 }
 
 impl Table {
     pub(crate) fn create(id: TableId, components: &mut ComponentRegistry, sig: Signature) -> Self {
-        let mut columns = Vec::with_capacity(sig.len());
-        for &cid in sig.iter() {
-            let ci = &mut components[cid];
-            ci.insert_table(id);
-            columns.push(Column::new(&ci.meta))
-        }
-        let relations = sig.iter().filter_map(|&cid| relation::edge_owner(cid)).collect();
+        let columns = sig
+            .iter()
+            .map(|&cid| {
+                let ci = &mut components[cid];
+                ci.insert_table(id);
+                Column::new(&ci.meta)
+            })
+            .collect();
 
-        Self {
-            sig,
-            data: TableData::new(columns.into()),
-            relations,
-        }
+        Self { sig, data: TableData::new(columns) }
     }
 
     #[inline]
