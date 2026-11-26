@@ -1,7 +1,6 @@
 use std::ptr::NonNull;
 
 use crate::{
-    TypeMeta,
     bundle::{Bundle, InsertEdge, RemoveEdge},
     component::{ComponentId, registry::ComponentRegistry, signature::Signature},
     ecs::Ecs,
@@ -19,14 +18,13 @@ pub(crate) struct Column {
 }
 
 impl Column {
-    pub(crate) fn new(meta: &TypeMeta) -> Self {
-        let layout = RowLayout::from_meta(meta);
+    pub(crate) fn new(layout: RowLayout) -> Self {
         Self { data: layout.new_block(), layout }
     }
 
     #[inline(always)]
-    pub(crate) fn row(&self, row: u32) -> NonNull<u8> {
-        self.data.row(self.layout.size(), row)
+    pub(crate) unsafe fn row(&self, row: u32) -> NonNull<u8> {
+        unsafe { self.data.row(self.layout.size(), row) }
     }
 
     /// Copy one value from `src` into `row`.
@@ -43,9 +41,14 @@ impl Column {
     ///
     /// # Safety
     /// `cap` is the column's current capacity.
-    #[inline]
+    #[inline(always)]
     unsafe fn dealloc(&mut self, cap: u32) {
         unsafe { self.data.dealloc(self.layout, cap) };
+    }
+
+    #[inline(always)]
+    pub(crate) unsafe fn grow(&mut self, old_cap: u32, new_cap: u32) {
+        unsafe { self.data.grow(self.layout, old_cap, new_cap) };
     }
 }
 
@@ -78,10 +81,8 @@ impl TableData {
         let new = self.ids.capacity() as u32;
 
         if new > old {
-            for col in self.columns.iter_mut() {
-                // SAFETY: new > old, and old is the current capacity.
-                unsafe { col.data.grow(col.layout, old, new) }
-            }
+            // SAFETY: new > old, and old is the current capacity.
+            self.columns.iter_mut().for_each(|c| unsafe { c.grow(old, new) });
         }
     }
 
@@ -143,7 +144,7 @@ impl Table {
             .map(|&cid| {
                 let ci = &mut components[cid];
                 ci.insert_table(id);
-                Column::new(&ci.meta)
+                Column::new(ci.layout)
             })
             .collect();
 

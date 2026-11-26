@@ -1,13 +1,14 @@
 use std::{
-    alloc::Layout,
     any::TypeId,
     collections::{HashMap, hash_map::Entry},
     hash::{BuildHasherDefault, Hasher},
 };
 
+use crate::memory::RowLayout;
+
 #[derive(Debug, Clone, Copy)]
 pub struct TypeMeta {
-    pub layout: Layout,
+    pub layout: RowLayout,
     pub type_id: TypeId,
     pub type_name: fn() -> &'static str,
 }
@@ -16,7 +17,7 @@ impl TypeMeta {
     #[inline]
     pub const fn of<T: Copy + 'static>() -> Self {
         Self {
-            layout: Layout::new::<T>(),
+            layout: RowLayout::of::<T>(),
             type_id: TypeId::of::<T>(),
             type_name: std::any::type_name::<T>,
         }

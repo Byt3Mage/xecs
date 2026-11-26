@@ -1,3 +1,5 @@
+use std::error::Error;
+
 use xecs::{Ecs, bundle, schema};
 
 schema! {
@@ -8,7 +10,7 @@ schema! {
 }
 
 #[test]
-fn test_types() -> anyhow::Result<()> {
+fn test_types() -> Result<(), Box<dyn Error>> {
     let mut ecs = Ecs::new();
     let bob = ecs.create(bundle!(Health: 5.5, Position: (5, 6)))?;
 

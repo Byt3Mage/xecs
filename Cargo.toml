@@ -16,6 +16,3 @@ linkme = "0.3.37"
 thiserror = "2.0.20"
 ahash = "0.8.12"
 errset = "0.2.1"
-
-[dev-dependencies]
-anyhow = "1.0.105"

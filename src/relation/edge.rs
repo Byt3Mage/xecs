@@ -1,73 +1,77 @@
 use std::{marker::PhantomData, ptr::NonNull};
 
 use crate::{
-    ComponentId, ComponentKey, HasMeta,
-    bundle::{Bundle, ColumnSet},
-    id::Id,
-    relation::{Relation, Row, Sources, Src, Targets, Tgt},
+    Bundle, ComponentKey, HasMeta, Id, Relation,
+    bundle::ColumnSet,
+    memory::{LayoutOverflow, RowLayout},
 };
 
-/// One relation edge, containing its:
-/// - opposite end
-/// - position in the end's list
-/// - payload (`()` means no payload).
-#[doc(hidden)]
-#[derive(Clone, Copy)]
-pub struct Edge<P: HasMeta, T: HasMeta> {
-    pub(crate) id: Id,
-    pub(crate) pos: P,
-    pub(crate) data: T,
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub(crate) struct Edge<T: HasMeta> {
+    pub target: Id,
+    pub data: T,
 }
 
-impl<P: HasMeta> Edge<P, ()> {
+impl<T: HasMeta> Edge<T> {
     #[inline(always)]
-    pub(crate) fn source(id: Id, pos: P) -> Self {
-        Self { id, pos, data: () }
+    pub fn new(target: Id, data: T) -> Self {
+        Self { target, data }
     }
 }
 
-impl<P: HasMeta, T: HasMeta> Edge<P, T> {
+#[derive(Debug, Clone, Copy)]
+pub struct EdgeLayout {
+    pub(crate) layout: RowLayout,
+    pub(crate) offset: usize,
+}
+
+impl EdgeLayout {
     #[inline(always)]
-    pub(crate) fn target(id: Id, pos: P, data: T) -> Self {
-        Self { id, pos, data }
+    pub const fn from_data<T: HasMeta>() -> Self {
+        Self {
+            layout: RowLayout::of::<Edge<T>>(),
+            offset: std::mem::offset_of!(Edge<T>, data),
+        }
+    }
+
+    #[inline(always)]
+    pub const fn new(data: RowLayout) -> Result<Self, LayoutOverflow> {
+        match RowLayout::of::<Id>().extend(data) {
+            Ok((layout, offset)) => Ok(Self { layout: layout.pad_to_align(), offset }),
+            Err(err) => Err(err),
+        }
     }
 }
 
-pub type SPos<R> = <Src<R> as Sources>::Pos;
-pub type TPos<R> = <Tgt<R> as Targets>::Pos;
+pub trait EdgeFrom: HasMeta {
+    const LAYOUT: &'static EdgeLayout;
+}
 
-/// One target edge in the source's targets list.
-pub(crate) type Target<R> = Edge<SPos<R>, <R as Relation>::Data>;
-/// One source edge in the target's sources list.
-pub(crate) type Source<R> = Edge<TPos<R>, ()>;
+impl<T: HasMeta> EdgeFrom for T {
+    const LAYOUT: &'static EdgeLayout = &EdgeLayout::from_data::<T>();
+}
 
 /// The component holding `R`'s forward storage on each source.
 /// The column only changes through relation operations.
-pub(crate) struct ComponentOf<R>(PhantomData<fn() -> R>);
+pub struct ComponentOf<R: Relation>(PhantomData<fn() -> R>);
 
-impl<R> Clone for ComponentOf<R> {
+impl<R: Relation> Copy for ComponentOf<R> {}
+impl<R: Relation> Clone for ComponentOf<R> {
     #[inline(always)]
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<R> Copy for ComponentOf<R> {}
-
-impl<R: Relation> ComponentOf<R> {
-    #[inline(always)]
-    pub(crate) fn id() -> ComponentId {
-        R::KEY.data().id()
-    }
-}
-
 impl<R: Relation> ColumnSet for ComponentOf<R> {
-    const KEYS: &'static [&'static ComponentKey] = &[R::KEY.data()];
+    const KEYS: &'static [&'static ComponentKey] = &[R::KEY.component()];
 }
 
-/// A value of `EdgeOf<R>`'s column, inserted as a bundle.
-pub(crate) struct EdgeField<R: Relation>(pub(crate) Row<R>);
+/// A value of `Edge<R::Data>`'s column, inserted as a bundle.
+pub(crate) struct EdgeField<R: Relation>(pub(crate) Edge<R::Data>);
 
+impl<R: Relation> Copy for EdgeField<R> {}
 impl<R: Relation> Clone for EdgeField<R> {
     #[inline(always)]
     fn clone(&self) -> Self {
@@ -75,9 +79,7 @@ impl<R: Relation> Clone for EdgeField<R> {
     }
 }
 
-impl<R: Relation> Copy for EdgeField<R> {}
-
-// SAFETY: one payload, of `Fwd<R>`, which `R::KEY.edge()` describes per
+// SAFETY: one payload, of `Edge<R>`, which `R::KEY.component()` describes per
 // `Relation`'s contract.
 unsafe impl<R: Relation> Bundle for EdgeField<R> {
     type Set = ComponentOf<R>;

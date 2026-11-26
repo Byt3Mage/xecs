@@ -1,6 +1,6 @@
 #[macro_export]
 macro_rules! schema {
-    ($(#[$outer:meta])* $vis:vis component $name:ident$(: $ty:ty)?; $($rest:tt)*) => {
+    ($(#[$outer:meta])* $vis:vis component $name:ident$(: $data:ty)?; $($rest:tt)*) => {
         $(#[$outer])*
         #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
         $vis struct $name;
@@ -8,14 +8,15 @@ macro_rules! schema {
         // SAFETY: `KEY` was built from `<$ty as HasMeta>::META`.
         unsafe impl $crate::Component for $name {
             #[allow(unused_parens)]
-            type Value = ($($ty)?);
+            type Data = ($($data)?);
+            #[doc(hidden)]
             const KEY: &'static $crate::ComponentKey = {
                 static SLOT: $crate::KeySlot = $crate::KeySlot::new();
                 static KEY: $crate::ComponentKey = $crate::ComponentKey::new(
                     &SLOT,
                     concat!(module_path!(), "::", stringify!($name)),
                      #[allow(unused_parens)]
-                    <($($ty)?) as $crate::HasMeta>::META,
+                    <($($data)?) as $crate::HasMeta>::META,
                 );
                 #[$crate::__linkme::distributed_slice($crate::STATIC_COMPONENTS)]
                 #[linkme(crate = $crate::__linkme)]
@@ -116,13 +117,19 @@ macro_rules! declare_id {
         /// A non-max 32-bit id for use in registries
         #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
         #[repr(transparent)]
-        pub struct $name(#[doc(hidden)] std::num::NonZeroU32);
+        pub struct $name(#[doc(hidden)] $crate::utils::NonMaxU32);
 
         impl $name {
             #[allow(dead_code)]
             #[inline(always)]
-            pub(crate) const fn new(raw: u32) -> Option<Self> {
-                match ::core::num::NonZeroU32::new(raw ^ u32::MAX) {
+            pub(crate) const fn new(n: $crate::utils::NonMaxU32) -> Self {
+                Self(n)
+            }
+
+            #[allow(dead_code)]
+            #[inline(always)]
+            pub(crate) const fn from_raw(raw: u32) -> Option<Self> {
+                match $crate::utils::NonMaxU32::new(raw) {
                     Some(val) => Some(Self(val)),
                     None => None,
                 }
@@ -133,7 +140,7 @@ macro_rules! declare_id {
             #[inline(always)]
             #[allow(dead_code)]
             pub(crate) const unsafe fn new_unchecked(raw: u32) -> Self {
-                Self(unsafe { ::core::num::NonZeroU32::new_unchecked(raw ^ u32::MAX) })
+                Self(unsafe { $crate::utils::NonMaxU32::new_unchecked(raw) })
             }
 
             #[inline(always)]

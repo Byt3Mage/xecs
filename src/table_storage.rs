@@ -21,6 +21,11 @@ impl<V> TableVec<V> {
         self.0.len()
     }
 
+    #[inline(always)]
+    fn push(&mut self, value: V) {
+        self.0.push(value);
+    }
+
     /// ## Panics
     /// Panics if table ids `a` and `b` are equal or if either id is invalid.
     #[inline]
@@ -79,6 +84,8 @@ impl<V> IndexMut<TableId> for TableVec<V> {
     }
 }
 
+pub(crate) type Tables = TableVec<Table>;
+
 pub(crate) struct TableStorage {
     pub(crate) tables: TableVec<Table>,
     /// Insert edges out of each table, keyed by component set. Parallel to `tables`.
@@ -91,7 +98,7 @@ pub(crate) struct TableStorage {
 
 impl TableStorage {
     /// The table with no components, where every new id starts.
-    pub const ROOT: TableId = TableId::new(0).unwrap();
+    pub const ROOT: TableId = TableId::from_raw(0).unwrap();
 
     pub(crate) fn new() -> Self {
         let sig = Signature::from([]);
@@ -108,11 +115,11 @@ impl TableStorage {
 
     /// The table with signature `sig`, creating it if it doesn't exist.
     pub(crate) fn get_or_create(&mut self, components: &mut ComponentRegistry, sig: Signature) -> TableId {
+        let id = TableId::from_raw(self.tables.len() as u32).expect("too many tables");
         *self.sig_to_id.entry(sig).or_insert_with_key(|sig| {
-            let id = TableId::new(self.tables.len() as u32).expect("too many tables");
-            self.tables.0.push(Table::create(id, components, sig.clone()));
-            self.inserts.0.push(TypeIdMap::new());
-            self.removes.0.push(TypeIdMap::new());
+            self.tables.push(Table::create(id, components, sig.clone()));
+            self.inserts.push(TypeIdMap::new());
+            self.removes.push(TypeIdMap::new());
             id
         })
     }

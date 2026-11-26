@@ -11,14 +11,14 @@ mod relation;
 mod table;
 mod table_storage;
 mod type_meta;
+mod utils;
 
 #[doc(hidden)]
 pub use linkme as __linkme;
 
 pub use bundle::{Bundle, Field};
 pub use component::{
-    Component, ComponentId, ComponentInfo, ComponentKey, ComponentRegisterError, KeySlot, STATIC_COMPONENTS,
-    signature::Signature, static_components,
+    Component, ComponentId, ComponentInfo, ComponentKey, STATIC_COMPONENTS, signature::Signature, static_components,
 };
 pub use ecs::{Ecs, EcsGetError};
 pub use error::{EcsResult, Error, NoComponent, NoRelation};
@@ -32,8 +32,6 @@ pub use query::{
     data::{QueryData, ReadOnlyData, SliceData},
     filter::{QueryFilter, With, Without},
 };
-pub use relation::{
-    Acyclic, Bounded, CycleError, Cycles, Cyclic, Directed, Fixed, Many, Mirror, One, RelateError, Relation,
-    RelationId, RelationKey, RelationVtable, STATIC_RELATIONS, Slot, Sources, TPos, Targets, Unbounded,
-};
+pub use relation::{RelateError, Relation, RelationId, RelationKey, STATIC_RELATIONS, EdgeFrom};
 pub use type_meta::{HasMeta, TypeMeta};
+pub use utils::KeySlot;

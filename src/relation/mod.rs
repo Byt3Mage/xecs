@@ -1,64 +1,30 @@
 use std::sync::LazyLock;
 
 use crate::{
-    ComponentId, ComponentKey, HasMeta, KeySlot,
-    component::{self, NULL_KEY, static_components},
-    ecs::Ecs,
-    id::{
-        Id,
-        allocator::{IdRecord, NotAlive},
-    },
+    ComponentId, ComponentKey, HasMeta, NotAlive,
+    component::{self, static_components},
+    data_structures::Sparse,
+    id::{Id, allocator::IdRecord},
     macros::declare_id,
-    relation::edge::ComponentOf,
+    memory::LayoutOverflow,
+    relation::{
+        edge::{Edge, EdgeLayout},
+        many::Many,
+    },
+    table_storage::Tables,
+    utils::KeySlot,
 };
 
-pub(crate) mod bounds;
 mod directed;
-mod edge;
+pub(crate) mod edge;
 pub(crate) mod many;
-pub(crate) mod slots;
-pub(crate) mod sources;
-pub(crate) mod store;
-pub(crate) mod targets;
+pub(crate) mod registry;
 
-pub use bounds::{Bounded, Unbounded};
-pub use directed::Directed;
-pub use edge::TPos;
-pub use slots::Slot;
-pub use sources::Sources;
-pub use store::RelationVtable;
-pub use targets::Targets;
+pub use edge::EdgeFrom;
+
+pub(crate) use directed::relate;
 
 declare_id!(RelationId, "R");
-
-mod sealed {
-    pub trait Sealed {}
-}
-
-use sealed::Sealed;
-
-/// Cardinality of exactly one.
-pub struct One;
-/// Cardinality of at most `N`.
-pub struct Fixed<const N: usize>;
-/// Cardinality without a bound.
-pub struct Many;
-
-/// The sources of a symmetric relation: every edge is held by both ends,
-/// each with the other as its target.
-pub struct Mirror;
-
-/// Edges may form cycles, including self-edges.
-pub struct Cyclic;
-/// Edges may not form cycles. A self-edge is a cycle.
-pub struct Acyclic;
-
-impl Sealed for One {}
-impl<const N: usize> Sealed for Fixed<N> {}
-impl Sealed for Many {}
-impl Sealed for Mirror {}
-impl Sealed for Cyclic {}
-impl Sealed for Acyclic {}
 
 /// A relation declared with `schema!`, named by its own type.
 ///
@@ -66,95 +32,39 @@ impl Sealed for Acyclic {}
 /// - `KEY.edge().meta()` describes `<Self::Targets as Targets>::Forward<Self::Payload>`.
 /// - `KEY.fns()` is `RelationFns::of::<Self>()`.
 pub unsafe trait Relation: Copy + 'static {
-    /// Edges per source.
-    type Targets: Targets;
-    /// Edges per target.
-    type Sources: Sources;
-    /// Whether edges may form cycles.
-    type Cycles: Cycles;
     /// Data carried by each forward edge.
     type Data: HasMeta;
-
+    const UNIQUE_TARGET: bool;
+    const UNIQUE_SOURCE: bool;
+    const DIRECTION: Direction;
     const KEY: &'static RelationKey;
-
-    #[inline(always)]
-    fn id() -> RelationId {
-        Self::KEY.id()
-    }
 }
 
-pub(crate) type Tgt<R> = <R as Relation>::Targets;
-pub(crate) type Src<R> = <R as Relation>::Sources;
-pub(crate) type Cycle<R> = <R as Relation>::Cycles;
-pub(crate) type Row<R> = <Tgt<R> as Targets>::Row<R>;
-
-/// Error returned by `relate`. `Cycles` is uninhabited for Cyclic relations.
-#[derive(Debug, thiserror::Error)]
-pub enum RelateError<R: Relation> {
-    #[error(transparent)]
-    NotAlive(#[from] NotAlive),
-    #[error(transparent)]
-    Cycles(<Cycle<R> as Cycles>::Error),
-}
-
-/// The edge would close a cycle.
-#[derive(Debug, thiserror::Error)]
-#[error("edge formed by {src} -> {tgt} would close a cycle")]
-pub struct CycleError {
-    src: Id,
-    tgt: Id,
-}
-
-/// Whether edges may form cycles, and the check `relate` runs.
-pub trait Cycles: Sealed + 'static {
-    type Error: std::error::Error + 'static;
-
-    /// Fails when the edge `src -> tgt` would close a cycle, which is when `src`
-    /// is already reachable from `tgt`: forward from `tgt`, or backward from `src`.
-    fn check<R>(ecs: &mut Ecs, src: Id, tgt: Id) -> Result<(), Self::Error>
-    where
-        R: Relation<Cycles = Self>;
-}
-
-impl Cycles for Cyclic {
-    type Error = !;
-
-    #[inline(always)]
-    fn check<R>(_: &mut Ecs, _: Id, _: Id) -> Result<(), Self::Error> {
-        Ok(())
-    }
-}
-
-impl Cycles for Acyclic {
-    type Error = CycleError;
-
-    #[inline(always)]
-    fn check<R>(ecs: &mut Ecs, src: Id, tgt: Id) -> Result<(), Self::Error>
-    where
-        R: Relation<Cycles = Self>,
-    {
-        Tgt::<R>::closes_cycle::<R>(ecs, src, tgt)
-    }
+#[inline(always)]
+pub fn id<R: Relation>() -> RelationId {
+    R::KEY.id()
 }
 
 /// The identity of one static relation.
 #[derive(Debug)]
 pub struct RelationKey {
+    props: Props,
     slot: &'static KeySlot,
     path: &'static str,
-    data: &'static ComponentKey,
-    vtable: &'static RelationVtable,
+    edge: &'static EdgeLayout,
+    component: &'static ComponentKey,
 }
 
 impl RelationKey {
     #[inline]
     pub const fn new(
+        props: Props,
         slot: &'static KeySlot,
         path: &'static str,
-        data: &'static ComponentKey,
-        vtable: &'static RelationVtable,
+        edge: &'static EdgeLayout,
+        component: &'static ComponentKey,
     ) -> Self {
-        Self { slot, path, data, vtable }
+        Self { props, slot, path, edge, component }
     }
 
     /// The relation's id, identical in every world.
@@ -163,25 +73,30 @@ impl RelationKey {
     /// Panics if this key is not in `STATIC_RELATIONS`.
     #[inline(always)]
     pub fn id(&self) -> RelationId {
-        let mut slot = self.slot.load();
-        if slot == NULL_KEY {
-            slot = self.init_slot();
+        match RelationId::from_raw(self.slot()) {
+            Some(r) => r,
+            None => self.init_id(),
         }
-        // SAFETY: `init_slot` only returns slots below `NULL_KEY`.
-        unsafe { RelationId::new_unchecked(slot) }
     }
 
     #[cold]
     #[inline(never)]
-    fn init_slot(&self) -> u32 {
-        registry();
-        let slot = self.slot.load();
-        assert!(
-            slot != NULL_KEY,
-            "relation key `{}` is not in STATIC_RELATIONS",
-            self.path
-        );
-        slot
+    fn init_id(&self) -> RelationId {
+        static_relations();
+        match RelationId::from_raw(self.slot()) {
+            Some(r) => r,
+            None => panic!("key `{}` is not in STATIC_RELATIONS", self.path),
+        }
+    }
+
+    #[inline(always)]
+    pub fn slot(&self) -> u32 {
+        self.slot.load()
+    }
+
+    #[inline]
+    pub const fn props(&self) -> Props {
+        self.props
     }
 
     #[inline]
@@ -189,15 +104,15 @@ impl RelationKey {
         self.path
     }
 
-    /// The key of the column sources store this relation's edges in.
     #[inline(always)]
-    pub const fn data(&self) -> &'static ComponentKey {
-        self.data
+    pub const fn data(&self) -> &'static EdgeLayout {
+        self.edge
     }
 
+    /// The key of the column sources store this relation's edges in.
     #[inline(always)]
-    pub(crate) const fn vtable(&self) -> &'static RelationVtable {
-        self.vtable
+    pub const fn component(&self) -> &'static ComponentKey {
+        self.component
     }
 }
 
@@ -211,9 +126,9 @@ pub(crate) struct Registry {
     by_edge: Box<[Option<RelationId>]>,
 }
 
-pub(crate) fn registry() -> &'static Registry {
+pub(crate) fn static_relations() -> &'static Registry {
     static REGISTRY: LazyLock<Registry> = LazyLock::new(|| {
-        assert!(STATIC_RELATIONS.len() < (NULL_KEY as usize), "too many relation keys");
+        assert!(STATIC_RELATIONS.len() < (u32::MAX as usize), "too many relation keys");
 
         let mut keys: Box<_> = STATIC_RELATIONS.iter().copied().collect();
         keys.sort_unstable_by_key(|k| k.path);
@@ -222,7 +137,6 @@ pub(crate) fn registry() -> &'static Registry {
             .for_each(|pair| assert_ne!(pair[0].path, pair[1].path, "duplicate relation path `{}`", pair[0].path));
 
         keys.iter().enumerate().for_each(|(i, k)| k.slot.store(i as u32));
-
         keys.iter().enumerate().for_each(|(i, k)| {
             assert!(
                 k.slot.load() == (i as u32),
@@ -235,7 +149,7 @@ pub(crate) fn registry() -> &'static Registry {
 
         for (i, k) in keys.iter().enumerate() {
             // SAFETY: `i` is below `NULL_KEY`, asserted above.
-            by_edge[k.data.id().index()] = Some(unsafe { RelationId::new_unchecked(i as u32) });
+            by_edge[k.component.id().index()] = Some(unsafe { RelationId::new_unchecked(i as u32) });
         }
 
         Registry { keys, by_edge }
@@ -246,73 +160,70 @@ pub(crate) fn registry() -> &'static Registry {
 /// The relation whose edges `component` stores, if any.
 #[inline]
 pub(crate) fn edge_owner(component: ComponentId) -> Option<RelationId> {
-    registry().by_edge.get(component.index()).copied().flatten()
+    static_relations().by_edge.get(component.index()).copied().flatten()
 }
 
-pub(crate) fn row<R: Relation>(ecs: &Ecs, r: IdRecord) -> Option<&Row<R>> {
-    // SAFETY: `r` is live, and `ColumnOf<R>`'s column holds `Forward<R>`
-    // per `Relation`'s contract.
-    unsafe { component::get::<Row<R>>(&ecs.storage.tables, r, ComponentOf::<R>::id()) }
+#[derive(Debug, thiserror::Error)]
+pub enum RelateError {
+    #[error(transparent)]
+    NotAlive(#[from] NotAlive),
+    #[error("edge formed by {src} -> {tgt} would close a cycle")]
+    Cycles { src: Id, tgt: Id },
 }
 
-pub(crate) fn row_mut<R: Relation>(ecs: &mut Ecs, r: IdRecord) -> Option<&mut Row<R>> {
-    // SAFETY: `r` is live, and `ColumnOf<R>`'s column holds `Forward<R>`
-    // per `Relation`'s contract.
-    unsafe { component::get_mut::<Row<R>>(&mut ecs.storage.tables, r, ComponentOf::<R>::id()) }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(u8)]
+pub enum Direction {
+    Cyclic,
+    Acyclic,
+    Symmetric,
 }
 
-/// Follows the chain of single targets starting at `from`, and fails when
-/// it reaches `to`. `from` itself counts as reached.
-///
-/// The chain ends because the relation is acyclic, which is the invariant
-/// before every insertion.
-pub(crate) fn check_targets<R>(ecs: &Ecs, from: Id, to: Id) -> Result<(), CycleError>
-where
-    R: Relation<Targets = One>,
-{
-    let mut cur = from;
-    while cur != to {
-        let Some(next) = row::<R>(ecs, ecs.ids[cur]) else { return Ok(()) };
-        cur = next.id;
+#[derive(Debug, Clone, Copy)]
+pub struct Props {
+    one_target: bool,
+    one_source: bool,
+    direction: Direction,
+}
+
+pub enum Targets {
+    One,
+    Many(Sparse<Many>),
+}
+
+pub(crate) enum Sources {
+    One(Sparse<Id>),
+    Many(Sparse<Vec<Id>>),
+}
+
+pub struct RelationInfo {
+    pub(crate) targets: Targets,
+    pub(crate) sources: Sources,
+    pub(crate) direction: Direction,
+    pub(crate) edge: EdgeLayout,
+    pub(crate) component: ComponentId,
+}
+
+impl RelationInfo {
+    fn from_key(key: &RelationKey) -> Result<Self, LayoutOverflow> {
+        let targets = if key.props.one_target { Targets::One } else { Targets::Many(Sparse::new()) };
+        let sources = if key.props.one_source { Sources::One(Sparse::new()) } else { Sources::Many(Sparse::new()) };
+        Ok(Self {
+            targets,
+            sources,
+            direction: key.props.direction,
+            edge: *key.edge,
+            component: key.component().id(),
+        })
     }
-    Err(CycleError { src: to, tgt: from })
 }
 
-/// Follows the chain of single sources starting at `from`, and fails when
-/// it reaches `to`. `from` itself counts as reached.
-///
-/// The chain ends because the relation is acyclic, which is the invariant
-/// before every insertion.
-pub(crate) fn check_sources<R>(ecs: &Ecs, from: Id, to: Id) -> Result<(), CycleError>
-where
-    R: Relation<Sources = One>,
-{
-    let mut cur = from;
-    while cur != to {
-        let Some(prev) = ecs.relations.get::<R>().sources.get(cur) else { return Ok(()) };
-        cur = prev.id;
-    }
-    Err(CycleError { src: from, tgt: to })
+#[inline(always)]
+fn target<T: HasMeta>(tables: &Tables, r: IdRecord, comp: ComponentId) -> Option<&Edge<T>> {
+    unsafe { component::get::<Edge<T>>(tables, r, comp) }
 }
 
-/// Searches the targets reachable from `from`, and fails when it reaches
-/// `to`. `from` itself counts as reached. Each entity is expanded at most
-/// once.
-pub(crate) fn check_targets_dfs<R: Relation>(ecs: &mut Ecs, from: Id, to: Id) -> Result<(), CycleError> {
-    let mut walk = std::mem::take(&mut ecs.relations.walk);
-    walk.begin();
-    walk.push(from);
-
-    while let Some(cur) = walk.pop() {
-        if cur == to {
-            ecs.relations.walk = walk;
-            return Err(CycleError { src: to, tgt: from });
-        }
-        if walk.mark(cur) {
-            Tgt::<R>::for_each::<R>(ecs, ecs.ids[cur], |t| walk.push(t.id));
-        }
-    }
-
-    ecs.relations.walk = walk;
-    Ok(())
+#[inline(always)]
+fn target_mut<T: HasMeta>(tables: &mut Tables, r: IdRecord, comp: ComponentId) -> Option<&mut Edge<T>> {
+    unsafe { component::get_mut::<Edge<T>>(tables, r, comp) }
 }

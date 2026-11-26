@@ -3,56 +3,79 @@ use std::{
     ptr::NonNull,
 };
 
-use crate::TypeMeta;
+/// The layout would exceed `isize::MAX` bytes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, thiserror::Error)]
+#[error("layout size overflows isize")]
+pub struct LayoutOverflow;
 
 /// One element's layout, padded to its alignment so that `size * n`
 /// addresses row `n`.
 ///
 /// Held once by the structure that owns a block rather than per buffer,
 /// so a block is one pointer.
-#[derive(Copy, Clone)]
-pub struct RowLayout {
-    /// Padded to alignment, so `size * n` addresses row `n`.
-    layout: Layout,
-}
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct RowLayout(Layout);
 
 impl RowLayout {
-    #[inline]
-    pub(crate) fn new(layout: Layout) -> Self {
-        Self { layout: layout.pad_to_align() }
+    #[inline(always)]
+    pub const fn of<T: Copy + 'static>() -> Self {
+        Self(Layout::new::<T>())
     }
 
-    #[inline]
-    pub(crate) fn from_meta(meta: &TypeMeta) -> Self {
-        Self::new(meta.layout)
+    #[inline(always)]
+    pub const fn inner(self) -> Layout {
+        self.0
     }
 
     #[inline(always)]
     pub const fn size(&self) -> usize {
-        self.layout.size()
+        self.0.size()
     }
 
     #[inline(always)]
     pub const fn align(&self) -> usize {
-        self.layout.align()
+        self.0.align()
     }
 
     #[inline(always)]
     pub const fn is_zst(&self) -> bool {
-        self.layout.size() == 0
+        self.0.size() == 0
+    }
+
+    #[inline(always)]
+    pub const fn extend(&self, next: Self) -> Result<(Self, usize), LayoutOverflow> {
+        match self.0.extend(next.0) {
+            Ok((l, off)) => Ok((Self(l), off)),
+            Err(_) => Err(LayoutOverflow),
+        }
+    }
+
+    #[inline(always)]
+    pub const fn pad_to_align(&self) -> Self {
+        Self(self.0.pad_to_align())
     }
 
     /// Layout of `n` contiguous rows.
     #[inline]
-    fn array(&self, n: u32) -> Layout {
-        // SAFETY: the alignment came from a valid layout, and the size
-        // is a multiple of it because `layout` was padded.
-        unsafe { Layout::from_size_align_unchecked(self.size() * n as usize, self.align()) }
+    pub const fn array(&self, n: u32) -> Result<Layout, LayoutOverflow> {
+        match self.size().checked_mul(n as usize) {
+            Some(size) => match Layout::from_size_align(size, self.align()) {
+                Ok(layout) => Ok(layout),
+                Err(_) => Err(LayoutOverflow),
+            },
+            None => Err(LayoutOverflow),
+        }
     }
 
-    #[inline]
+    #[inline(always)]
+    pub(crate) fn dangling_ptr(&self) -> NonNull<u8> {
+        self.0.dangling_ptr()
+    }
+
+    #[inline(always)]
     pub(crate) fn new_block(&self) -> RawBlock {
-        RawBlock { ptr: self.layout.dangling_ptr() }
+        RawBlock { ptr: self.0.dangling_ptr() }
     }
 }
 
@@ -85,7 +108,7 @@ impl RawBlock {
             return;
         }
 
-        let layout = rl.array(new_cap);
+        let layout = rl.array(new_cap).expect("capacity overflow");
 
         // SAFETY: `layout` has non-zero size — `new_cap` exceeds `old_cap`
         // and the stride is non-zero. On the realloc path `self.ptr` came
@@ -93,7 +116,11 @@ impl RawBlock {
         let ptr = unsafe {
             match old_cap {
                 0 => alloc(layout),
-                old => realloc(self.ptr.as_ptr(), rl.array(old), layout.size()),
+                old => realloc(
+                    self.ptr.as_ptr(),
+                    rl.array(old).expect("capacity overflow"),
+                    layout.size(),
+                ),
             }
         };
 
@@ -116,17 +143,17 @@ impl RawBlock {
             return;
         }
 
-        let old_layout = rl.array(old_cap);
+        let old_layout = rl.array(old_cap).expect("capacity overflow");
 
         if new_cap == 0 {
             // SAFETY: `self.ptr` came from `old_layout`, and the caller
             // guarantees no live rows remain.
             unsafe { dealloc(self.ptr.as_ptr(), old_layout) };
-            self.ptr = rl.layout.dangling_ptr();
+            self.ptr = rl.dangling_ptr();
             return;
         }
 
-        let layout = rl.array(new_cap);
+        let layout = rl.array(new_cap).expect("capacity overflow");
 
         // SAFETY: `self.ptr` came from `old_layout`. Shrinking preserves
         // the first `new_cap` rows, all of which remain live.
@@ -138,19 +165,19 @@ impl RawBlock {
     ///
     /// # Safety
     /// `cap` is current, and no row in the block is live.
-    pub(crate) unsafe fn dealloc(&mut self, rm: RowLayout, cap: u32) {
-        if rm.is_zst() || cap == 0 {
+    pub(crate) unsafe fn dealloc(&mut self, rl: RowLayout, cap: u32) {
+        if rl.is_zst() || cap == 0 {
             return;
         }
-        unsafe { std::alloc::dealloc(self.ptr.as_ptr(), rm.array(cap)) };
-        self.ptr = rm.layout.dangling_ptr();
+        unsafe { dealloc(self.ptr.as_ptr(), rl.array(cap).expect("capacity overflow")) };
+        self.ptr = rl.dangling_ptr();
     }
 
     #[inline(always)]
-    pub(crate) fn row(&self, size: usize, i: u32) -> NonNull<u8> {
+    pub(crate) unsafe fn row(&self, size: usize, i: u32) -> NonNull<u8> {
         // SAFETY: callers keep `i` within capacity. For a zero stride
         // this is the aligned base, which is what a ZST access wants.
-        unsafe { self.ptr.byte_add(i as usize * size) }
+        unsafe { self.ptr.add(i as usize * size) }
     }
 
     /// Relocate `count` rows within this block. Ranges may overlap.

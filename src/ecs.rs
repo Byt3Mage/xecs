@@ -1,14 +1,14 @@
 use std::sync::atomic::AtomicU32;
 
 use crate::{
-    AccessError, Bounded, Field, IdsExhausted, Query, QueryData, QueryFilter, RelateError,
+    AccessError, Field, IdsExhausted, Query, QueryData, QueryFilter,
     bundle::{self, Bundle, BundleRegistry, ColumnSet, ComponentSet},
-    component::{self, Component, ComponentConfig, ComponentId, ComponentRegisterError, registry::ComponentRegistry},
+    component::{self, Component, ComponentDesc, ComponentId, registry::ComponentRegistry},
     id::{
         Id,
         allocator::{IdAllocator, IdRecord, NotAlive},
     },
-    relation::{self, One, Relation, Sources, Src, TPos, Targets, Tgt, Unbounded, store::RelationStorage},
+    relation::{self, RelateError, Relation, registry::RelationRegistry},
     table::{self},
     table_storage::TableStorage,
 };
@@ -22,7 +22,7 @@ pub struct Ecs {
     ecs_id: u32,
     pub(crate) ids: IdAllocator,
     pub(crate) components: ComponentRegistry,
-    pub(crate) relations: RelationStorage,
+    pub(crate) relations: RelationRegistry,
     pub(crate) bundles: BundleRegistry,
     pub(crate) storage: TableStorage,
 }
@@ -39,7 +39,7 @@ impl Ecs {
             ecs_id: ecs_id_allocate(),
             ids: IdAllocator::new(),
             components: ComponentRegistry::new(),
-            relations: RelationStorage::new(),
+            relations: RelationRegistry::new(),
             bundles: BundleRegistry::new(),
             storage: TableStorage::new(),
         }
@@ -50,12 +50,10 @@ impl Ecs {
         self.ecs_id
     }
 
-    /// Creates a new component and returns its [Id].
-    ///
-    /// Useful for creating "newtype" runtime components.
+    /// Creates a new runtime component and returns its [ComponentId].
     #[inline(always)]
-    pub fn new_component(&mut self, config: ComponentConfig) -> Result<ComponentId, ComponentRegisterError> {
-        self.components.new_component(config)
+    pub fn new_component(&mut self, desc: ComponentDesc) -> ComponentId {
+        self.components.new_component(desc)
     }
 
     /// Creates a new [Id] with no components.
@@ -106,9 +104,10 @@ impl Ecs {
 
     /// Checks if `id` has the `component`.
     #[inline(always)]
-    pub fn has<T: Component>(&self, id: Id) -> Result<bool, NotAlive> {
+    pub fn has<C: Component>(&self, id: Id) -> Result<bool, NotAlive> {
         let r = self.ids.get(id)?;
-        Ok(self.storage.tables[r.table].has_component(T::id()))
+        let c = component::id::<C>();
+        Ok(self.storage.tables[r.table].has_component(c))
     }
 
     #[inline(always)]
@@ -118,8 +117,8 @@ impl Ecs {
     }
 
     #[inline(always)]
-    pub fn insert<T: Component>(&mut self, id: Id, v: T::Value) -> Result<(), NotAlive> {
-        self.insert_bundle(id, Field::<T>::new(v))
+    pub fn insert<C: Component>(&mut self, id: Id, v: C::Data) -> Result<(), NotAlive> {
+        self.insert_bundle(id, Field::<C>::new(v))
     }
 
     #[inline(always)]
@@ -129,16 +128,16 @@ impl Ecs {
     }
 
     #[inline(always)]
-    pub fn get<T: Component>(&self, id: Id) -> Result<&T::Value, EcsGetError> {
+    pub fn get<C: Component>(&self, id: Id) -> Result<&C::Data, EcsGetError> {
         let r = self.ids.get(id)?;
-        let comp = T::id();
+        let comp = component::id::<C>();
         unsafe { component::get(&self.storage.tables, r, comp) }.ok_or(EcsGetError::NoComponent { id, comp })
     }
 
     #[inline(always)]
-    pub fn get_mut<T: Component>(&mut self, id: Id) -> Result<&mut T::Value, EcsGetError> {
+    pub fn get_mut<C: Component>(&mut self, id: Id) -> Result<&mut C::Data, EcsGetError> {
         let r = self.ids.get(id)?;
-        let comp = T::id();
+        let comp = component::id::<C>();
         unsafe { component::get_mut(&mut self.storage.tables, r, comp) }.ok_or(EcsGetError::NoComponent { id, comp })
     }
 
@@ -147,50 +146,36 @@ impl Ecs {
     /// position and takes `data`. For a symmetric `R` the edge joins `src` and `tgt`
     /// in both directions.
     #[inline]
-    pub fn relate<R>(&mut self, src: Id, tgt: Id, data: R::Data) -> Result<(), RelateError<R>>
-    where
-        R: Relation<Targets: Unbounded>,
-    {
-        Src::<R>::relate::<R>(self, src, tgt, data)
-    }
-
-    /// Creates the edge `src -> tgt` of `R` at `pos` carrying `data`. It replaces whatever
-    /// edges `R`'s cardinalities require. An existing `src -> tgt` keeps its
-    /// position and takes `data`. For a symmetric `R` the edge joins `src` and `tgt`
-    /// in both directions.
-    #[inline]
-    pub fn relate_at<R>(&mut self, src: Id, tgt: Id, pos: TPos<R>, data: R::Data) -> Result<(), RelateError<R>>
-    where
-        R: Relation<Targets: Bounded>,
-    {
-        Src::<R>::relate_at::<R>(self, src, tgt, pos, data)
+    pub fn relate<R: Relation>(&mut self, src: Id, tgt: Id, data: R::Data) -> Result<(), RelateError> {
+        relation::relate(self, relation::id::<R>(), src, tgt, data)
     }
 
     /// Removes the edge `s -> t` of `R`. Does nothing when it is absent.
     #[inline]
     pub fn unrelate<R: Relation>(&mut self, src: Id, tgt: Id) {
-        Src::<R>::unrelate::<R>(self, src, tgt);
+        todo!()
     }
 
     /// Removes every edge of `R` out of `s`. Does nothing when there are none.
     #[inline]
-    pub fn clear<R: Relation>(&mut self, s: Id) -> Result<(), NotAlive> {
+    pub fn clear_relation<R: Relation>(&mut self, src: Id) -> Result<(), NotAlive> {
         todo!()
     }
 
     /// The target of `s`'s edge of `R`, if it has one.
     #[inline]
-    pub fn target<R: Relation<Targets = One>>(&self, s: Id) -> Result<Option<Id>, NotAlive> {
-        let r = self.ids.get(s)?;
-        Ok(relation::row::<R>(self, r).map(|tgt| tgt.id))
+    pub fn target<R: Relation>(&self, src: Id) -> Result<Option<(Id, &R::Data)>, NotAlive> {
+        const { assert!(R::UNIQUE_TARGET, "relation must have unique target") }
+        let r = self.ids.get(src)?;
+
+        todo!()
     }
 
     /// The target of `s`'s edge of `R`, if it has one.
     #[inline]
     pub fn targets<R: Relation>(&self, s: Id, mut f: impl FnMut(Id, &R::Data)) -> Result<(), NotAlive> {
         let r = self.ids.get(s)?;
-        Tgt::<R>::for_each::<R>(self, r, |t| f(t.id, &t.data));
-        Ok(())
+        todo!()
     }
 
     /// Creates a query fetching `D` from every matching entity.

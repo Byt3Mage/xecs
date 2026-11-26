@@ -1,7 +1,7 @@
 use std::ptr::NonNull;
 
 use crate::{
-    Component,
+    Component, component,
     id::Id,
     query::access::{AccessError, AccessSet},
     table::Table,
@@ -61,17 +61,17 @@ pub unsafe trait SliceData: QueryData {
 /// Column index of `K` in `table`.
 #[inline]
 fn column_of<K: Component>(table: &Table) -> Option<u32> {
-    table.sig.find_id(&K::id()).map(|col| col as u32)
+    table.sig.find_id(&component::id::<K>()).map(|col| col as u32)
 }
 
 // SAFETY: reads `K`'s column, which `resolve` found in the table.
 unsafe impl<K: Component> QueryData for &K {
-    type Value<'a> = &'a K::Value;
+    type Value<'a> = &'a K::Data;
     type State = u32;
-    type Fetch = NonNull<K::Value>;
+    type Fetch = NonNull<K::Data>;
 
     fn access(access: &mut AccessSet) -> Result<(), AccessError> {
-        access.read(K::id())
+        access.read(component::id::<K>())
     }
 
     #[inline]
@@ -96,7 +96,7 @@ unsafe impl<K: Component> ReadOnlyData for &K {}
 
 // SAFETY: a slice over `K`'s column, read-only.
 unsafe impl<K: Component> SliceData for &K {
-    type Slice<'a> = &'a [K::Value];
+    type Slice<'a> = &'a [K::Data];
 
     #[inline(always)]
     unsafe fn slice<'a>(fetch: Self::Fetch, len: usize) -> Self::Slice<'a> {
@@ -107,12 +107,12 @@ unsafe impl<K: Component> SliceData for &K {
 
 // SAFETY: writes `K`'s column, which `resolve` found in the table.
 unsafe impl<K: Component> QueryData for &mut K {
-    type Value<'a> = &'a mut K::Value;
+    type Value<'a> = &'a mut K::Data;
     type State = u32;
-    type Fetch = NonNull<K::Value>;
+    type Fetch = NonNull<K::Data>;
 
     fn access(access: &mut AccessSet) -> Result<(), AccessError> {
-        access.write(K::id())
+        access.write(component::id::<K>())
     }
 
     #[inline]
@@ -135,7 +135,7 @@ unsafe impl<K: Component> QueryData for &mut K {
 
 // SAFETY: a mutable slice over `K`'s column, which no other term accesses.
 unsafe impl<K: Component> SliceData for &mut K {
-    type Slice<'a> = &'a mut [K::Value];
+    type Slice<'a> = &'a mut [K::Data];
 
     #[inline(always)]
     unsafe fn slice<'a>(fetch: Self::Fetch, len: usize) -> Self::Slice<'a> {

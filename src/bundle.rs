@@ -57,11 +57,11 @@ pub unsafe trait Bundle: Copy {
 
 /// A value of the static component `K`.
 #[repr(transparent)]
-pub struct Field<K: Component>(pub K::Value);
+pub struct Field<K: Component>(pub K::Data);
 
 impl<K: Component> Field<K> {
     #[inline(always)]
-    pub const fn new(value: K::Value) -> Self {
+    pub const fn new(value: K::Data) -> Self {
         Self(value)
     }
 }

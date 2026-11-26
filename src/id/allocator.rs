@@ -76,21 +76,21 @@ impl IdAllocator {
             return;
         };
 
-        let dense_idx = dense as usize;
+        let d = dense as usize;
 
         // Do nothing entity if already dead or nonexistent.
-        if dense >= self.alive || self.dense[dense_idx].id != id {
+        if dense >= self.alive || self.dense[d].id != id {
             return;
         }
 
         self.alive -= 1;
         self.sparse[sparse] = self.alive;
-        self.dense[dense_idx].id = id.next_version();
+        self.dense[d].id = id.next_version();
 
         // swap last alive entity with removed entity.
         if dense != self.alive {
-            self.dense.swap(dense_idx, self.alive as usize);
-            self.sparse[self.dense[dense_idx].id.index as usize] = dense;
+            self.dense.swap(d, self.alive as usize);
+            self.sparse[self.dense[d].id.index as usize] = dense;
         }
 
         debug_assert!(!self.is_alive(id), "XECS: IdAllocator corrupted");

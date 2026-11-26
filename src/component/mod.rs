@@ -1,139 +1,19 @@
-use std::{
-    borrow::Borrow,
-    sync::{
-        Arc, LazyLock,
-        atomic::{AtomicU32, Ordering},
-    },
-};
+use std::sync::LazyLock;
 
 use crate::{
     id::allocator::IdRecord,
     macros::declare_id,
+    memory::RowLayout,
     table::Table,
     table_storage::{TableId, TableVec},
     type_meta::{HasMeta, TypeMeta},
+    utils::KeySlot,
 };
 
 pub mod registry;
 pub mod signature;
 
-/// Reserved: `C#<n>` addresses a component by id in string queries, and
-/// is the display form of an unnamed component.
-pub(super) const PREFIX: &str = "C";
-
-#[derive(Clone)]
-pub enum Path {
-    Static(&'static str),
-    Shared(Arc<str>),
-}
-
-impl Path {
-    #[inline]
-    pub fn as_str(&self) -> &str {
-        match self {
-            Path::Static(s) => s,
-            Path::Shared(s) => s,
-        }
-    }
-}
-
-impl std::ops::Deref for Path {
-    type Target = str;
-    #[inline]
-    fn deref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl Borrow<str> for Path {
-    #[inline]
-    fn borrow(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl PartialEq for Path {
-    #[inline]
-    fn eq(&self, other: &Self) -> bool {
-        self.as_str() == other.as_str()
-    }
-}
-
-impl Eq for Path {}
-
-impl std::hash::Hash for Path {
-    #[inline]
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.as_str().hash(state);
-    }
-}
-
-impl std::fmt::Display for Path {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Display::fmt(self.as_str(), f)
-    }
-}
-
-impl std::fmt::Debug for Path {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Debug::fmt(self.as_str(), f)
-    }
-}
-
-impl From<&'static str> for Path {
-    #[inline]
-    fn from(s: &'static str) -> Self {
-        Path::Static(s)
-    }
-}
-
-impl From<String> for Path {
-    #[inline]
-    fn from(s: String) -> Self {
-        Path::Shared(s.into())
-    }
-}
-
-impl From<Arc<str>> for Path {
-    #[inline]
-    fn from(s: Arc<str>) -> Self {
-        Path::Shared(s)
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum ComponentRegisterError {
-    #[error("component path `{0}` is already registered")]
-    DuplicatePath(Path),
-    #[error("component path `{0}` uses the reserved `{PREFIX}` prefix")]
-    ReservedPrefix(Path),
-}
-
-declare_id!(ComponentId, PREFIX);
-
-pub(crate) const NULL_KEY: u32 = u32::MAX;
-
-/// The id slot of one static component, assigned by `static_components`.
-#[derive(Debug)]
-#[repr(transparent)]
-pub struct KeySlot(AtomicU32);
-
-impl KeySlot {
-    #[allow(clippy::new_without_default)]
-    pub const fn new() -> Self {
-        Self(AtomicU32::new(NULL_KEY))
-    }
-
-    #[inline(always)]
-    pub(crate) fn load(&self) -> u32 {
-        self.0.load(Ordering::Relaxed)
-    }
-
-    #[inline(always)]
-    pub(crate) fn store(&self, slot: u32) {
-        self.0.store(slot, Ordering::Relaxed);
-    }
-}
+declare_id!(ComponentId, "C");
 
 #[derive(Debug)]
 pub struct ComponentKey {
@@ -154,25 +34,25 @@ impl ComponentKey {
     /// Panics if this key is not in `STATIC_COMPONENTS`.
     #[inline(always)]
     pub fn id(&self) -> ComponentId {
-        let mut slot = self.slot.load();
-        if slot == NULL_KEY {
-            slot = self.init_slot();
+        match ComponentId::from_raw(self.slot()) {
+            Some(c) => c,
+            None => self.init_id(),
         }
-        // SAFETY: `init_slot` only returns slots below `NULL_KEY`.
-        unsafe { ComponentId::new_unchecked(slot) }
     }
 
     #[cold]
     #[inline(never)]
-    fn init_slot(&self) -> u32 {
+    fn init_id(&self) -> ComponentId {
         static_components();
-        let slot = self.slot.load();
-        assert!(
-            slot != NULL_KEY,
-            "component key `{}` is not in STATIC_COMPONENTS",
-            self.path
-        );
-        slot
+        match ComponentId::from_raw(self.slot()) {
+            Some(c) => c,
+            None => panic!("key `{}` is not in STATIC_COMPONENTS", self.path),
+        }
+    }
+
+    #[inline]
+    pub fn slot(&self) -> u32 {
+        self.slot.load()
     }
 
     #[inline]
@@ -238,7 +118,7 @@ pub static STATIC_COMPONENTS: [&'static ComponentKey];
 
 pub fn static_components() -> &'static [&'static ComponentKey] {
     static SORTED: LazyLock<Box<[&'static ComponentKey]>> = LazyLock::new(|| {
-        assert!(STATIC_COMPONENTS.len() < NULL_KEY as usize, "too many component keys");
+        assert!(STATIC_COMPONENTS.len() < u32::MAX as usize, "too many component keys");
 
         let mut keys: Box<_> = STATIC_COMPONENTS.iter().copied().collect();
 
@@ -253,7 +133,6 @@ pub fn static_components() -> &'static [&'static ComponentKey] {
         });
 
         keys.iter().enumerate().for_each(|(i, k)| k.slot.store(i as u32));
-
         keys.iter().enumerate().for_each(|(i, k)| {
             assert!(
                 k.slot.load() == (i as u32),
@@ -270,56 +149,49 @@ pub fn static_components() -> &'static [&'static ComponentKey] {
 /// A component declared with `schema!`, named by its own type.
 ///
 /// # Safety
-/// `KEY.meta()` describes `Value`.
+/// `KEY.meta()` describes `Data`.
 pub unsafe trait Component: Copy + 'static {
-    type Value: HasMeta;
+    /// Data carried by the component.
+    type Data: HasMeta;
     const KEY: &'static ComponentKey;
+}
 
-    #[inline(always)]
-    fn id() -> ComponentId {
-        Self::KEY.id()
-    }
+#[inline(always)]
+pub fn id<C: Component>() -> ComponentId {
+    C::KEY.id()
 }
 
 #[derive(Debug, Clone)]
-pub struct ComponentConfig {
-    pub path: Option<Path>,
-    pub meta: TypeMeta,
+pub struct ComponentDesc {
+    pub layout: RowLayout,
 }
 
-impl ComponentConfig {
-    pub fn new() -> Self {
-        Self { path: None, meta: TypeMeta::of::<()>() }
+impl ComponentDesc {
+    #[inline(always)]
+    pub fn new<T: HasMeta>() -> Self {
+        Self { layout: RowLayout::of::<T>() }
     }
 
-    pub fn named(path: impl Into<Path>) -> Self {
-        Self {
-            path: Some(path.into()),
-            meta: TypeMeta::of::<()>(),
-        }
-    }
-
-    pub fn path(mut self, path: impl Into<Path>) -> Self {
-        self.path = Some(path.into());
-        self
-    }
-
-    pub fn meta(mut self, meta: TypeMeta) -> Self {
-        self.meta = meta;
-        self
+    #[inline(always)]
+    pub fn from_meta(meta: &TypeMeta) -> Self {
+        Self { layout: meta.layout }
     }
 }
 
 pub struct ComponentInfo {
-    pub path: Path,
-    pub meta: TypeMeta,
+    pub layout: RowLayout,
     pub tables: Vec<TableId>,
 }
 
 impl ComponentInfo {
     #[inline]
-    pub(crate) fn new(path: Path, meta: TypeMeta) -> Self {
-        Self { path, meta, tables: vec![] }
+    pub(crate) fn new(layout: RowLayout) -> Self {
+        Self { layout, tables: vec![] }
+    }
+
+    #[inline]
+    pub(crate) fn from_meta(meta: &TypeMeta) -> Self {
+        Self::new(meta.layout)
     }
 
     pub(crate) fn insert_table(&mut self, table: TableId) {
