@@ -20,6 +20,12 @@ impl<T: HasMeta> Edge<T> {
     }
 }
 
+// `target` is an `Id`: this fails to compile if the field's type changes.
+#[allow(dead_code)]
+fn edge_target_is_id<T: HasMeta>(edge: &Edge<T>) -> &Id {
+    &edge.target
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct EdgeLayout {
     pub(crate) layout: RowLayout,
